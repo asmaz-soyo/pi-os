@@ -13,6 +13,7 @@ kernel = { path = "../../kernel" }
 boot = { path = "../../boot", features = ["semihosting"] }
 pl011 = { path = "../../drivers/pl011" }
 gicv2 = { path = "../../drivers/gicv2" }
+pl061 = { path = "../../drivers/pl061" }
 
 [features]
 # 起動後にわざとパニックする(パニックの報告のスナップショットテスト用)

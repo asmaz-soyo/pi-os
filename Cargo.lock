@@ -40,6 +40,7 @@ dependencies = [
  "kernel",
  "ktest",
  "pl011",
+ "pl061",
 ]
 
 [[package]]
@@ -84,6 +85,13 @@ dependencies = [
 
 [[package]]
 name = "pl011"
+version = "0.1.0"
+dependencies = [
+ "hal",
+]
+
+[[package]]
+name = "pl061"
 version = "0.1.0"
 dependencies = [
  "hal",

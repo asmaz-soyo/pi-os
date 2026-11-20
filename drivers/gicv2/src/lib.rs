@@ -12,6 +12,8 @@ use hal::mmio::Mmio;
 pub const GICD_CTLR: usize = 0x000;
 /// 32 個ずつ、1 を書いたビットの割り込みを有効にする
 pub const GICD_ISENABLER: usize = 0x100;
+/// 1 バイトずつ、割り込みを届ける CPU(ビット 0 = CPU0)。32 番以上(SPI)で設定が要る
+pub const GICD_ITARGETSR: usize = 0x800;
 
 // CPU インターフェースのレジスタ
 pub const GICC_CTLR: usize = 0x000;
@@ -57,6 +59,13 @@ impl<M: Mmio> GicV2<M> {
 
 impl<M: Mmio> IrqController for GicV2<M> {
     fn enable(&mut self, irq: u32) {
+        if irq >= 32 {
+            // SPI は届け先を決めないとどの CPU にも届かない。CPU0 にする
+            let reg = GICD_ITARGETSR + (irq / 4) as usize * 4;
+            let shift = (irq % 4) * 8;
+            let value = self.gicd.read(reg) & !(0xff << shift);
+            self.gicd.write(reg, value | (1 << shift));
+        }
         let reg = GICD_ISENABLER + (irq / 32) as usize * 4;
         self.gicd.write(reg, 1 << (irq % 32));
     }
@@ -96,10 +105,16 @@ mod tests {
     fn enable_sets_the_bit_in_the_right_isenabler_register() {
         let mut gic = gic();
         gic.enable(30);
-        gic.enable(40);
+        assert_eq!(gic.distributor().writes(), [(GICD_ISENABLER, 1 << 30)]);
+    }
+
+    #[test]
+    fn shared_interrupts_are_also_routed_to_cpu0() {
+        let mut gic = gic();
+        gic.enable(39);
         assert_eq!(
             gic.distributor().writes(),
-            [(GICD_ISENABLER, 1 << 30), (GICD_ISENABLER + 4, 1 << 8)]
+            [(GICD_ITARGETSR + 36, 1 << 24), (GICD_ISENABLER + 4, 1 << 7)]
         );
     }
 

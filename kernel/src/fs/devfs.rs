@@ -143,6 +143,17 @@ impl FileSystem for Devfs {
             "/" => Ok(Arc::new(DevDir)),
             "/console" | "/tty" => Ok(self.console.clone()),
             "/null" => Ok(Arc::new(NullFile)),
+            "/gpio" => Ok(Arc::new(DevDir)),
+            other if other.starts_with("/gpio/") => {
+                let line: usize = other[6..].parse().map_err(|_| Errno::ENOENT)?;
+                if line >= crate::gpio::LINES {
+                    return Err(Errno::ENOENT);
+                }
+                Ok(Arc::new(crate::gpio::GpioFile::new(
+                    &crate::gpio::GPIO,
+                    line,
+                )))
+            }
             other => {
                 // 登録されたブロックデバイス(/dev/vda など)
                 let disk =

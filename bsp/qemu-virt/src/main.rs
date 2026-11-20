@@ -14,12 +14,16 @@ use gicv2::GicV2;
 use hal::mmio::MmioRegion;
 use kernel::sync::SpinLock;
 use pl011::Pl011;
+use pl061::Pl061;
 
 // アドレスは QEMU の hw/arm/virt.c より
 const UART_PHYS: usize = 0x0900_0000;
 const UART_CLOCK_HZ: u32 = 24_000_000;
 const GICD_PHYS: usize = 0x0800_0000;
 const GICC_PHYS: usize = 0x0801_0000;
+/// PL061 GPIO(電源ボタンが GPIO 3)。割り込みは SPI 7 = INTID 39
+const GPIO_PHYS: usize = 0x0903_0000;
+const POWER_BUTTON: u32 = 3;
 
 // SAFETY: 各アドレスは virt のデバイス。この static 以外から同じ領域を触らない
 static UART: SpinLock<Pl011<MmioRegion>> =
@@ -38,6 +42,9 @@ const VIRTIO_SLOTS: [usize; 32] = {
     }
     slots
 };
+
+static GPIO_CTRL: SpinLock<Pl061<MmioRegion>> =
+    SpinLock::new(Pl061::new(unsafe { MmioRegion::new(device_va(GPIO_PHYS)) }));
 
 struct Board;
 
@@ -67,6 +74,13 @@ impl boot::Board for Board {
     fn init_devices() {
         UART.lock().init(UART_CLOCK_HZ, 115_200);
         INTC.lock().init();
+        GPIO_CTRL.lock().enable_rising_edge(POWER_BUTTON);
+    }
+
+    const GPIO_IRQ: Option<u32> = Some(39);
+
+    fn gpio_take_pending() -> u32 {
+        GPIO_CTRL.lock().take_pending()
     }
 }
 

@@ -14,6 +14,7 @@ pub const TARGET_CRATES: &[&str] = &[
     "kernel",
     "pl011",
     "virtio-blk",
+    "pl061",
     "arch-aarch64",
     "userland",
     "boot",
@@ -406,11 +407,25 @@ pub const SHELL_SCRIPT: &[(&str, &str)] = &[
     ("$ ", "exit\r"),
 ];
 
-fn shell_script() -> Vec<(String, String)> {
-    SHELL_SCRIPT
+/// virt で GPIO の割り込みを確かめる入力:gpiowait で待ち、QEMU のモニタ(Ctrl-A c)で
+/// 電源ボタンを押し(system_powerdown → PL061 の GPIO 3)、シリアルに戻って exit する
+pub const GPIO_SCRIPT: &[(&str, &str)] = &[
+    ("$ ", "gpiowait\r"),
+    ("waiting for GPIO 3", "\x01c"),
+    ("(qemu) ", "system_powerdown\r"),
+    ("(qemu) ", "\x01c"),
+    ("$ ", "exit\r"),
+];
+
+fn to_script(script: &[(&str, &str)]) -> Vec<(String, String)> {
+    script
         .iter()
         .map(|&(a, b)| (a.to_string(), b.to_string()))
         .collect()
+}
+
+fn shell_script() -> Vec<(String, String)> {
+    to_script(SHELL_SCRIPT)
 }
 
 /// 起動後にわざと異常を起こす feature(`<名前>-demo`)。報告の形をスナップショットで固定する。
@@ -436,6 +451,16 @@ fn snapshot_tests() -> Vec<Step> {
                     .extend(["--features".into(), format!("{demo}-demo")]);
                 steps.push(Step::Run(build));
                 steps.push(snapshot(&format!("-{demo}"), 1));
+            }
+            if bsp == Bsp::QemuVirt {
+                // 電源ボタン(GPIO 3)の割り込み
+                steps.push(Step::Run(kernel_build(bsp)));
+                steps.push(Step::Snapshot {
+                    expected: "tests/snapshots/qemu-virt-gpio.txt".to_string(),
+                    exit_code: 0,
+                    script: to_script(GPIO_SCRIPT),
+                    cmd: bsp.qemu(&bsp.kernel_elf()).with_timeout(30),
+                });
             }
             steps
         })

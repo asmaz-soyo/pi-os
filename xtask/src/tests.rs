@@ -12,11 +12,12 @@ fn clippy(krate: &str) -> String {
     format!("cargo clippy -p {krate} --target aarch64-unknown-none -- -D warnings")
 }
 
-const ALL_TARGET: [&str; 10] = [
+const ALL_TARGET: [&str; 11] = [
     "hal",
     "kernel",
     "pl011",
     "virtio-blk",
+    "pl061",
     "arch-aarch64",
     "userland",
     "boot",
@@ -193,6 +194,12 @@ fn snapshot_plan_checks_boot_panic_and_fault_output_for_each_bsp() {
             snapshot("qemu-virt-panic", 1, "bsp-qemu-virt", VIRT_ARGS),
             build_demo("bsp-qemu-virt", "fault"),
             snapshot("qemu-virt-fault", 1, "bsp-qemu-virt", VIRT_ARGS),
+            build("bsp-qemu-virt"),
+            format!(
+                "snapshot tests/snapshots/qemu-virt-gpio.txt (exit 0, script {:?}) <= timeout 30 \
+                 qemu-system-aarch64 {VIRT_ARGS} -kernel target/aarch64-unknown-none/debug/bsp-qemu-virt",
+                GPIO_SCRIPT
+            ),
             build("bsp-raspi3"),
             snapshot("raspi3", 0, "bsp-raspi3", RASPI3_ARGS),
             build_demo("bsp-raspi3", "panic"),
@@ -339,4 +346,11 @@ fn shell_script_drives_the_shell_and_the_repl() {
     assert_eq!(SHELL_SCRIPT[0], ("$ ", "hello\r"));
     assert_eq!(SHELL_SCRIPT.last(), Some(&("$ ", "exit\r")));
     assert!(SHELL_SCRIPT.contains(&("qjs > ", "1+2\r")));
+}
+
+#[test]
+fn gpio_script_presses_the_power_button_from_the_qemu_monitor() {
+    assert_eq!(GPIO_SCRIPT[0], ("$ ", "gpiowait\r"));
+    assert!(GPIO_SCRIPT.contains(&("(qemu) ", "system_powerdown\r")));
+    assert_eq!(GPIO_SCRIPT.last(), Some(&("$ ", "exit\r")));
 }

@@ -38,6 +38,12 @@ pub trait Board: 'static {
     const TIMER_HZ: u64 = 100;
     /// virtio-mmio の枠の物理アドレス(ないボードは空)
     const VIRTIO_MMIO: &'static [usize] = &[];
+    /// GPIO コントローラの割り込み番号(ないボードは None)
+    const GPIO_IRQ: Option<u32> = None;
+    /// GPIO の割り込みの要因(線のビット)を読んで消す
+    fn gpio_take_pending() -> u32 {
+        0
+    }
 
     type Console: Console + Send;
     type Intc: IrqController + Send;
@@ -217,6 +223,10 @@ impl<B: Board> Handler for Exceptions<B> {
     }
 }
 
+fn gpio_irq<B: Board>() {
+    kernel::gpio::GPIO.record(B::gpio_take_pending());
+}
+
 fn timer_tick() {
     kernel::time::CLOCK.tick(&mut GenericTimer);
     // ほかに動けるタスクがあれば、ユーザーに戻るときに切り替える(プリエンプション)
@@ -230,6 +240,12 @@ fn start_timer<B: Board>() {
         .register(B::TIMER_IRQ, timer_tick)
         .expect("timer irq number is valid");
     B::intc().lock().enable(B::TIMER_IRQ);
+    if let Some(irq) = B::GPIO_IRQ {
+        kernel::irq::IRQS
+            .register(irq, gpio_irq::<B>)
+            .expect("gpio irq number is valid");
+        B::intc().lock().enable(irq);
+    }
     kernel::time::CLOCK.start(&mut GenericTimer, B::TIMER_HZ);
     kernel::time::set_counter(arch_aarch64::cpu::counter, GenericTimer.frequency());
     arch_aarch64::cpu::enable_irq();
