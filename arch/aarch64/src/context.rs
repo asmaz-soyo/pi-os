@@ -46,7 +46,7 @@ pub unsafe fn enter_user_noreturn(frame: &TrapFrame) -> ! {
 }
 
 /// スケジューラ用の文脈の並び(`kernel::sched::SavedContext::regs` の中身)。
-/// [0..12] = x19〜x30、[12] = SP。
+/// [0..12] = x19〜x30、[12] = SP、[13..21] = d8〜d15(呼び出し規約で保存すべき FP レジスタ)。
 const CTX_X19: usize = 0;
 const CTX_X20: usize = 1;
 const CTX_X21: usize = 2;
@@ -57,15 +57,15 @@ const CTX_SP: usize = 12;
 ///
 /// # Safety
 /// `to` は `switch` で保存したか、`new_thread_context` で作った文脈であること。
-pub unsafe fn switch(from: *mut [u64; 16], to: *const [u64; 16]) {
+pub unsafe fn switch(from: *mut [u64; 24], to: *const [u64; 24]) {
     // SAFETY: 呼び出し元が保証する
     unsafe { arch_switch_context(from.cast(), to.cast()) }
 }
 
 /// `stack_top` のスタックで `entry(arg)` から始まる文脈。`entry` が戻ったら `exit()` を呼ぶ。
 /// 始まるときに IRQ を許可する。
-pub fn new_thread_context(stack_top: usize, entry: fn(usize), arg: usize, exit: fn()) -> [u64; 16] {
-    let mut regs = [0u64; 16];
+pub fn new_thread_context(stack_top: usize, entry: fn(usize), arg: usize, exit: fn()) -> [u64; 24] {
+    let mut regs = [0u64; 24];
     regs[CTX_X19] = entry as usize as u64;
     regs[CTX_X20] = arg as u64;
     regs[CTX_X21] = exit as usize as u64;
@@ -110,13 +110,13 @@ arch_enter_user:
     mov     x2, sp
     str     x2, [x0, #96]
     // トラップフレームをスタックに写し、例外の復帰経路から EL0 へ戻る
-    sub     sp, sp, #304
+    sub     sp, sp, #832
     mov     x2, #0
 1:
     ldr     x3, [x1, x2]
     str     x3, [sp, x2]
     add     x2, x2, #8
-    cmp     x2, #304
+    cmp     x2, #832
     b.lo    1b
     b       exception_return
 
@@ -139,13 +139,13 @@ arch_enter_user_frame:
     // x0 = frame。保存はしない(タスクのスタックの上で EL0 に入り、戻らない)
     msr     daifset, #2
     mov     x1, x0
-    sub     sp, sp, #304
+    sub     sp, sp, #832
     mov     x2, #0
 2:
     ldr     x3, [x1, x2]
     str     x3, [sp, x2]
     add     x2, x2, #8
-    cmp     x2, #304
+    cmp     x2, #832
     b.lo    2b
     b       exception_return
 
@@ -160,6 +160,14 @@ arch_switch_context:
     stp     x29, x30, [x0, #80]
     mov     x9, sp
     str     x9, [x0, #96]
+    stp     d8, d9, [x0, #104]
+    stp     d10, d11, [x0, #120]
+    stp     d12, d13, [x0, #136]
+    stp     d14, d15, [x0, #152]
+    ldp     d8, d9, [x1, #104]
+    ldp     d10, d11, [x1, #120]
+    ldp     d12, d13, [x1, #136]
+    ldp     d14, d15, [x1, #152]
     ldp     x19, x20, [x1, #0]
     ldp     x21, x22, [x1, #16]
     ldp     x23, x24, [x1, #32]

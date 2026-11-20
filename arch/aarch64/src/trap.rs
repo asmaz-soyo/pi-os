@@ -25,11 +25,15 @@ pub struct TrapFrame {
     pub tpidr_el0: u64,
     /// 16 バイト境界にそろえるための詰め物
     pub _pad: u64,
+    /// FP/SIMD のレジスタ q0〜q31(ユーザーの浮動小数点の値。カーネルも SIMD を使うので保存する)
+    pub q: [u128; 32],
+    pub fpcr: u64,
+    pub fpsr: u64,
 }
 
 impl TrapFrame {
     /// アセンブリが確保するバイト数。
-    pub const SIZE: usize = 38 * 8;
+    pub const SIZE: usize = 38 * 8 + 32 * 16 + 16;
 }
 
 impl fmt::Display for TrapFrame {
@@ -68,7 +72,10 @@ mod tests {
         assert_eq!(core::mem::offset_of!(TrapFrame, esr), 34 * 8);
         assert_eq!(core::mem::offset_of!(TrapFrame, far), 35 * 8);
         assert_eq!(core::mem::offset_of!(TrapFrame, tpidr_el0), 36 * 8);
-        assert_eq!(TrapFrame::SIZE, 38 * 8);
+        assert_eq!(core::mem::offset_of!(TrapFrame, q), 38 * 8);
+        assert_eq!(core::mem::offset_of!(TrapFrame, fpcr), 38 * 8 + 512);
+        assert_eq!(core::mem::offset_of!(TrapFrame, fpsr), 38 * 8 + 520);
+        assert_eq!(TrapFrame::SIZE, 38 * 8 + 528);
     }
 
     #[test]

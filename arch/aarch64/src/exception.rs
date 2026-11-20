@@ -91,12 +91,12 @@ pub fn unhandled(kind: u64, frame: &TrapFrame) -> ! {
 /// カーネル実行中の同期例外を表す `kind`(`unhandled` に渡す)。
 pub const KIND_SYNC_CURRENT_EL: u64 = 4;
 
-// TrapFrame::SIZE = 304。並びは trap.rs の TrapFrame と同じ(ホストのテストで確かめている)。
+// TrapFrame::SIZE = 832。並びは trap.rs の TrapFrame と同じ(ホストのテストで確かめている)。
 core::arch::global_asm!(
     r#"
 .macro VECTOR kind
     .balign 0x80
-    sub     sp, sp, #304
+    sub     sp, sp, #832
     stp     x0, x1, [sp, #0]
     mov     x0, #\kind
     b       exception_common
@@ -149,6 +149,28 @@ exception_common:
     mrs     x2, far_el1
     mrs     x3, tpidr_el0
     stp     x2, x3, [sp, #280]
+    // FP/SIMD のレジスタ(オフセット 304〜)
+    add     x2, sp, #304
+    stp     q0, q1, [x2, #0]
+    stp     q2, q3, [x2, #32]
+    stp     q4, q5, [x2, #64]
+    stp     q6, q7, [x2, #96]
+    stp     q8, q9, [x2, #128]
+    stp     q10, q11, [x2, #160]
+    stp     q12, q13, [x2, #192]
+    stp     q14, q15, [x2, #224]
+    stp     q16, q17, [x2, #256]
+    stp     q18, q19, [x2, #288]
+    stp     q20, q21, [x2, #320]
+    stp     q22, q23, [x2, #352]
+    stp     q24, q25, [x2, #384]
+    stp     q26, q27, [x2, #416]
+    stp     q28, q29, [x2, #448]
+    stp     q30, q31, [x2, #480]
+    mrs     x3, fpcr
+    mrs     x4, fpsr
+    add     x2, x2, #512
+    stp     x3, x4, [x2]
 
     mov     x1, sp
     bl      arch_exception_entry
@@ -165,6 +187,27 @@ exception_return:
     msr     spsr_el1, x2
     ldr     x2, [sp, #288]
     msr     tpidr_el0, x2
+    add     x2, sp, #304
+    ldp     q0, q1, [x2, #0]
+    ldp     q2, q3, [x2, #32]
+    ldp     q4, q5, [x2, #64]
+    ldp     q6, q7, [x2, #96]
+    ldp     q8, q9, [x2, #128]
+    ldp     q10, q11, [x2, #160]
+    ldp     q12, q13, [x2, #192]
+    ldp     q14, q15, [x2, #224]
+    ldp     q16, q17, [x2, #256]
+    ldp     q18, q19, [x2, #288]
+    ldp     q20, q21, [x2, #320]
+    ldp     q22, q23, [x2, #352]
+    ldp     q24, q25, [x2, #384]
+    ldp     q26, q27, [x2, #416]
+    ldp     q28, q29, [x2, #448]
+    ldp     q30, q31, [x2, #480]
+    add     x2, x2, #512
+    ldp     x3, x4, [x2]
+    msr     fpcr, x3
+    msr     fpsr, x4
     ldp     x0, x1, [sp, #0]
     ldp     x2, x3, [sp, #16]
     ldp     x4, x5, [sp, #32]
@@ -181,7 +224,7 @@ exception_return:
     ldp     x26, x27, [sp, #208]
     ldp     x28, x29, [sp, #224]
     ldr     x30, [sp, #240]
-    add     sp, sp, #304
+    add     sp, sp, #832
     eret
 "#
 );

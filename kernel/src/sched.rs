@@ -63,7 +63,7 @@ impl RunQueue {
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SavedContext {
-    pub regs: [u64; 16],
+    pub regs: [u64; 24],
 }
 
 /// 新しいスレッドの文脈を作る関数:`(スタックの一番上, entry, arg, exit)`
