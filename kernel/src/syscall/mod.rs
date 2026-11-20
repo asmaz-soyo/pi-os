@@ -23,6 +23,7 @@ pub mod nr {
     pub const WRITE: u64 = 64;
     pub const READV: u64 = 65;
     pub const WRITEV: u64 = 66;
+    pub const READLINKAT: u64 = 78;
     pub const NEWFSTATAT: u64 = 79;
     pub const FSTAT: u64 = 80;
     pub const EXIT: u64 = 93;
@@ -115,6 +116,7 @@ table! {
     nr::WRITE, "write", 3 => |p, a| result(fs::write(p, a[0], a[1], a[2]));
     nr::READV, "readv", 3 => |p, a| result(fs::readv(p, a[0], a[1], a[2]));
     nr::WRITEV, "writev", 3 => |p, a| result(fs::writev(p, a[0], a[1], a[2]));
+    nr::READLINKAT, "readlinkat", 4 => |p, a| result(fs::readlinkat(p, a[0], a[1]));
     nr::NEWFSTATAT, "newfstatat", 4 => |p, a| result(fs::newfstatat(p, a[0], a[1], a[2], a[3]));
     nr::FSTAT, "fstat", 2 => |p, a| result(fs::fstat(p, a[0], a[1]));
     nr::EXIT, "exit", 1 => |p, a| Action::Exit(proc::exit_status(a[0]));

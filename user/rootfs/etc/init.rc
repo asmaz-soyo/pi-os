@@ -1,3 +1,4 @@
 # 起動時に上から順に実行するコマンド(プログラムのパスと引数)
 /bin/hello
 /bin/hello_musl
+/bin/qjs /hello.js

@@ -70,11 +70,15 @@ macro_rules! common_tests {
             }
             static TEST: Test = Test;
 
+            // 差し替えている間に来たタイマ割り込みを Test が無視すると、割り込みが下がらず
+            // 入り直し続けて先に進めない。IRQ を止めておく(brk は同期例外なので届く)
+            arch_aarch64::cpu::disable_irq();
             let previous = exception::set_handler(Some(&TEST));
             let mut x0: u64 = 5;
             // SAFETY: brk は例外を起こすだけ。ハンドラが次の命令に戻す
             unsafe { core::arch::asm!("brk #42", inout("x0") x0) };
             exception::set_handler(previous);
+            arch_aarch64::cpu::enable_irq();
 
             assert_eq!(HITS.load(Ordering::SeqCst), 1);
             assert_eq!(x0, 99);
@@ -164,6 +168,12 @@ macro_rules! common_tests {
         #[test_case]
         fn missing_program_is_enoent() {
             assert_eq!(boot::run_program("/bin/nope", &[b"nope"]), Err(kernel::Errno::ENOENT));
+        }
+
+        #[test_case]
+        fn quickjs_evaluates_javascript() {
+            let argv: [&[u8]; 4] = [b"qjs", b"--std", b"-e", b"std.exit(6 * 7)"];
+            assert_eq!(boot::run_program("/bin/qjs", &argv), Ok(42));
         }
 
         #[test_case]

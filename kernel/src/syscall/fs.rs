@@ -259,3 +259,10 @@ pub fn getcwd(p: &mut Process, buf: u64, size: u64) -> Result<u64, Errno> {
     p.mem.copy_to_user(VirtAddr(buf), &bytes)?;
     Ok(bytes.len() as u64)
 }
+
+/// readlinkat(dirfd, path, buf, size)。シンボリックリンクはまだないので、あるパスなら EINVAL。
+pub fn readlinkat(p: &mut Process, dirfd: u64, path: u64) -> Result<u64, Errno> {
+    let path = path_arg(p, dirfd, path)?;
+    p.vfs.lookup(&path)?;
+    Err(Errno::EINVAL)
+}

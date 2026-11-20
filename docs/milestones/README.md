@@ -8,4 +8,4 @@
 | [M3 メモリ管理](m3-mm.md) | 完了 | `m3-mm` |
 | [M4 ユーザープロセス](m4-user.md) | 完了 | `m4-user` |
 | [M5 最小のLinux互換+initramfs](m5-linux.md) | 完了(互換テストは未) | `m5-linux` |
-| M6 QuickJS | 未着手 | `m6-qjs` |
+| [M6 QuickJS](m6-qjs.md) | 完了(実機確認は未) | `m6-qjs` |

@@ -1,7 +1,8 @@
 //! initramfs(tar)を作る。
 //!
 //! 1. `programs/` のユーザープログラムを zig でビルドする(aarch64-linux-musl の静的リンク)→ `/bin/<名前>`
-//! 2. `rootfs/` の下のファイルをそのまま入れる(`rootfs/etc/motd` → `/etc/motd`)
+//! 2. `third_party/quickjs/` から QuickJS の `qjs` をビルドする → `/bin/qjs`
+//! 3. `rootfs/` の下のファイルをそのまま入れる(`rootfs/etc/motd` → `/etc/motd`)
 //!
 //! できた tar は `src/lib.rs` が `include_bytes!` でカーネルに埋め込む。
 
@@ -13,6 +14,7 @@ fn main() {
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     println!("cargo:rerun-if-changed=programs");
     println!("cargo:rerun-if-changed=rootfs");
+    println!("cargo:rerun-if-changed=third_party");
     println!("cargo:rerun-if-env-changed=ZIG");
 
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
@@ -23,6 +25,8 @@ fn main() {
             files.push((format!("bin/{name}"), std::fs::read(&bin).unwrap()));
         }
     }
+    let qjs = build_quickjs(&root.join("third_party/quickjs"), &out);
+    files.push(("bin/qjs".to_string(), std::fs::read(qjs).unwrap()));
     collect(&root.join("rootfs"), "", &mut files);
     std::fs::write(out.join("initramfs.tar"), tar(&files)).unwrap();
 }
@@ -48,10 +52,79 @@ fn collect(dir: &Path, prefix: &str, files: &mut Vec<(String, Vec<u8>)>) {
     }
 }
 
+fn zig(out: &Path) -> Command {
+    let zig = std::env::var("ZIG").unwrap_or_else(|_| "zig".to_string());
+    let mut cmd = Command::new(zig);
+    // zig のキャッシュはビルドディレクトリの中に置く
+    cmd.env("ZIG_LOCAL_CACHE_DIR", out.join("zig-cache"));
+    cmd.env("ZIG_GLOBAL_CACHE_DIR", out.join("zig-global-cache"));
+    cmd
+}
+
+fn run(mut cmd: Command, what: &str) {
+    let status = cmd
+        .status()
+        .unwrap_or_else(|e| panic!("{what}: failed to start (is zig installed?): {e}"));
+    assert!(status.success(), "{what} failed");
+}
+
+/// QuickJS の `qjs` をビルドする(Makefile の QJS_OBJS と同じ組み合わせ)。
+fn build_quickjs(src: &Path, out: &Path) -> PathBuf {
+    let version = std::fs::read_to_string(src.join("VERSION")).unwrap();
+    let defines = [
+        "-D_GNU_SOURCE".to_string(),
+        format!("-DCONFIG_VERSION=\"{}\"", version.trim()),
+    ];
+    let flags = ["-O2", "-fwrapv", "-funsigned-char", "-w"];
+    let lib = [
+        "quickjs.c",
+        "dtoa.c",
+        "libregexp.c",
+        "libunicode.c",
+        "cutils.c",
+        "quickjs-libc.c",
+    ];
+
+    // 1. ホスト向けの qjsc で repl.js をバイトコード(repl.c)にする
+    let qjsc = out.join("qjsc-host");
+    let mut cmd = zig(out);
+    cmd.arg("cc")
+        .args(flags)
+        .args(&defines)
+        .arg("-o")
+        .arg(&qjsc);
+    cmd.arg(src.join("qjsc.c"));
+    cmd.args(lib.iter().map(|f| src.join(f)));
+    cmd.arg("-lm");
+    run(cmd, "building qjsc for the host");
+    let repl = out.join("repl.c");
+    let mut cmd = Command::new(&qjsc);
+    cmd.current_dir(src)
+        .args(["-s", "-c", "-o"])
+        .arg(&repl)
+        .args(["-m", "repl.js"]);
+    run(cmd, "generating repl.c with qjsc");
+
+    // 2. aarch64-linux-musl の静的リンクで qjs を作る
+    let qjs = out.join("qjs");
+    let mut cmd = zig(out);
+    cmd.args(["cc", "-target", "aarch64-linux-musl", "-static", "-s"]);
+    cmd.args(flags)
+        .args(&defines)
+        .arg("-I")
+        .arg(src)
+        .arg("-o")
+        .arg(&qjs);
+    cmd.arg(src.join("qjs.c")).arg(&repl);
+    cmd.args(lib.iter().map(|f| src.join(f)));
+    cmd.arg("-lm");
+    run(cmd, "building qjs for aarch64-linux-musl");
+    qjs
+}
+
 /// `src`(.S か .c)を `bin` にビルドする。それ以外の拡張子なら false。
 fn build_program(src: &Path, bin: &Path, out: &Path) -> bool {
-    let zig = std::env::var("ZIG").unwrap_or_else(|_| "zig".to_string());
-    let mut cmd = Command::new(&zig);
+    let mut cmd = zig(out);
     cmd.args([
         "cc",
         "-target",
@@ -67,13 +140,7 @@ fn build_program(src: &Path, bin: &Path, out: &Path) -> bool {
         _ => return false,
     };
     cmd.arg("-o").arg(bin).arg(src);
-    // zig のキャッシュはビルドディレクトリの中に置く
-    cmd.env("ZIG_LOCAL_CACHE_DIR", out.join("zig-cache"));
-    cmd.env("ZIG_GLOBAL_CACHE_DIR", out.join("zig-global-cache"));
-    let status = cmd
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run `{zig}` (is zig installed?): {e}"));
-    assert!(status.success(), "building {} failed", src.display());
+    run(cmd, &format!("building {}", src.display()));
     true
 }
 

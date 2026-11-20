@@ -240,3 +240,27 @@ fn trace_line_shows_name_arguments_and_result() {
     let line = trace_line(s, &[9, 0, 1, 0, 0, 0], Errno::EBADF.as_syscall_return());
     assert_eq!(line, "[trace] read(0x9, 0x0, 0x1) = -9 (EBADF)");
 }
+
+#[test]
+fn readlinkat_on_files_without_links_is_einval_or_enoent() {
+    let (mut p, _) = process();
+    put(&mut p, SCRATCH + 0x200, b"/etc/motd\0");
+    let at_fdcwd = -100i64 as u64;
+    assert_eq!(
+        call(
+            &mut p,
+            nr::READLINKAT,
+            [at_fdcwd, SCRATCH + 0x200, SCRATCH, 64, 0, 0]
+        ),
+        err(Errno::EINVAL)
+    );
+    put(&mut p, SCRATCH + 0x200, b"/nope\0");
+    assert_eq!(
+        call(
+            &mut p,
+            nr::READLINKAT,
+            [at_fdcwd, SCRATCH + 0x200, SCRATCH, 64, 0, 0]
+        ),
+        err(Errno::ENOENT)
+    );
+}

@@ -22,13 +22,19 @@ Hello from musl! argc=1 argv[0]=/bin/hello_musl
 Welcome to Pi-OS!
 malloc ok
 init: /bin/hello_musl exited with status 0
+Hello from JS
+init: /bin/qjs exited with status 0
 ```
+
+フェーズ1のゴール(自作 OS 上で `qjs hello.js` が「Hello from JS」を出す)は、QEMU で達成した。
 
 ## 必要なもの
 
 - Ubuntu、`qemu-system-arm`(`qemu-system-aarch64`)、`gdb-multiarch`
 - rustup(`rust-toolchain.toml` の nightly とターゲットが自動で入る)
-- zig 0.17(ユーザープログラムを aarch64-linux-musl の静的リンクでビルドする)
+- zig 0.17(ユーザープログラムと QuickJS を aarch64-linux-musl の静的リンクでビルドする)
+
+QuickJS のソースは `user/third_party/quickjs/`(MIT ライセンス)にある。
 
 ## 使い方
 
