@@ -19,6 +19,7 @@ pub mod process;
 pub mod sync;
 pub mod syscall;
 pub mod time;
+pub mod tty;
 
 pub use errno::Errno;
 

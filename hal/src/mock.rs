@@ -9,6 +9,7 @@ use std::vec::Vec;
 #[derive(Debug, Default)]
 pub struct MockConsole {
     output: Vec<u8>,
+    input: VecDeque<u8>,
 }
 
 impl MockConsole {
@@ -20,11 +21,20 @@ impl MockConsole {
     pub fn output(&self) -> &[u8] {
         &self.output
     }
+
+    /// 入力として届いたことにするバイト列を足す。
+    pub fn push_input(&mut self, bytes: &[u8]) {
+        self.input.extend(bytes);
+    }
 }
 
 impl Console for MockConsole {
     fn write_bytes(&mut self, buf: &[u8]) {
         self.output.extend_from_slice(buf);
+    }
+
+    fn read_byte(&mut self) -> Option<u8> {
+        self.input.pop_front()
     }
 }
 
@@ -82,6 +92,16 @@ mod tests {
         let mut con = MockConsole::new();
         con.write_bytes(b"Hello");
         assert_eq!(con.output(), b"Hello");
+    }
+
+    #[test]
+    fn queued_input_is_read_byte_by_byte() {
+        let mut con = MockConsole::new();
+        assert_eq!(con.read_byte(), None);
+        con.push_input(b"hi");
+        assert_eq!(con.read_byte(), Some(b'h'));
+        assert_eq!(con.read_byte(), Some(b'i'));
+        assert_eq!(con.read_byte(), None);
     }
 
     #[test]

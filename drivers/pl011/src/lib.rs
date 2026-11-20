@@ -17,6 +17,7 @@ pub const CR: usize = 0x30; // 制御(有効化、送受信の許可)
 pub const ICR: usize = 0x44; // 割り込みのクリア
 
 // ビット
+pub const FR_RXFE: u32 = 1 << 4; // 受信 FIFO が空
 pub const FR_TXFF: u32 = 1 << 5; // 送信 FIFO が満杯
 pub const LCR_H_FEN: u32 = 1 << 4; // FIFO を使う
 pub const LCR_H_WLEN_8: u32 = 0b11 << 5; // 8 ビット
@@ -76,6 +77,14 @@ impl<M: Mmio> Console for Pl011<M> {
             }
             self.put(byte);
         }
+    }
+
+    fn read_byte(&mut self) -> Option<u8> {
+        if self.regs.read(FR) & FR_RXFE != 0 {
+            return None;
+        }
+        // DR の 8〜11 ビットは受信エラー(フレーミング、パリティなど)の印。データは下位 8 ビット
+        Some(self.regs.read(DR) as u8)
     }
 }
 
@@ -139,5 +148,24 @@ mod tests {
         uart.write_bytes(b"A");
         assert_eq!(uart.regs().reads_of(FR), 3);
         assert_eq!(uart.regs().writes(), [(DR, b'A' as u32)]);
+    }
+
+    #[test]
+    fn read_returns_nothing_while_the_receive_fifo_is_empty() {
+        let mut mmio = FakeMmio::new();
+        mmio.queue_reads(FR, &[FR_RXFE]);
+        let mut uart = Pl011::new(mmio);
+        assert_eq!(uart.read_byte(), None);
+        assert_eq!(uart.regs().reads_of(DR), 0);
+    }
+
+    #[test]
+    fn read_takes_one_byte_from_the_data_register() {
+        let mut mmio = FakeMmio::new();
+        mmio.queue_reads(FR, &[0]);
+        // 上位のビットは受信エラーの印なので、下位 8 ビットだけを使う
+        mmio.queue_reads(DR, &[0x0f00 | b'a' as u32]);
+        let mut uart = Pl011::new(mmio);
+        assert_eq!(uart.read_byte(), Some(b'a'));
     }
 }
