@@ -50,6 +50,37 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn brk_traps_to_handler_which_can_edit_registers_and_resume() {
+            use arch_aarch64::esr::ExceptionClass;
+            use arch_aarch64::exception::{self, Handler};
+            use arch_aarch64::trap::TrapFrame;
+            use core::sync::atomic::{AtomicUsize, Ordering};
+
+            static HITS: AtomicUsize = AtomicUsize::new(0);
+            struct Test;
+            impl Handler for Test {
+                fn synchronous(&self, frame: &mut TrapFrame) {
+                    assert_eq!(ExceptionClass::from_esr(frame.esr), ExceptionClass::Brk);
+                    assert_eq!(frame.x[0], 5);
+                    frame.x[0] = 99;
+                    frame.elr += 4; // brk の次の命令から再開する
+                    HITS.fetch_add(1, Ordering::SeqCst);
+                }
+                fn irq(&self, _frame: &mut TrapFrame) {}
+            }
+            static TEST: Test = Test;
+
+            let previous = exception::set_handler(Some(&TEST));
+            let mut x0: u64 = 5;
+            // SAFETY: brk は例外を起こすだけ。ハンドラが次の命令に戻す
+            unsafe { core::arch::asm!("brk #42", inout("x0") x0) };
+            exception::set_handler(previous);
+
+            assert_eq!(HITS.load(Ordering::SeqCst), 1);
+            assert_eq!(x0, 99);
+        }
+
+        #[test_case]
         fn fp_simd_is_usable() {
             let x = core::hint::black_box(1.5f64);
             assert_eq!(x * 2.0, 3.0);

@@ -20,7 +20,7 @@ pub const TARGET_CRATES: &[&str] = &[
 ];
 
 /// ホストではビルドできない(`TARGET` 専用の)クレート。ホストのテストと clippy から外す。
-pub const TARGET_ONLY_CRATES: &[&str] = &["arch-aarch64", "ktest", "bsp-qemu-virt", "bsp-raspi3"];
+pub const TARGET_ONLY_CRATES: &[&str] = &["ktest", "bsp-qemu-virt", "bsp-raspi3"];
 
 pub const USAGE: &str = "usage: cargo xtask <build | run [--bsp <bsp>] | \
                          test [--bsp <bsp> | --snapshot] | ci>\n  bsp: qemu-virt, raspi3";
@@ -276,9 +276,10 @@ fn kernel_build(bsp: Bsp) -> Cmd {
     Cmd::cargo(&["build", "-p", bsp.crate_name(), "--target", TARGET])
 }
 
-/// 各 BSP で「通常の起動」と「パニックの報告」の UART 出力を確かめる。
-///
-/// パニックの報告は、`panic-demo` feature を付けてビルドすると起動後にわざとパニックする。
+/// 起動後にわざと異常を起こす feature(`<名前>-demo`)。報告の形をスナップショットで固定する。
+pub const DEMOS: &[&str] = &["panic", "fault"];
+
+/// 各 BSP で「通常の起動」と、各デモ(パニック、未処理の例外)の UART 出力を確かめる。
 fn snapshot_tests() -> Vec<Step> {
     Bsp::ALL
         .iter()
@@ -288,16 +289,16 @@ fn snapshot_tests() -> Vec<Step> {
                 exit_code,
                 cmd: bsp.qemu(&bsp.kernel_elf()).with_timeout(30),
             };
-            let mut panic_demo = kernel_build(bsp);
-            panic_demo
-                .args
-                .extend(["--features".into(), "panic-demo".into()]);
-            [
-                Step::Run(kernel_build(bsp)),
-                snapshot("", 0),
-                Step::Run(panic_demo),
-                snapshot("-panic", 1),
-            ]
+            let mut steps = vec![Step::Run(kernel_build(bsp)), snapshot("", 0)];
+            for demo in DEMOS {
+                let mut build = kernel_build(bsp);
+                build
+                    .args
+                    .extend(["--features".into(), format!("{demo}-demo")]);
+                steps.push(Step::Run(build));
+                steps.push(snapshot(&format!("-{demo}"), 1));
+            }
+            steps
         })
         .collect()
 }
@@ -348,8 +349,13 @@ pub fn compare_snapshot(expected: &str, actual: &str) -> Result<(), String> {
         .zip(lines.iter().map(Some).chain(std::iter::repeat(None)))
         .position(|(p, l)| !l.is_some_and(|l| line_matches(p, l)))
         .unwrap_or(patterns.iter().take_while(|&&p| p != "...").count());
+    let hint = if patterns.contains(&"...") && patterns.get(line) == Some(&"...") {
+        " (somewhere after a `...` line; compare the full output)"
+    } else {
+        ""
+    };
     Err(format!(
-        "snapshot mismatch at line {}\n  expected: {}\n  actual:   {}\n--- full output ---\n{actual}",
+        "snapshot mismatch at line {}{hint}\n  expected: {}\n  actual:   {}\n--- full output ---\n{actual}",
         line + 1,
         patterns.get(line).unwrap_or(&"<end of pattern>"),
         lines.get(line).unwrap_or(&"<end of output>"),

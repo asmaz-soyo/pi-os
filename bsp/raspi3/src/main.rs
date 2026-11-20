@@ -22,7 +22,9 @@ static UART: SpinLock<Pl011<MmioRegion>> =
 
 /// `arch_aarch64::boot` の `_start` から呼ばれる。`dtb` はデバイスツリーのアドレス。
 #[unsafe(no_mangle)]
+#[cfg_attr(feature = "panic-demo", allow(unreachable_code))]
 extern "C" fn kernel_main(_dtb: usize) -> ! {
+    arch_aarch64::exception::init();
     UART.lock().init(UART_CLOCK_HZ, 115_200);
     kernel::console::set_console(&UART);
 
@@ -32,7 +34,11 @@ extern "C" fn kernel_main(_dtb: usize) -> ! {
     kernel::kmain("raspi3");
     #[cfg(feature = "panic-demo")]
     panic!("panic demo");
-    #[cfg(not(feature = "panic-demo"))]
+    #[cfg(feature = "fault-demo")]
+    // SAFETY: 未定義命令で例外を起こすだけ(未処理なのでパニックになる)
+    unsafe {
+        core::arch::asm!("udf #0")
+    };
     arch_aarch64::semihosting::exit(0)
 }
 

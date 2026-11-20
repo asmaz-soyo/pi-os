@@ -14,6 +14,8 @@ pl011 = { path = "../../drivers/pl011" }
 [features]
 # 起動後にわざとパニックする(パニックの報告のスナップショットテスト用)
 panic-demo = []
+# 起動後にわざと未定義命令を実行する(未処理の例外の報告のスナップショットテスト用)
+fault-demo = []
 
 [dev-dependencies]
 ktest = { path = "../../ktest" }

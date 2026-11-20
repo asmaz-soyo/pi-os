@@ -21,8 +21,7 @@ const ALL_TARGET: [&str; 7] = [
     "bsp-qemu-virt",
     "bsp-raspi3",
 ];
-const EXCLUDES: &str =
-    "--exclude arch-aarch64 --exclude ktest --exclude bsp-qemu-virt --exclude bsp-raspi3";
+const EXCLUDES: &str = "--exclude ktest --exclude bsp-qemu-virt --exclude bsp-raspi3";
 const VIRT_ARGS: &str = "-M virt -cpu cortex-a53 -m 128M -nographic -semihosting";
 const RASPI3_ARGS: &str = "-M raspi3b -nographic -semihosting";
 const KERNEL8_IMG: &str = "llvm-objcopy -O binary target/aarch64-unknown-none/debug/bsp-raspi3 \
@@ -46,8 +45,8 @@ fn snapshot(name: &str, exit: i32, krate: &str, args: &str) -> String {
     )
 }
 
-fn build_panic_demo(krate: &str) -> String {
-    format!("cargo build -p {krate} --target aarch64-unknown-none --features panic-demo")
+fn build_demo(krate: &str, demo: &str) -> String {
+    format!("cargo build -p {krate} --target aarch64-unknown-none --features {demo}-demo")
 }
 
 fn all_builds() -> Vec<String> {
@@ -147,18 +146,22 @@ fn qemu_runner_ends_with_kernel_flag_so_cargo_appends_the_elf() {
 }
 
 #[test]
-fn snapshot_plan_checks_boot_and_panic_output_for_each_bsp() {
+fn snapshot_plan_checks_boot_panic_and_fault_output_for_each_bsp() {
     assert_eq!(
         displays(&plan(Task::Test(TestKind::Snapshot))),
         [
             build("bsp-qemu-virt"),
             snapshot("qemu-virt", 0, "bsp-qemu-virt", VIRT_ARGS),
-            build_panic_demo("bsp-qemu-virt"),
+            build_demo("bsp-qemu-virt", "panic"),
             snapshot("qemu-virt-panic", 1, "bsp-qemu-virt", VIRT_ARGS),
+            build_demo("bsp-qemu-virt", "fault"),
+            snapshot("qemu-virt-fault", 1, "bsp-qemu-virt", VIRT_ARGS),
             build("bsp-raspi3"),
             snapshot("raspi3", 0, "bsp-raspi3", RASPI3_ARGS),
-            build_panic_demo("bsp-raspi3"),
+            build_demo("bsp-raspi3", "panic"),
             snapshot("raspi3-panic", 1, "bsp-raspi3", RASPI3_ARGS),
+            build_demo("bsp-raspi3", "fault"),
+            snapshot("raspi3-fault", 1, "bsp-raspi3", RASPI3_ARGS),
         ]
     );
 }

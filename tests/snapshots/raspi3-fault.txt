@@ -1,0 +1,17 @@
+Pi-OS booting on raspi3
+Hello from Pi-OS
+
+!!! KERNEL PANIC !!!
+panicked at arch/aarch64/src/exception.rs:{..}
+unhandled synchronous exception from current EL
+exception: unknown reason (undefined instruction?)
+  ELR = 0x{..}  SPSR = 0x{..}  ESR = 0x0000000002000000  FAR = 0x{..}
+  x0  = 0x{..}  x1  = 0x{..}
+...
+  x30 = 0x{..}  SP_EL0 = 0x{..}
+
+registers:
+  CurrentEL = 1  SP = 0x{..}  FP = 0x{..}  LR = 0x{..}
+backtrace:
+...
+end of backtrace
