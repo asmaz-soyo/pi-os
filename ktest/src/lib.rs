@@ -250,6 +250,13 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn service_manager_runs_startup_periodic_and_restarting_services() {
+            let argv: [&[u8]; 2] = [b"svcman", b"/etc/svcman-test.conf"];
+            // startup 1 回 + 周期 3 回 + 失敗して起動し直し 3 回 = 7
+            assert_eq!(boot::run_program("/bin/svcman", &argv), Ok(7));
+        }
+
+        #[test_case]
         fn fp_simd_is_usable() {
             let x = core::hint::black_box(1.5f64);
             assert_eq!(x * 2.0, 3.0);
