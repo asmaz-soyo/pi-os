@@ -1,4 +1,4 @@
-//! ext2 ファイルシステム(今は読み出し専用)。
+//! ext2 ファイルシステム(読み書き)。
 //!
 //! ```text
 //! バイト 1024〜     スーパーブロック(全体の情報:ブロックの大きさ、グループの数、…)
@@ -28,14 +28,25 @@ struct Inner {
     inode_size: u64,
     /// グループごとの inode 表の最初のブロック
     inode_tables: Vec<u32>,
+    blocks_count: u64,
+    blocks_per_group: u64,
+    first_data_block: u64,
+    /// グループ記述子の表の最初のブロック
+    gdt_block: u64,
+    /// メタデータ(ビットマップ、記述子、ディレクトリ)を変える処理を 1 つずつにする
+    meta: crate::sync::SpinLock<()>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct Inode {
     mode: u16,
     uid: u32,
     gid: u32,
     size: u64,
+    links: u16,
+    /// 使っているブロックの数(512 バイト単位、間接ブロックも含む)
+    sectors: u32,
+    dtime: u32,
     blocks: [u32; 15],
 }
 
@@ -89,6 +100,9 @@ impl Inner {
             uid: le16(&raw, 2) as u32,
             gid: le16(&raw, 24) as u32,
             size: le32(&raw, 4) as u64 | ((le32(&raw, 108) as u64) << 32),
+            links: le16(&raw, 26),
+            sectors: le32(&raw, 28),
+            dtime: le32(&raw, 20),
             blocks,
         })
     }
@@ -182,6 +196,394 @@ impl Inner {
     }
 }
 
+const S_IFREG: u16 = 0x8000;
+const S_IFDIR: u16 = 0x4000;
+const SB: u64 = 1024;
+
+/// 書き込みの処理(ビットマップでの割り当て、inode とディレクトリの更新)
+impl Inner {
+    fn write_bytes(&self, offset: u64, data: &[u8]) -> Result<(), Errno> {
+        let mut disk = self.disk.lock();
+        let mut sector = [0u8; BLOCK_SIZE];
+        let mut done = 0;
+        while done < data.len() {
+            let pos = offset + done as u64;
+            let lba = pos / BLOCK_SIZE as u64;
+            let within = (pos % BLOCK_SIZE as u64) as usize;
+            let n = (BLOCK_SIZE - within).min(data.len() - done);
+            if n < BLOCK_SIZE {
+                disk.read_block(lba, &mut sector).map_err(|_| Errno::EIO)?;
+            }
+            sector[within..within + n].copy_from_slice(&data[done..done + n]);
+            disk.write_block(lba, &sector).map_err(|_| Errno::EIO)?;
+            done += n;
+        }
+        Ok(())
+    }
+
+    fn add_u32(&self, offset: u64, delta: i64) -> Result<(), Errno> {
+        let mut b = [0u8; 4];
+        self.read_bytes(offset, &mut b)?;
+        let v = (u32::from_le_bytes(b) as i64 + delta) as u32;
+        self.write_bytes(offset, &v.to_le_bytes())
+    }
+
+    fn add_u16(&self, offset: u64, delta: i64) -> Result<(), Errno> {
+        let mut b = [0u8; 2];
+        self.read_bytes(offset, &mut b)?;
+        let v = (u16::from_le_bytes(b) as i64 + delta) as u16;
+        self.write_bytes(offset, &v.to_le_bytes())
+    }
+
+    /// グループ記述子の欄の場所
+    fn gd(&self, group: usize, field: u64) -> u64 {
+        self.gdt_block * self.block_size + group as u64 * 32 + field
+    }
+
+    fn gd_u32(&self, group: usize, field: u64) -> Result<u32, Errno> {
+        let mut b = [0u8; 4];
+        self.read_bytes(self.gd(group, field), &mut b)?;
+        Ok(u32::from_le_bytes(b))
+    }
+
+    /// ビットマップのブロック `bitmap` から、`bits` 個のうち空いているビットを 1 つ取る
+    fn take_bit(&self, bitmap: u32, bits: usize) -> Result<Option<usize>, Errno> {
+        let mut map = vec![0u8; self.block_size as usize];
+        self.read_bytes(bitmap as u64 * self.block_size, &mut map)?;
+        for bit in 0..bits {
+            if map[bit / 8] & (1 << (bit % 8)) == 0 {
+                self.write_bytes(
+                    bitmap as u64 * self.block_size + (bit / 8) as u64,
+                    &[map[bit / 8] | (1 << (bit % 8))],
+                )?;
+                return Ok(Some(bit));
+            }
+        }
+        Ok(None)
+    }
+
+    fn clear_bit(&self, bitmap: u32, bit: usize) -> Result<(), Errno> {
+        let at = bitmap as u64 * self.block_size + (bit / 8) as u64;
+        let mut b = [0u8; 1];
+        self.read_bytes(at, &mut b)?;
+        self.write_bytes(at, &[b[0] & !(1 << (bit % 8))])
+    }
+
+    /// 空きブロックを 1 つ取り、0 で埋める
+    fn alloc_block(&self) -> Result<u32, Errno> {
+        for g in 0..self.inode_tables.len() {
+            let first = self.first_data_block + g as u64 * self.blocks_per_group;
+            let bits = self.blocks_per_group.min(self.blocks_count - first) as usize;
+            if let Some(bit) = self.take_bit(self.gd_u32(g, 0)?, bits)? {
+                self.add_u16(self.gd(g, 12), -1)?;
+                self.add_u32(SB + 12, -1)?;
+                let block = first + bit as u64;
+                self.write_bytes(
+                    block * self.block_size,
+                    &vec![0u8; self.block_size as usize],
+                )?;
+                return Ok(block as u32);
+            }
+        }
+        Err(Errno::ENOSPC)
+    }
+
+    fn free_block(&self, block: u32) -> Result<(), Errno> {
+        let rel = block as u64 - self.first_data_block;
+        let g = (rel / self.blocks_per_group) as usize;
+        self.clear_bit(self.gd_u32(g, 0)?, (rel % self.blocks_per_group) as usize)?;
+        self.add_u16(self.gd(g, 12), 1)?;
+        self.add_u32(SB + 12, 1)
+    }
+
+    fn alloc_inode(&self, dir: bool) -> Result<u32, Errno> {
+        for g in 0..self.inode_tables.len() {
+            if let Some(bit) = self.take_bit(self.gd_u32(g, 4)?, self.inodes_per_group as usize)? {
+                self.add_u16(self.gd(g, 14), -1)?;
+                self.add_u32(SB + 16, -1)?;
+                if dir {
+                    self.add_u16(self.gd(g, 16), 1)?;
+                }
+                return Ok(g as u32 * self.inodes_per_group + bit as u32 + 1);
+            }
+        }
+        Err(Errno::ENOSPC)
+    }
+
+    fn free_inode(&self, ino: u32, dir: bool) -> Result<(), Errno> {
+        let g = ((ino - 1) / self.inodes_per_group) as usize;
+        self.clear_bit(
+            self.gd_u32(g, 4)?,
+            ((ino - 1) % self.inodes_per_group) as usize,
+        )?;
+        self.add_u16(self.gd(g, 14), 1)?;
+        self.add_u32(SB + 16, 1)?;
+        if dir {
+            self.add_u16(self.gd(g, 16), -1)?;
+        }
+        Ok(())
+    }
+
+    fn write_inode(&self, ino: u32, inode: &Inode) -> Result<(), Errno> {
+        let group = ((ino - 1) / self.inodes_per_group) as usize;
+        let index = ((ino - 1) % self.inodes_per_group) as u64;
+        let at = self.inode_tables[group] as u64 * self.block_size + index * self.inode_size;
+        let mut raw = vec![0u8; self.inode_size as usize];
+        self.read_bytes(at, &mut raw)?;
+        raw[0..2].copy_from_slice(&inode.mode.to_le_bytes());
+        raw[2..4].copy_from_slice(&(inode.uid as u16).to_le_bytes());
+        raw[4..8].copy_from_slice(&(inode.size as u32).to_le_bytes());
+        raw[20..24].copy_from_slice(&inode.dtime.to_le_bytes());
+        raw[24..26].copy_from_slice(&(inode.gid as u16).to_le_bytes());
+        raw[26..28].copy_from_slice(&inode.links.to_le_bytes());
+        raw[28..32].copy_from_slice(&inode.sectors.to_le_bytes());
+        for (i, b) in inode.blocks.iter().enumerate() {
+            raw[40 + i * 4..44 + i * 4].copy_from_slice(&b.to_le_bytes());
+        }
+        if kind_of(inode.mode) == FileKind::Regular {
+            raw[108..112].copy_from_slice(&((inode.size >> 32) as u32).to_le_bytes());
+        }
+        self.write_bytes(at, &raw)
+    }
+
+    /// 新しいブロックを取り、inode の使用量に数える
+    fn alloc_for(&self, inode: &mut Inode) -> Result<u32, Errno> {
+        let b = self.alloc_block()?;
+        inode.sectors += (self.block_size / 512) as u32;
+        Ok(b)
+    }
+
+    /// 間接ブロック `table` の `i` 番目を読み、0 なら新しく取って書き込む
+    fn slot(&self, inode: &mut Inode, table: u32, i: u64) -> Result<u32, Errno> {
+        match self.read_u32(table, i)? {
+            0 => {
+                let b = self.alloc_for(inode)?;
+                self.write_bytes(table as u64 * self.block_size + i * 4, &b.to_le_bytes())?;
+                Ok(b)
+            }
+            b => Ok(b),
+        }
+    }
+
+    /// ファイルの `index` 番目のブロックの場所。なければ取る(1 段・2 段の間接まで)
+    fn block_for_write(&self, inode: &mut Inode, index: u64) -> Result<u32, Errno> {
+        let per = self.block_size / 4;
+        if index < 12 {
+            if inode.blocks[index as usize] == 0 {
+                inode.blocks[index as usize] = self.alloc_for(inode)?;
+            }
+            return Ok(inode.blocks[index as usize]);
+        }
+        let i = index - 12;
+        if i < per {
+            if inode.blocks[12] == 0 {
+                inode.blocks[12] = self.alloc_for(inode)?;
+            }
+            return self.slot(inode, inode.blocks[12], i);
+        }
+        let i = i - per;
+        if i < per * per {
+            if inode.blocks[13] == 0 {
+                inode.blocks[13] = self.alloc_for(inode)?;
+            }
+            let mid = self.slot(inode, inode.blocks[13], i / per)?;
+            return self.slot(inode, mid, i % per);
+        }
+        Err(Errno::EFBIG)
+    }
+
+    fn write_file(&self, inode: &mut Inode, offset: u64, data: &[u8]) -> Result<usize, Errno> {
+        let mut done = 0;
+        while done < data.len() {
+            let pos = offset + done as u64;
+            let within = pos % self.block_size;
+            let n = ((self.block_size - within) as usize).min(data.len() - done);
+            let block = self.block_for_write(inode, pos / self.block_size)?;
+            self.write_bytes(
+                block as u64 * self.block_size + within,
+                &data[done..done + n],
+            )?;
+            done += n;
+        }
+        inode.size = inode.size.max(offset + data.len() as u64);
+        Ok(data.len())
+    }
+
+    /// `keep` 番目以降のブロックを返す(間接ブロックも、中が空になれば返す)
+    fn free_from(&self, inode: &mut Inode, keep: u64) -> Result<(), Errno> {
+        let per = self.block_size / 4;
+        let unit = (self.block_size / 512) as u32;
+        for i in keep.min(12)..12 {
+            if inode.blocks[i as usize] != 0 {
+                self.free_block(inode.blocks[i as usize])?;
+                inode.blocks[i as usize] = 0;
+                inode.sectors -= unit;
+            }
+        }
+        // 1 段の間接:ファイルのブロック 12 から per 個
+        if inode.blocks[12] != 0 {
+            let first = keep.saturating_sub(12);
+            for i in first..per {
+                let b = self.read_u32(inode.blocks[12], i)?;
+                if b != 0 {
+                    self.free_block(b)?;
+                    self.write_bytes(inode.blocks[12] as u64 * self.block_size + i * 4, &[0; 4])?;
+                    inode.sectors -= unit;
+                }
+            }
+            if first == 0 {
+                self.free_block(inode.blocks[12])?;
+                inode.blocks[12] = 0;
+                inode.sectors -= unit;
+            }
+        }
+        // 2 段の間接:ファイルのブロック 12 + per から
+        if inode.blocks[13] != 0 {
+            let first = keep.saturating_sub(12 + per);
+            for m in 0..per {
+                let mid = self.read_u32(inode.blocks[13], m)?;
+                if mid == 0 {
+                    continue;
+                }
+                let start = first.saturating_sub(m * per).min(per);
+                for i in start..per {
+                    let b = self.read_u32(mid, i)?;
+                    if b != 0 {
+                        self.free_block(b)?;
+                        self.write_bytes(mid as u64 * self.block_size + i * 4, &[0; 4])?;
+                        inode.sectors -= unit;
+                    }
+                }
+                if start == 0 {
+                    self.free_block(mid)?;
+                    self.write_bytes(inode.blocks[13] as u64 * self.block_size + m * 4, &[0; 4])?;
+                    inode.sectors -= unit;
+                }
+            }
+            if first == 0 {
+                self.free_block(inode.blocks[13])?;
+                inode.blocks[13] = 0;
+                inode.sectors -= unit;
+            }
+        }
+        Ok(())
+    }
+
+    fn truncate(&self, ino: u32, len: u64) -> Result<(), Errno> {
+        let mut inode = self.inode(ino)?;
+        if len < inode.size {
+            self.free_from(&mut inode, len.div_ceil(self.block_size))?;
+            // 残ったブロックの、len より後ろを 0 にする
+            if !len.is_multiple_of(self.block_size)
+                && let Ok(b) = self.block_of(&inode, len / self.block_size)
+                && b != 0
+            {
+                let within = len % self.block_size;
+                self.write_bytes(
+                    b as u64 * self.block_size + within,
+                    &vec![0u8; (self.block_size - within) as usize],
+                )?;
+            }
+        }
+        inode.size = len;
+        self.write_inode(ino, &inode)
+    }
+
+    /// ディレクトリに項目を足す。入る隙間がなければブロックを足す
+    fn add_entry(&self, dir_ino: u32, name: &str, ino: u32, dir: bool) -> Result<(), Errno> {
+        let mut d = self.inode(dir_ino)?;
+        let need = (8 + name.len()).div_ceil(4) * 4;
+        let ftype = if dir { 2 } else { 1 };
+        let bs = self.block_size as usize;
+        let blocks = d.size / self.block_size;
+        for index in 0..blocks {
+            let block = self.block_of(&d, index)?;
+            let base = block as u64 * self.block_size;
+            let mut data = vec![0u8; bs];
+            self.read_bytes(base, &mut data)?;
+            let mut at = 0;
+            while at < bs {
+                let e_ino = le32(&data, at);
+                let rec = le16(&data, at + 4) as usize;
+                let used = if e_ino == 0 {
+                    0
+                } else {
+                    (8 + data[at + 6] as usize).div_ceil(4) * 4
+                };
+                if rec - used >= need {
+                    let new_at = at + used;
+                    if e_ino != 0 {
+                        self.write_bytes(base + at as u64 + 4, &(used as u16).to_le_bytes())?;
+                    }
+                    let mut e = vec![0u8; 8 + name.len()];
+                    e[0..4].copy_from_slice(&ino.to_le_bytes());
+                    e[4..6].copy_from_slice(&((rec - used) as u16).to_le_bytes());
+                    e[6] = name.len() as u8;
+                    e[7] = ftype;
+                    e[8..].copy_from_slice(name.as_bytes());
+                    return self.write_bytes(base + new_at as u64, &e);
+                }
+                at += rec;
+            }
+        }
+        // 新しいブロックに、ブロック全体を使う項目として書く
+        let block = self.block_for_write(&mut d, blocks)?;
+        let mut e = vec![0u8; 8 + name.len()];
+        e[0..4].copy_from_slice(&ino.to_le_bytes());
+        e[4..6].copy_from_slice(&(bs as u16).to_le_bytes());
+        e[6] = name.len() as u8;
+        e[7] = ftype;
+        e[8..].copy_from_slice(name.as_bytes());
+        self.write_bytes(block as u64 * self.block_size, &e)?;
+        d.size += self.block_size;
+        self.write_inode(dir_ino, &d)
+    }
+
+    /// ディレクトリから項目を消し、その inode 番号を返す
+    fn remove_entry(&self, dir: &Inode, name: &str) -> Result<u32, Errno> {
+        let bs = self.block_size as usize;
+        for index in 0..dir.size / self.block_size {
+            let block = self.block_of(dir, index)?;
+            let base = block as u64 * self.block_size;
+            let mut data = vec![0u8; bs];
+            self.read_bytes(base, &mut data)?;
+            let (mut at, mut prev) = (0, None);
+            while at < bs {
+                let ino = le32(&data, at);
+                let rec = le16(&data, at + 4) as usize;
+                let len = data[at + 6] as usize;
+                if ino != 0 && &data[at + 8..at + 8 + len] == name.as_bytes() {
+                    match prev {
+                        // 前の項目に、この項目の長さを足して飲み込ませる
+                        Some(p) => {
+                            let prev_rec = le16(&data, p + 4) as usize;
+                            self.write_bytes(
+                                base + p as u64 + 4,
+                                &((prev_rec + rec) as u16).to_le_bytes(),
+                            )?;
+                        }
+                        // ブロックの先頭なら、inode 番号を 0 にして空きにする
+                        None => self.write_bytes(base + at as u64, &[0; 4])?,
+                    }
+                    return Ok(ino);
+                }
+                prev = Some(at);
+                at += rec;
+            }
+        }
+        Err(Errno::ENOENT)
+    }
+}
+
+/// パスを親ディレクトリと名前に分ける(`/a/b` → (`/a`, `b`))
+fn split(path: &str) -> (&str, &str) {
+    match path.rfind('/') {
+        Some(0) => ("/", &path[1..]),
+        Some(i) => (&path[..i], &path[i + 1..]),
+        None => ("/", path),
+    }
+}
+
 fn kind_of(mode: u16) -> FileKind {
     match mode & 0xf000 {
         0x4000 => FileKind::Directory,
@@ -190,38 +592,47 @@ fn kind_of(mode: u16) -> FileKind {
     }
 }
 
-/// ext2 の上のファイルやディレクトリ
+/// ext2 の上のファイルやディレクトリ。inode はディスクから毎回読み直す(書き込みで変わるため)
 struct Ext2File {
     fs: Arc<Inner>,
     ino: u32,
-    inode: Inode,
 }
 
 impl File for Ext2File {
     fn stat(&self) -> Stat {
+        let inode = self.fs.inode(self.ino).unwrap_or_default();
         Stat {
-            kind: kind_of(self.inode.mode),
-            mode: self.inode.mode as u32 & 0o7777,
-            size: self.inode.size,
+            kind: kind_of(inode.mode),
+            mode: inode.mode as u32 & 0o7777,
+            size: inode.size,
             ino: self.ino as u64,
-            uid: self.inode.uid,
-            gid: self.inode.gid,
+            uid: inode.uid,
+            gid: inode.gid,
         }
     }
 
     fn read(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
-        if kind_of(self.inode.mode) == FileKind::Directory {
+        let inode = self.fs.inode(self.ino)?;
+        if kind_of(inode.mode) == FileKind::Directory {
             return Err(Errno::EISDIR);
         }
-        self.fs.read_file(&self.inode, offset, buf)
+        self.fs.read_file(&inode, offset, buf)
     }
 
-    fn write(&self, _offset: u64, _buf: &[u8]) -> Result<usize, Errno> {
-        Err(Errno::EROFS)
+    fn write(&self, offset: u64, buf: &[u8]) -> Result<usize, Errno> {
+        let _meta = self.fs.meta.lock();
+        let mut inode = self.fs.inode(self.ino)?;
+        if kind_of(inode.mode) == FileKind::Directory {
+            return Err(Errno::EISDIR);
+        }
+        let n = self.fs.write_file(&mut inode, offset, buf)?;
+        self.fs.write_inode(self.ino, &inode)?;
+        Ok(n)
     }
 
-    fn is_read_only(&self) -> bool {
-        true
+    fn truncate(&self, len: u64) -> Result<(), Errno> {
+        let _meta = self.fs.meta.lock();
+        self.fs.truncate(self.ino, len)
     }
 }
 
@@ -239,6 +650,11 @@ impl Ext2 {
             inodes_per_group: 1,
             inode_size: 128,
             inode_tables: Vec::new(),
+            blocks_count: 0,
+            blocks_per_group: 0,
+            first_data_block: 0,
+            gdt_block: 0,
+            meta: crate::sync::SpinLock::new(()),
         };
         probe.read_bytes(1024, &mut sb)?;
         if le16(&sb, 56) != MAGIC {
@@ -266,6 +682,11 @@ impl Ext2 {
                 inodes_per_group,
                 inode_size,
                 inode_tables,
+                blocks_count,
+                blocks_per_group,
+                first_data_block,
+                gdt_block: first_data_block + 1,
+                meta: crate::sync::SpinLock::new(()),
             }),
         })
     }
@@ -273,12 +694,105 @@ impl Ext2 {
 
 impl FileSystem for Ext2 {
     fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
-        let (ino, inode) = self.inner.lookup(path)?;
+        let (ino, _) = self.inner.lookup(path)?;
         Ok(Arc::new(Ext2File {
             fs: self.inner.clone(),
             ino,
-            inode,
         }))
+    }
+
+    fn create(&self, path: &str, mode: u32) -> Result<Arc<dyn File>, Errno> {
+        let _meta = self.inner.meta.lock();
+        let (parent, name) = split(path);
+        let (dir_ino, dir) = self.inner.lookup(parent)?;
+        if kind_of(dir.mode) != FileKind::Directory {
+            return Err(Errno::ENOTDIR);
+        }
+        if self.inner.lookup(path).is_ok() {
+            return Err(Errno::EEXIST);
+        }
+        let ino = self.inner.alloc_inode(false)?;
+        let inode = Inode {
+            mode: S_IFREG | (mode as u16 & 0o7777),
+            links: 1,
+            ..Inode::default()
+        };
+        self.inner.write_inode(ino, &inode)?;
+        self.inner.add_entry(dir_ino, name, ino, false)?;
+        Ok(Arc::new(Ext2File {
+            fs: self.inner.clone(),
+            ino,
+        }))
+    }
+
+    fn mkdir(&self, path: &str, mode: u32) -> Result<(), Errno> {
+        let _meta = self.inner.meta.lock();
+        let (parent, name) = split(path);
+        let (dir_ino, mut dir) = self.inner.lookup(parent)?;
+        if kind_of(dir.mode) != FileKind::Directory {
+            return Err(Errno::ENOTDIR);
+        }
+        if self.inner.lookup(path).is_ok() {
+            return Err(Errno::EEXIST);
+        }
+        let ino = self.inner.alloc_inode(true)?;
+        let mut inode = Inode {
+            mode: S_IFDIR | (mode as u16 & 0o7777),
+            links: 2, // 親の項目と、自分の「.」
+            ..Inode::default()
+        };
+        let block = self.inner.alloc_for(&mut inode)?;
+        inode.blocks[0] = block;
+        inode.size = self.inner.block_size;
+        // 「.」(12 バイト)と「..」(ブロックの残り全部)
+        let mut data = vec![0u8; self.inner.block_size as usize];
+        data[0..4].copy_from_slice(&ino.to_le_bytes());
+        data[4..6].copy_from_slice(&12u16.to_le_bytes());
+        data[6] = 1;
+        data[7] = 2;
+        data[8] = b'.';
+        data[12..16].copy_from_slice(&dir_ino.to_le_bytes());
+        data[16..18].copy_from_slice(&((self.inner.block_size - 12) as u16).to_le_bytes());
+        data[18] = 2;
+        data[19] = 2;
+        data[20..22].copy_from_slice(b"..");
+        self.inner
+            .write_bytes(block as u64 * self.inner.block_size, &data)?;
+        self.inner.write_inode(ino, &inode)?;
+        // 子の「..」が親を指すので、親のリンク数が 1 増える
+        dir.links += 1;
+        self.inner.write_inode(dir_ino, &dir)?;
+        self.inner.add_entry(dir_ino, name, ino, true)
+    }
+
+    fn unlink(&self, path: &str, want_dir: bool) -> Result<(), Errno> {
+        let _meta = self.inner.meta.lock();
+        let (parent, name) = split(path);
+        let (dir_ino, mut dir) = self.inner.lookup(parent)?;
+        let (ino, mut inode) = self.inner.lookup(path)?;
+        let is_dir = kind_of(inode.mode) == FileKind::Directory;
+        match (is_dir, want_dir) {
+            (true, false) => return Err(Errno::EISDIR),
+            (false, true) => return Err(Errno::ENOTDIR),
+            _ => {}
+        }
+        if is_dir && self.inner.entries(&inode)?.len() > 2 {
+            return Err(Errno::ENOTEMPTY);
+        }
+        self.inner.remove_entry(&dir, name)?;
+        self.inner.free_from(&mut inode, 0)?;
+        inode.links = 0;
+        inode.size = 0;
+        // 削除時刻(秒)。小さな値だと ext3 の orphan リスト(次の inode 番号)と見なされる
+        inode.dtime = (crate::time::BOOT_EPOCH + crate::time::now_ns() / 1_000_000_000) as u32;
+        self.inner.write_inode(ino, &inode)?;
+        self.inner.free_inode(ino, is_dir)?;
+        if is_dir {
+            dir = self.inner.inode(dir_ino)?;
+            dir.links -= 1;
+            self.inner.write_inode(dir_ino, &dir)?;
+        }
+        Ok(())
     }
 
     fn readdir(&self, path: &str) -> Result<Vec<DirEntry>, Errno> {
@@ -313,12 +827,10 @@ mod tests {
     use std::vec::Vec;
 
     /// 一時ディレクトリにファイルを並べ、mke2fs -d で ext2 のイメージを作る
-    fn image(files: &[(&str, &[u8])]) -> Vec<u8> {
-        let dir = std::env::temp_dir().join(std::format!(
-            "pios-ext2-{}-{}",
-            std::process::id(),
-            files.len() * 1000 + files.iter().map(|f| f.1.len()).sum::<usize>() % 997
-        ));
+    pub(super) fn image(files: &[(&str, &[u8])]) -> Vec<u8> {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(std::format!("pios-ext2-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("root");
         for (path, data) in files {
@@ -399,5 +911,151 @@ mod tests {
         assert_eq!(fs.lookup("/a/b").err(), Some(Errno::ENOTDIR));
         let blank = shared(Box::new(RamDisk::new(64)));
         assert!(Ext2::new(blank).is_err(), "no ext2 magic");
+    }
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+    use crate::Errno;
+    use crate::block::{SharedDisk, ramdisk::RamDisk, shared};
+    use crate::fs::vfs::{FileKind, FileSystem};
+    use hal::block::BLOCK_SIZE;
+    use std::boxed::Box;
+    use std::string::String;
+    use std::vec::Vec;
+
+    fn blank() -> SharedDisk {
+        shared(Box::new(RamDisk::from_bytes(&super::tests::image(&[(
+            "keep.txt", b"keep",
+        )]))))
+    }
+
+    /// ディスクの中身を取り出して e2fsck -fn に調べさせる(0 ならきれい)
+    fn fsck(disk: &SharedDisk) {
+        let mut d = disk.lock();
+        let mut bytes = Vec::new();
+        let mut sector = [0u8; BLOCK_SIZE];
+        for lba in 0..d.block_count() {
+            d.read_block(lba, &mut sector).unwrap();
+            bytes.extend_from_slice(&sector);
+        }
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(std::format!("pios-fsck-{}-{n}.img", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let out = std::process::Command::new("e2fsck")
+            .args(["-fn"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            out.status.success(),
+            "e2fsck found problems:\n{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn read_all(fs: &Ext2, path: &str) -> Vec<u8> {
+        let f = fs.lookup(path).unwrap();
+        let mut out = std::vec![0u8; f.stat().size as usize];
+        let n = f.read(0, &mut out).unwrap();
+        assert_eq!(n, out.len());
+        out
+    }
+
+    #[test]
+    fn created_files_survive_a_remount_and_fsck() {
+        let disk = blank();
+        let data: Vec<u8> = (0..5000).map(|i| (i % 253) as u8).collect();
+        {
+            let fs = Ext2::new(disk.clone()).unwrap();
+            let f = fs.create("/new.txt", 0o644).unwrap();
+            assert_eq!(f.write(0, &data), Ok(5000));
+            assert_eq!(f.stat().size, 5000);
+        }
+        let fs = Ext2::new(disk.clone()).unwrap();
+        assert_eq!(read_all(&fs, "/new.txt"), data);
+        assert_eq!(read_all(&fs, "/keep.txt"), b"keep");
+        fsck(&disk);
+    }
+
+    #[test]
+    fn large_writes_allocate_indirect_blocks() {
+        let disk = blank();
+        let big: Vec<u8> = (0..300 * 1024).map(|i| (i % 249) as u8).collect();
+        {
+            let fs = Ext2::new(disk.clone()).unwrap();
+            let f = fs.create("/big", 0o600).unwrap();
+            for (i, chunk) in big.chunks(7000).enumerate() {
+                f.write((i * 7000) as u64, chunk).unwrap();
+            }
+        }
+        assert_eq!(read_all(&Ext2::new(disk.clone()).unwrap(), "/big"), big);
+        fsck(&disk);
+    }
+
+    #[test]
+    fn mkdir_creates_a_directory_that_holds_files() {
+        let disk = blank();
+        let fs = Ext2::new(disk.clone()).unwrap();
+        fs.mkdir("/d", 0o755).unwrap();
+        fs.create("/d/a", 0o644).unwrap().write(0, b"A").unwrap();
+        assert_eq!(fs.lookup("/d").unwrap().stat().kind, FileKind::Directory);
+        let names: Vec<String> = fs
+            .readdir("/d")
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, ["a"]);
+        assert_eq!(fs.mkdir("/d", 0o755), Err(Errno::EEXIST));
+        fsck(&disk);
+    }
+
+    #[test]
+    fn many_entries_grow_the_directory() {
+        let disk = blank();
+        let fs = Ext2::new(disk.clone()).unwrap();
+        for i in 0..80 {
+            fs.create(&std::format!("/file-with-a-long-name-{i:03}"), 0o644)
+                .unwrap();
+        }
+        assert_eq!(fs.readdir("/").unwrap().len(), 81);
+        fsck(&disk);
+    }
+
+    #[test]
+    fn unlink_and_rmdir_free_everything() {
+        let disk = blank();
+        let fs = Ext2::new(disk.clone()).unwrap();
+        fs.mkdir("/d", 0o755).unwrap();
+        fs.create("/d/f", 0o644)
+            .unwrap()
+            .write(0, &[7u8; 3000])
+            .unwrap();
+        assert_eq!(fs.unlink("/d", true), Err(Errno::ENOTEMPTY));
+        fs.unlink("/d/f", false).unwrap();
+        fs.unlink("/d", true).unwrap();
+        fs.unlink("/keep.txt", false).unwrap();
+        assert_eq!(fs.lookup("/d").err(), Some(Errno::ENOENT));
+        assert_eq!(fs.lookup("/keep.txt").err(), Some(Errno::ENOENT));
+        fsck(&disk);
+    }
+
+    #[test]
+    fn truncate_releases_blocks() {
+        let disk = blank();
+        let fs = Ext2::new(disk.clone()).unwrap();
+        let f = fs.create("/t", 0o644).unwrap();
+        f.write(0, &[1u8; 20000]).unwrap();
+        f.truncate(0).unwrap();
+        assert_eq!(f.stat().size, 0);
+        f.write(0, b"short").unwrap();
+        assert_eq!(read_all(&fs, "/t"), b"short");
+        fsck(&disk);
     }
 }
