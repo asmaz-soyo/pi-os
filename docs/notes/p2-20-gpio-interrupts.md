@@ -36,3 +36,17 @@ QEMU のモニタ:system_powerdown
 ## 今の限界
 
 - リアルタイム優先度とジッタの計測は、まだ
+
+## 追記:サービスマネージャの GPIO トリガー
+
+`svcman` に `trigger = { gpio = N }` を足した。`/dev/gpio/N` を epoll で待ち、割り込みのたびにサービスを動かす。スナップショット `qemu-virt-gpio` は、`/etc/svcman-gpio.conf`(電源ボタンで `hello` を 1 回動かす)を使うようにした。
+
+```
+pi-os:/$ svcman /etc/svcman-gpio.conf
+svcman: watching 1 service(s)
+(qemu) system_powerdown
+Hello from user space!
+svcman: button run 1 exited with 0
+```
+
+これで計画書の3種類のトリガー(スタートアップ、周期、割り込み駆動)がすべて揃った。

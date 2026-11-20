@@ -4,6 +4,7 @@
 //   exec = "/bin/プログラム 引数"
 //   trigger = "startup"            起動時に 1 回
 //   trigger = { every = "50ms" }   一定間隔で(timerfd + epoll)。単位は ms か s
+//   trigger = { gpio = 3 }         GPIO の割り込みのたびに(/dev/gpio/N + epoll)
 //   restart = "on-failure"         0 以外で終わったら起動し直す
 //   max_runs = 3                   動かす回数の上限(周期と再起動の両方に効く)
 //
@@ -15,6 +16,7 @@
 #include <sys/epoll.h>
 #include <sys/timerfd.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #define MAX_SERVICES 16
@@ -23,7 +25,8 @@
 struct service {
     char name[32];
     char exec[128];
-    long every_ms;      // 0 なら startup
+    long every_ms;      // 0 なら startup(gpio も 0)
+    int gpio;           // -1 でなければ GPIO の割り込みで起動する
     int restart;        // on-failure
     int max_runs;       // 0 なら無制限
     int runs;
@@ -75,6 +78,7 @@ static int load(const char *path) {
             cur = &services[count++];
             memset(cur, 0, sizeof *cur);
             cur->timer_fd = -1;
+            cur->gpio = -1;
             char *end = strchr(l, ']');
             if (!end) return -1;
             *end = 0;
@@ -90,7 +94,11 @@ static int load(const char *path) {
         if (!strcmp(key, "exec")) {
             if (quoted(val, cur->exec, sizeof cur->exec)) return -1;
         } else if (!strcmp(key, "trigger")) {
-            if (strstr(val, "every")) {
+            if (strstr(val, "gpio")) {
+                char *eq2 = strchr(strstr(val, "gpio"), '=');
+                if (!eq2) return -1;
+                cur->gpio = atoi(eq2 + 1);
+            } else if (strstr(val, "every")) {
                 if (quoted(strstr(val, "every"), text, sizeof text)) return -1;
                 if ((cur->every_ms = duration_ms(text)) <= 0) return -1;
             } else if (quoted(val, text, sizeof text) || strcmp(text, "startup")) {
@@ -145,6 +153,21 @@ int main(int argc, char **argv) {
     // startup のサービスを動かし、周期のサービスのタイマを仕掛ける
     for (int i = 0; i < count; i++) {
         struct service *s = &services[i];
+        if (s->gpio >= 0) {
+            // 割り込み駆動:/dev/gpio/N が読めるようになったら動かす
+            char path[32];
+            snprintf(path, sizeof path, "/dev/gpio/%d", s->gpio);
+            s->timer_fd = open(path, O_RDONLY);
+            if (s->timer_fd < 0) {
+                perror(path);
+                s->done = 1;
+                continue;
+            }
+            struct epoll_event ev = {.events = EPOLLIN, .data.u32 = i};
+            epoll_ctl(ep, EPOLL_CTL_ADD, s->timer_fd, &ev);
+            active++;
+            continue;
+        }
         if (s->every_ms == 0) {
             while (run_once(s) != 0 && s->restart && !limit_reached(s)) {}
             s->done = 1;
@@ -160,7 +183,11 @@ int main(int argc, char **argv) {
         epoll_ctl(ep, EPOLL_CTL_ADD, s->timer_fd, &ev);
         active++;
     }
-    // 周期のサービス:タイマが満了するたびに動かす
+    if (active > 0) {
+        printf("svcman: watching %d service(s)\n", active);
+        fflush(stdout);
+    }
+    // 周期と割り込み駆動のサービス:タイマの満了や GPIO の割り込みのたびに動かす
     while (active > 0) {
         struct epoll_event ev;
         if (epoll_wait(ep, &ev, 1, -1) != 1) break;

@@ -350,7 +350,7 @@ fn shell_script_drives_the_shell_and_the_repl() {
 
 #[test]
 fn gpio_script_presses_the_power_button_from_the_qemu_monitor() {
-    assert_eq!(GPIO_SCRIPT[0], ("$ ", "gpiowait\r"));
+    assert_eq!(GPIO_SCRIPT[0], ("$ ", "svcman /etc/svcman-gpio.conf\r"));
     assert!(GPIO_SCRIPT.contains(&("(qemu) ", "system_powerdown\r")));
     assert_eq!(GPIO_SCRIPT.last(), Some(&("$ ", "exit\r")));
 }

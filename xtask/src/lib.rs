@@ -407,11 +407,12 @@ pub const SHELL_SCRIPT: &[(&str, &str)] = &[
     ("$ ", "exit\r"),
 ];
 
-/// virt で GPIO の割り込みを確かめる入力:gpiowait で待ち、QEMU のモニタ(Ctrl-A c)で
-/// 電源ボタンを押し(system_powerdown → PL061 の GPIO 3)、シリアルに戻って exit する
+/// virt で GPIO の割り込みを確かめる入力:サービスマネージャに GPIO 3 で起動するサービスを
+/// 待たせ、QEMU のモニタ(Ctrl-A c)で電源ボタンを押し(system_powerdown → PL061 の GPIO 3)、
+/// シリアルに戻って exit する
 pub const GPIO_SCRIPT: &[(&str, &str)] = &[
-    ("$ ", "gpiowait\r"),
-    ("waiting for GPIO 3", "\x01c"),
+    ("$ ", "svcman /etc/svcman-gpio.conf\r"),
+    ("svcman: watching", "\x01c"),
     ("(qemu) ", "system_powerdown\r"),
     ("(qemu) ", "\x01c"),
     ("$ ", "exit\r"),
