@@ -3,6 +3,7 @@
 #[cfg(any(test, feature = "mock"))]
 extern crate std;
 
+pub mod addr;
 pub mod console;
 pub mod irq;
 pub mod mmio;

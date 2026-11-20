@@ -7,6 +7,7 @@ extern crate std;
 pub mod console;
 pub mod errno;
 pub mod irq;
+pub mod mm;
 pub mod panic;
 pub mod sync;
 pub mod time;
