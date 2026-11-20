@@ -27,8 +27,11 @@ const EXCLUDES: &str = "--exclude userland --exclude boot --exclude ktest \
                         --exclude bsp-qemu-virt --exclude bsp-raspi3";
 const VIRT_ARGS: &str = "-M virt -cpu cortex-a53 -m 128M -nic none -nographic -semihosting";
 const RASPI3_ARGS: &str = "-M raspi3b -nographic -semihosting";
-const KERNEL8_IMG: &str = "llvm-objcopy -O binary target/aarch64-unknown-none/debug/bsp-raspi3 \
-    target/aarch64-unknown-none/debug/kernel8.img";
+/// 実機用のビルド(セミホスティングなし、別の target ディレクトリ)
+const HW_BUILD: &str = "cargo build -p bsp-raspi3 --target aarch64-unknown-none \
+    --no-default-features --target-dir target/hw";
+const KERNEL8_IMG: &str = "llvm-objcopy -O binary target/hw/aarch64-unknown-none/debug/bsp-raspi3 \
+    target/hw/kernel8.img";
 
 fn host_test() -> String {
     format!("cargo test --workspace {EXCLUDES}")
@@ -54,6 +57,7 @@ fn build_demo(krate: &str, demo: &str) -> String {
 
 fn all_builds() -> Vec<String> {
     let mut v: Vec<String> = ALL_TARGET.iter().map(|k| build(k)).collect();
+    v.push(HW_BUILD.to_string());
     v.push(KERNEL8_IMG.to_string());
     v
 }
@@ -177,6 +181,12 @@ fn snapshot_plan_checks_boot_panic_and_fault_output_for_each_bsp() {
             snapshot("raspi3-panic", 1, "bsp-raspi3", RASPI3_ARGS),
             build_demo("bsp-raspi3", "fault"),
             snapshot("raspi3-fault", 1, "bsp-raspi3", RASPI3_ARGS),
+            HW_BUILD.to_string(),
+            KERNEL8_IMG.to_string(),
+            // 実機用のイメージはセミホスティングで終われないので、止まったまま timeout(124)になる
+            "snapshot tests/snapshots/raspi3-hw.txt (exit 124) <= timeout 10 \
+             qemu-system-aarch64 -M raspi3b -nographic -kernel target/hw/kernel8.img"
+                .to_string(),
         ]
     );
 }

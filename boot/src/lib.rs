@@ -169,9 +169,16 @@ pub fn panic(info: &core::panic::PanicInfo) -> ! {
     exit(1)
 }
 
-/// 終了する。QEMU ならセミホスティングで終了コードを返す。
+/// 終了する。
+///
+/// QEMU 用のビルド(`semihosting` feature)ならセミホスティングで終了コードを返す。
+/// 実機にはその仕組みがないので、メッセージを出して止まる。
 pub fn exit(code: u32) -> ! {
-    arch_aarch64::semihosting::exit(code)
+    if cfg!(feature = "semihosting") {
+        arch_aarch64::semihosting::exit(code)
+    }
+    kernel::println!("system halted (status {code})");
+    arch_aarch64::cpu::halt()
 }
 
 /// `<名前>-demo` feature 用:わざと異常を起こす。

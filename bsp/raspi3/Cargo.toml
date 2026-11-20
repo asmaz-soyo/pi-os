@@ -14,6 +14,9 @@ pl011 = { path = "../../drivers/pl011" }
 bcm2836-local-intc = { path = "../../drivers/bcm2836-local-intc" }
 
 [features]
+# QEMU で使うビルドではセミホスティングで終了する。実機用は --no-default-features で外す
+default = ["semihosting"]
+semihosting = ["boot/semihosting"]
 # 起動後にわざとパニックする(パニックの報告のスナップショットテスト用)
 panic-demo = []
 # 起動後にわざと未定義命令を実行する(未処理の例外の報告のスナップショットテスト用)

@@ -9,7 +9,8 @@ publish = false
 hal = { path = "../../hal" }
 arch-aarch64 = { path = "../../arch/aarch64" }
 kernel = { path = "../../kernel" }
-boot = { path = "../../boot" }
+# virt は QEMU でしか動かないので、常にセミホスティングで終了する
+boot = { path = "../../boot", features = ["semihosting"] }
 pl011 = { path = "../../drivers/pl011" }
 gicv2 = { path = "../../drivers/gicv2" }
 

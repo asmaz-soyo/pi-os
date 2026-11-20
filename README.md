@@ -49,4 +49,4 @@ cargo xtask docs                   # 自動生成のドキュメントを更新
 cargo xtask ci                     # 上のすべて(push の前に必ず通す)
 ```
 
-実機用のイメージは `cargo xtask build` で `target/aarch64-unknown-none/debug/kernel8.img` にできる。
+実機用のイメージは `cargo xtask build` で `target/hw/kernel8.img` にできる(セミホスティングを外したビルド。終わると「system halted」と出して止まる)。

@@ -366,6 +366,18 @@ fn snapshot_tests() -> Vec<Step> {
             }
             steps
         })
+        .chain(hardware_image())
+        .chain([Step::Snapshot {
+            // 実機用のイメージを、実機と同じくセミホスティングなしで起動する。
+            // 終われずに止まるので、timeout の終了コード 124 が正しい結果
+            expected: "tests/snapshots/raspi3-hw.txt".to_string(),
+            exit_code: 124,
+            cmd: Cmd::new(
+                "qemu-system-aarch64",
+                &["-M", "raspi3b", "-nographic", "-kernel", KERNEL8_IMG],
+            )
+            .with_timeout(10),
+        }])
         .collect()
 }
 
@@ -374,14 +386,32 @@ fn target_builds() -> Vec<Step> {
         .iter()
         .map(|krate| Step::Run(Cmd::cargo(&["build", "-p", krate, "--target", TARGET])))
         .collect();
-    // 実機の Pi 3B のファームウェアは ELF を読めないので、生のバイナリ kernel8.img を作る
-    let elf = Bsp::Raspi3.kernel_elf();
-    let img = format!("target/{TARGET}/debug/kernel8.img");
-    steps.push(Step::Run(Cmd::new(
-        "llvm-objcopy",
-        &["-O", "binary", &elf, &img],
-    )));
+    steps.extend(hardware_image());
     steps
+}
+
+/// 実機用の kernel8.img の置き場所
+pub const KERNEL8_IMG: &str = "target/hw/kernel8.img";
+
+/// 実機の Pi 3B 用のイメージを作る。
+///
+/// 実機にはセミホスティングがないので、`semihosting` feature を外し、
+/// QEMU 用のビルドと混ざらないよう別の target ディレクトリでビルドする。
+/// ファームウェアは ELF を読めないので、生のバイナリ(kernel8.img)にする。
+fn hardware_image() -> Vec<Step> {
+    let build = Cmd::cargo(&[
+        "build",
+        "-p",
+        Bsp::Raspi3.crate_name(),
+        "--target",
+        TARGET,
+        "--no-default-features",
+        "--target-dir",
+        "target/hw",
+    ]);
+    let elf = format!("target/hw/{TARGET}/debug/{}", Bsp::Raspi3.crate_name());
+    let objcopy = Cmd::new("llvm-objcopy", &["-O", "binary", &elf, KERNEL8_IMG]);
+    vec![Step::Run(build), Step::Run(objcopy)]
 }
 
 /// QEMU のシリアル出力を比較しやすい形にそろえる(`\r` を消し、末尾の空行を1つの改行にまとめる)。

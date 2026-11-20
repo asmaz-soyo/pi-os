@@ -19,3 +19,5 @@ bench = false
 [features]
 # システムコールを呼ばれるたびに表示する(cargo xtask run --trace syscall)
 trace-syscalls = []
+# QEMU のセミホスティングで終了する(実機では使えないので外す)
+semihosting = []
