@@ -20,4 +20,4 @@
 | スケジューラ、fork、シェル、シバン(BusyBox は未:ソースのダウンロード許可待ち) | 完了 | `p2-shell` |
 | tmpfs、timerfd、epoll、サービスマネージャ(C 製。Rust 版はツールチェーンの追加待ち) | 完了 | `p2-services` |
 | GPIO 割り込みの fd、リアルタイム優先度、ジッタ計測 | 未着手 | |
-| ブロック層、FAT32、ext2、procfs | 未着手 | |
+| ブロック層(virtio-blk、MBR)、ext2 の読み書き、procfs(FAT32 とルートの ext2 化は未) | 完了 | `p2-ext2` |
