@@ -8,6 +8,7 @@ extern crate std;
 
 pub mod console;
 pub mod errno;
+pub mod exec;
 pub mod irq;
 pub mod mm;
 pub mod panic;
