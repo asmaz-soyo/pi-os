@@ -10,6 +10,7 @@ pub mod console;
 pub mod errno;
 pub mod exec;
 pub mod fs;
+pub mod init;
 pub mod irq;
 pub mod mm;
 pub mod panic;

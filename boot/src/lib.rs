@@ -20,6 +20,7 @@ use core::ops::Range;
 use hal::addr::{PAGE_SIZE, PhysAddr};
 use hal::console::Console;
 use hal::irq::IrqController;
+use hal::timer::Timer;
 use kernel::mm::frame::FrameAllocator;
 use kernel::sync::SpinLock;
 
@@ -147,6 +148,7 @@ fn start_timer<B: Board>() {
         .expect("timer irq number is valid");
     B::intc().lock().enable(B::TIMER_IRQ);
     kernel::time::CLOCK.start(&mut GenericTimer, B::TIMER_HZ);
+    kernel::time::set_counter(arch_aarch64::cpu::counter, GenericTimer.frequency());
     arch_aarch64::cpu::enable_irq();
 }
 
@@ -180,10 +182,21 @@ pub fn run_demos(panic_demo: bool, fault_demo: bool) {
     }
 }
 
-/// 最初のユーザープログラム(init)を動かす。
+/// `/etc/init.rc` に書かれたコマンドを順に実行する(フェーズ1の init)。
 pub fn run_init() {
-    match run_program("/bin/hello", &[b"hello"]) {
-        Ok(status) => kernel::println!("init exited with status {status}"),
-        Err(e) => kernel::println!("init failed to start: {e:?}"),
+    let script = match user::read_file("/etc/init.rc") {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            kernel::println!("init: cannot read /etc/init.rc: {e:?}");
+            return;
+        }
+    };
+    let script = core::str::from_utf8(script).unwrap_or("");
+    for args in kernel::init::parse(script) {
+        let argv: alloc::vec::Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
+        match run_program(args[0], &argv) {
+            Ok(status) => kernel::println!("init: {} exited with status {status}", args[0]),
+            Err(e) => kernel::println!("init: {} failed to start: {e:?}", args[0]),
+        }
     }
 }

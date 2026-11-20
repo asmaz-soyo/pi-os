@@ -74,6 +74,22 @@ impl UserMemory {
         }
     }
 
+    /// `va` から `len` バイトのマップ済みのページの属性を変える(中身はそのまま)。
+    pub fn protect(&mut self, va: VirtAddr, len: u64, flags: MapFlags) -> Result<(), Errno> {
+        let mut page = va.align_down();
+        let end = (va + len).align_up();
+        while page < end {
+            if self.pages.contains(&page.0) {
+                let frame = self.space.unmap_page(page).ok_or(Errno::EFAULT)?;
+                self.space
+                    .map_page(page, frame, flags)
+                    .map_err(|_| Errno::ENOMEM)?;
+            }
+            page = page + PAGE_SIZE;
+        }
+        Ok(())
+    }
+
     pub fn is_mapped(&self, va: VirtAddr) -> bool {
         self.pages.contains(&va.align_down().0)
     }

@@ -5,6 +5,8 @@
 //! 未実装の番号は `ENOSYS` を返し、最初の1回だけログに出す(次に何を作るべきかが分かる)。
 
 mod fs;
+mod misc;
+mod mm;
 mod proc;
 
 use crate::process::Process;
@@ -25,6 +27,25 @@ pub mod nr {
     pub const FSTAT: u64 = 80;
     pub const EXIT: u64 = 93;
     pub const EXIT_GROUP: u64 = 94;
+    pub const SET_TID_ADDRESS: u64 = 96;
+    pub const CLOCK_GETTIME: u64 = 113;
+    pub const SCHED_GETAFFINITY: u64 = 123;
+    pub const RT_SIGACTION: u64 = 134;
+    pub const RT_SIGPROCMASK: u64 = 135;
+    pub const UNAME: u64 = 160;
+    pub const GETPID: u64 = 172;
+    pub const GETUID: u64 = 174;
+    pub const GETEUID: u64 = 175;
+    pub const GETGID: u64 = 176;
+    pub const GETEGID: u64 = 177;
+    pub const GETTID: u64 = 178;
+    pub const BRK: u64 = 214;
+    pub const MUNMAP: u64 = 215;
+    pub const MREMAP: u64 = 216;
+    pub const MMAP: u64 = 222;
+    pub const MPROTECT: u64 = 226;
+    pub const MADVISE: u64 = 233;
+    pub const GETRANDOM: u64 = 278;
 }
 
 /// ioctl:端末の大きさを問い合わせる
@@ -71,6 +92,22 @@ pub fn dispatch(p: &mut Process, nr: u64, a: [u64; 6]) -> Action {
         nr::NEWFSTATAT => result(fs::newfstatat(p, a[0], a[1], a[2], a[3])),
         nr::FSTAT => result(fs::fstat(p, a[0], a[1])),
         nr::EXIT | nr::EXIT_GROUP => Action::Exit(proc::exit_status(a[0])),
+        // フェーズ1はプロセスもスレッドも1つ、ユーザーは root だけ
+        nr::SET_TID_ADDRESS | nr::GETPID | nr::GETTID => Action::Return(1),
+        nr::GETUID | nr::GETEUID | nr::GETGID | nr::GETEGID => Action::Return(0),
+        // シグナルはまだ配送しないので、設定は受け付けるだけ(入れ物は後で作る)
+        nr::RT_SIGACTION | nr::RT_SIGPROCMASK => Action::Return(0),
+        nr::CLOCK_GETTIME => result(misc::clock_gettime(p, a[0], a[1])),
+        nr::SCHED_GETAFFINITY => result(misc::sched_getaffinity(p, a[1], a[2])),
+        nr::UNAME => result(misc::uname(p, a[0])),
+        nr::GETRANDOM => result(misc::getrandom(p, a[0], a[1])),
+        nr::BRK => Action::Return(mm::brk(p, a[0])),
+        nr::MMAP => result(mm::mmap(p, a[0], a[1], a[2], a[3], a[4], a[5])),
+        nr::MUNMAP => result(mm::munmap(p, a[0], a[1])),
+        nr::MPROTECT => result(mm::mprotect(p, a[0], a[1], a[2])),
+        // 助言は無視してよい。mremap を断ると、libc は「新しく確保してコピー」に切り替える
+        nr::MADVISE => Action::Return(0),
+        nr::MREMAP => Action::Return(crate::Errno::ENOMEM.as_syscall_return()),
         _ => {
             if let Some(count) = UNIMPLEMENTED.get(nr as usize)
                 && count.fetch_add(1, Ordering::Relaxed) == 0
@@ -81,6 +118,9 @@ pub fn dispatch(p: &mut Process, nr: u64, a: [u64; 6]) -> Action {
         }
     }
 }
+
+#[cfg(test)]
+mod tests_mm;
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -135,30 +175,30 @@ pub(crate) mod tests {
         (Process::new(mem, loaded, Arc::new(vfs), console), out)
     }
 
-    fn put(p: &mut Process, va: u64, bytes: &[u8]) {
+    pub(crate) fn put(p: &mut Process, va: u64, bytes: &[u8]) {
         p.mem.copy_to_user(VirtAddr(va), bytes).unwrap();
     }
 
-    fn get(p: &mut Process, va: u64, len: usize) -> Vec<u8> {
+    pub(crate) fn get(p: &mut Process, va: u64, len: usize) -> Vec<u8> {
         let mut v = std::vec![0u8; len];
         p.mem.copy_from_user(VirtAddr(va), &mut v).unwrap();
         v
     }
 
-    fn call(p: &mut Process, nr: u64, a: [u64; 6]) -> u64 {
+    pub(crate) fn call(p: &mut Process, nr: u64, a: [u64; 6]) -> u64 {
         match dispatch(p, nr, a) {
             Action::Return(v) => v,
             Action::Exit(s) => panic!("unexpected exit {s}"),
         }
     }
 
-    fn err(e: Errno) -> u64 {
+    pub(crate) fn err(e: Errno) -> u64 {
         e.as_syscall_return()
     }
 
-    const AT_FDCWD: u64 = -100i64 as u64;
+    pub(crate) const AT_FDCWD: u64 = -100i64 as u64;
 
-    fn open(p: &mut Process, path: &[u8], flags: u64) -> u64 {
+    pub(crate) fn open(p: &mut Process, path: &[u8], flags: u64) -> u64 {
         put(p, SCRATCH + 0x3000, path);
         put(p, SCRATCH + 0x3000 + path.len() as u64, b"\0");
         call(p, nr::OPENAT, [AT_FDCWD, SCRATCH + 0x3000, flags, 0, 0, 0])

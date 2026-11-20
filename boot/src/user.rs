@@ -201,3 +201,11 @@ pub fn run_program(path: &str, argv: &[&[u8]]) -> Result<i32, Errno> {
     let image = file.contents().ok_or(Errno::EACCES)?;
     run_user(image, argv)
 }
+
+/// initramfs のファイルの中身。
+pub fn read_file(path: &str) -> Result<&'static [u8], Errno> {
+    let file = vfs().0.lookup(path)?;
+    let bytes = file.contents().ok_or(Errno::EACCES)?;
+    // SAFETY: initramfs の中身は 'static な埋め込みデータ
+    Ok(unsafe { core::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) })
+}

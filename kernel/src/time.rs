@@ -61,6 +61,42 @@ pub fn wait_ticks(n: u64) {
     }
 }
 
+/// 起動時の CLOCK_REALTIME(秒)。RTC がないので、ビルドした時刻を使う(NTP はフェーズ2以降)。
+pub const BOOT_EPOCH: u64 = parse_u64(env!("PIOS_BUILD_EPOCH"));
+
+const fn parse_u64(s: &str) -> u64 {
+    let b = s.as_bytes();
+    let mut v = 0;
+    let mut i = 0;
+    while i < b.len() {
+        v = v * 10 + (b[i] - b'0') as u64;
+        i += 1;
+    }
+    v
+}
+
+/// 高い分解能のカウンタ(BSP が登録する)。読む関数と周波数。
+static COUNTER: spin::Once<(fn() -> u64, u64)> = spin::Once::new();
+
+/// カウンタを登録する。
+pub fn set_counter(read: fn() -> u64, frequency: u64) {
+    COUNTER.call_once(|| (read, frequency));
+}
+
+/// 起動してからの時間(ナノ秒)。カウンタがなければティックから求める。
+pub fn now_ns() -> u64 {
+    match COUNTER.get() {
+        Some(&(read, freq)) if freq > 0 => {
+            let t = read() as u128;
+            (t * 1_000_000_000 / freq as u128) as u64
+        }
+        _ => {
+            let hz = CLOCK.hz().max(1);
+            CLOCK.ticks() * (1_000_000_000 / hz)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
