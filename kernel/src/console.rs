@@ -10,6 +10,9 @@ use hal::console::Console;
 pub trait SharedConsole: Sync {
     fn write_bytes(&self, buf: &[u8]);
 
+    /// 届いている入力を1バイト取り出す(待たない)
+    fn read_byte(&self) -> Option<u8>;
+
     /// ロックを強制的に外す。
     ///
     /// # Safety
@@ -20,6 +23,10 @@ pub trait SharedConsole: Sync {
 impl<C: Console + Send> SharedConsole for spin::Mutex<C> {
     fn write_bytes(&self, buf: &[u8]) {
         self.lock().write_bytes(buf);
+    }
+
+    fn read_byte(&self) -> Option<u8> {
+        self.lock().read_byte()
     }
 
     unsafe fn force_unlock(&self) {
@@ -46,7 +53,7 @@ impl fmt::Write for Out {
     }
 }
 
-/// 登録された出力先に書く `Console`。登録前の出力は捨てられる。
+/// 登録された出力先に書き、そこから読む `Console`。登録前の出力は捨てられる。
 pub struct Global;
 
 impl Console for Global {
@@ -54,6 +61,10 @@ impl Console for Global {
         if let Some(console) = CONSOLE.get() {
             console.write_bytes(buf);
         }
+    }
+
+    fn read_byte(&mut self) -> Option<u8> {
+        CONSOLE.get().and_then(|console| console.read_byte())
     }
 }
 

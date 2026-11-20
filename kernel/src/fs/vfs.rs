@@ -62,6 +62,20 @@ pub trait File: Send + Sync {
     fn contents(&self) -> Option<&[u8]> {
         None
     }
+
+    /// 今読んでも待たずに済むか(select / poll 用)。普通のファイルは常に読める
+    fn poll_readable(&self) -> bool {
+        true
+    }
+
+    /// 端末の設定(端末だけ)
+    fn termios(&self) -> Option<crate::tty::Termios> {
+        None
+    }
+
+    fn set_termios(&self, _t: crate::tty::Termios) -> Result<(), Errno> {
+        Err(Errno::ENOTTY)
+    }
 }
 
 /// 開いたファイル。読み書きの位置とフラグを持つ。

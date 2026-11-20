@@ -3,19 +3,36 @@
 use crate::Errno;
 use crate::fs::vfs::{File, FileKind, FileSystem, Stat};
 use crate::sync::SpinLock;
+use crate::tty::{Termios, Tty};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use hal::console::Console;
 
-/// 端末(UART)。書くと出力される。入力(UART の受信)はフェーズ2で作るので、今は読むと常に終わり。
+/// 端末(UART + 行規律)。
 pub struct ConsoleFile {
-    out: SpinLock<Box<dyn Console + Send>>,
+    dev: SpinLock<Box<dyn Console + Send>>,
+    tty: SpinLock<Tty>,
 }
 
 impl ConsoleFile {
-    pub fn new(out: Box<dyn Console + Send>) -> Self {
+    pub fn new(dev: Box<dyn Console + Send>) -> Self {
         Self {
-            out: SpinLock::new(out),
+            dev: SpinLock::new(dev),
+            tty: SpinLock::new(Tty::new()),
+        }
+    }
+
+    /// UART に届いているバイトを行規律に渡す(エコーは UART に書く)。
+    fn poll_input(&self) {
+        let mut dev = self.dev.lock();
+        let mut tty = self.tty.lock();
+        let mut echo = Vec::new();
+        while let Some(byte) = dev.read_byte() {
+            tty.input(byte, &mut |out| echo.extend_from_slice(out));
+        }
+        if !echo.is_empty() {
+            dev.write_bytes(&echo);
         }
     }
 }
@@ -32,17 +49,41 @@ impl File for ConsoleFile {
         }
     }
 
-    fn read(&self, _offset: u64, _buf: &mut [u8]) -> Result<usize, Errno> {
-        Ok(0)
+    /// 1 行(raw モードなら届いた分)が読めるまで待つ。
+    ///
+    /// 今は UART を見続けて待つ(ビジーウェイト)。スケジューラができたら、
+    /// UART の受信割り込みで起こしてもらう形に変える。
+    fn read(&self, _offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        loop {
+            self.poll_input();
+            if let Some(n) = self.tty.lock().read(buf) {
+                return Ok(n);
+            }
+            core::hint::spin_loop();
+        }
     }
 
     fn write(&self, _offset: u64, buf: &[u8]) -> Result<usize, Errno> {
-        self.out.lock().write_bytes(buf);
+        self.dev.lock().write_bytes(buf);
         Ok(buf.len())
     }
 
     fn is_tty(&self) -> bool {
         true
+    }
+
+    fn poll_readable(&self) -> bool {
+        self.poll_input();
+        self.tty.lock().readable()
+    }
+
+    fn termios(&self) -> Option<Termios> {
+        Some(self.tty.lock().termios())
+    }
+
+    fn set_termios(&self, t: Termios) -> Result<(), Errno> {
+        self.tty.lock().set_termios(t);
+        Ok(())
     }
 }
 

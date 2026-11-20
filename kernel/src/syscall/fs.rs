@@ -1,6 +1,13 @@
 //! ファイル関係のシステムコール。
 
 use super::TIOCGWINSZ;
+use crate::tty::{TERMIOS_SIZE, Termios};
+
+// ioctl の番号(端末の設定)
+const TCGETS: u64 = 0x5401;
+const TCSETS: u64 = 0x5402;
+const TCSETSW: u64 = 0x5403;
+const TCSETSF: u64 = 0x5404;
 use crate::Errno;
 use crate::cred::Access;
 use crate::fs::vfs::{
@@ -243,13 +250,24 @@ pub fn newfstatat(
     Ok(0)
 }
 
-/// ioctl(fd, cmd, arg)。今は端末の大きさの問い合わせだけ。
+/// ioctl(fd, cmd, arg)。端末の設定(termios)と大きさの問い合わせ。
 pub fn ioctl(p: &mut Process, fd: u64, cmd: u64, arg: u64) -> Result<u64, Errno> {
     let f = p.fds.get(fd)?;
     if !f.file.is_tty() {
         return Err(Errno::ENOTTY);
     }
     match cmd {
+        TCGETS => {
+            let t = f.file.termios().ok_or(Errno::ENOTTY)?;
+            p.mem.copy_to_user(VirtAddr(arg), &t.to_bytes())?;
+            Ok(0)
+        }
+        TCSETS | TCSETSW | TCSETSF => {
+            let mut b = [0u8; TERMIOS_SIZE];
+            p.mem.copy_from_user(VirtAddr(arg), &mut b)?;
+            f.file.set_termios(Termios::from_bytes(&b))?;
+            Ok(0)
+        }
         TIOCGWINSZ => {
             // struct winsize { rows, cols, xpixel, ypixel }(各 u16)
             let ws: [u16; 4] = [24, 80, 0, 0];

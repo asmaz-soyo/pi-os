@@ -41,18 +41,74 @@ fn execute(step: &Step) -> Result<(), String> {
         Step::Snapshot {
             expected,
             exit_code,
+            input,
+            input_after,
             cmd,
-        } => snapshot(expected, *exit_code, cmd),
+        } => snapshot(expected, *exit_code, input, input_after, cmd),
     }
 }
 
 /// `cmd` の標準出力を `expected` と比べる。`UPDATE_SNAPSHOTS=1` なら期待値を書き換える
 /// (ワイルドカードは消えるので、書き換えたあとに手で戻すこと)。
-fn snapshot(expected: &str, exit_code: i32, cmd: &Cmd) -> Result<(), String> {
-    let output = command(cmd)
-        .stdin(Stdio::null())
-        .output()
+fn snapshot(
+    expected: &str,
+    exit_code: i32,
+    input: &[String],
+    input_after: &str,
+    cmd: &Cmd,
+) -> Result<(), String> {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    let mut child = command(cmd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("failed to start `{cmd}`: {e}"))?;
+    // 出力を別のスレッドで読み続け、input_after が現れたら入力を送る
+    let collected = Arc::new(Mutex::new(Vec::new()));
+    let reader = {
+        let collected = collected.clone();
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = stdout.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                collected.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        })
+    };
+    // 入力を送ったあとも標準入力は閉じない(閉じると QEMU が残りの入力を受け取らないことがある)
+    let mut stdin = child.stdin.take();
+    let mut sent = 0;
+    loop {
+        if child.try_wait().map_err(|e| e.to_string())?.is_some() {
+            break;
+        }
+        let seen = {
+            let out = collected.lock().unwrap();
+            String::from_utf8_lossy(&out).matches(input_after).count()
+        };
+        // プロンプトが n 回出たら、n 番目までの入力を送る
+        while sent < seen.min(input.len()) {
+            if let Some(s) = stdin.as_mut() {
+                let _ = s.write_all(input[sent].as_bytes());
+                let _ = s.flush();
+            }
+            sent += 1;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    drop(stdin);
+    reader.join().expect("reader thread");
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let output = std::process::Output {
+        status,
+        stdout: collected.lock().unwrap().clone(),
+        stderr: Vec::new(),
+    };
     let actual = String::from_utf8_lossy(&output.stdout);
     if output.status.code() != Some(exit_code) {
         return Err(format!(

@@ -24,7 +24,13 @@ malloc ok
 init: /bin/hello_musl exited with status 0
 Hello from JS
 init: /bin/qjs exited with status 0
+QuickJS - Type "\h" for help
+qjs > 1+2
+3
+qjs >
 ```
+
+起動の最後に QuickJS の REPL(対話モード)が動く。`^D` で REPL を終えるとカーネルも終わる。QEMU 自体を止めるには `Ctrl-A` に続けて `x`。
 
 フェーズ1のゴール(自作 OS 上で `qjs hello.js` が「Hello from JS」を出す)は、QEMU で達成した。
 

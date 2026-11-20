@@ -7,6 +7,7 @@
 mod fs;
 mod misc;
 mod mm;
+mod poll;
 mod proc;
 
 use crate::process::Process;
@@ -23,6 +24,8 @@ pub mod nr {
     pub const WRITE: u64 = 64;
     pub const READV: u64 = 65;
     pub const WRITEV: u64 = 66;
+    pub const PSELECT6: u64 = 72;
+    pub const PPOLL: u64 = 73;
     pub const READLINKAT: u64 = 78;
     pub const NEWFSTATAT: u64 = 79;
     pub const FSTAT: u64 = 80;
@@ -116,6 +119,8 @@ table! {
     nr::WRITE, "write", 3 => |p, a| result(fs::write(p, a[0], a[1], a[2]));
     nr::READV, "readv", 3 => |p, a| result(fs::readv(p, a[0], a[1], a[2]));
     nr::WRITEV, "writev", 3 => |p, a| result(fs::writev(p, a[0], a[1], a[2]));
+    nr::PSELECT6, "pselect6", 6 => |p, a| result(poll::pselect6(p, a[0], a[1], a[2], a[3], a[4]));
+    nr::PPOLL, "ppoll", 5 => |p, a| result(poll::ppoll(p, a[0], a[1], a[2]));
     nr::READLINKAT, "readlinkat", 4 => |p, a| result(fs::readlinkat(p, a[0], a[1]));
     nr::NEWFSTATAT, "newfstatat", 4 => |p, a| result(fs::newfstatat(p, a[0], a[1], a[2], a[3]));
     nr::FSTAT, "fstat", 2 => |p, a| result(fs::fstat(p, a[0], a[1]));
@@ -198,6 +203,8 @@ pub fn dispatch(p: &mut Process, nr: u64, a: [u64; 6]) -> Action {
 
 #[cfg(test)]
 mod tests_mm;
+#[cfg(test)]
+mod tests_tty;
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -220,18 +227,42 @@ pub(crate) mod tests {
 
     /// 書かれた内容を共有のバッファに残す出力先
     #[derive(Clone, Default)]
-    pub struct Capture(pub Arc<SpinLock<Vec<u8>>>);
+    pub struct Capture(
+        pub Arc<SpinLock<Vec<u8>>>,
+        pub Arc<SpinLock<std::collections::VecDeque<u8>>>,
+    );
+
+    impl Capture {
+        /// 端末から入力が届いたことにする
+        pub fn type_in(&self, bytes: &[u8]) {
+            self.1.lock().extend(bytes);
+        }
+    }
 
     impl Console for Capture {
         fn write_bytes(&mut self, buf: &[u8]) {
             self.0.lock().extend_from_slice(buf);
+        }
+
+        fn read_byte(&mut self) -> Option<u8> {
+            self.1.lock().pop_front()
         }
     }
 
     /// ユーザーの作業領域(読み書き可)
     pub const SCRATCH: u64 = 0x40_0000;
 
+    /// ホストの時計をカウンタにする(ナノ秒単位)。カーネルでは ARM Generic Timer が入る
+    fn host_counter() -> u64 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_nanos() as u64
+    }
+
     pub fn process() -> (Process, Capture) {
+        crate::time::set_counter(host_counter, 1_000_000_000);
         let (mut mem, _) = memory();
         mem.map_zeroed(VirtAddr(SCRATCH), 0x4000, MapFlags::USER_RW)
             .unwrap();

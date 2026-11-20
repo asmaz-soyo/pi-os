@@ -14,6 +14,8 @@
 | 64 | `write` | 3 |
 | 65 | `readv` | 3 |
 | 66 | `writev` | 3 |
+| 72 | `pselect6` | 6 |
+| 73 | `ppoll` | 5 |
 | 78 | `readlinkat` | 4 |
 | 79 | `newfstatat` | 4 |
 | 80 | `fstat` | 2 |
@@ -39,4 +41,4 @@
 | 233 | `madvise` | 3 |
 | 278 | `getrandom` | 3 |
 
-合計 33 個
+合計 35 個

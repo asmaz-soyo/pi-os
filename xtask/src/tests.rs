@@ -44,10 +44,15 @@ fn qemu_test(krate: &str, args: &str) -> String {
     )
 }
 
+/// スナップショットのときに QEMU の標準入力(UART)へ送る入力:REPL で 1+2 を計算して ^D で終える。
+/// プロンプトが出るたびに1つずつ送る
+const REPL_INPUT: [&str; 2] = ["1+2\r", "\u{4}"];
+
 fn snapshot(name: &str, exit: i32, krate: &str, args: &str) -> String {
     format!(
-        "snapshot tests/snapshots/{name}.txt (exit {exit}) <= timeout 30 qemu-system-aarch64 \
-         {args} -kernel target/aarch64-unknown-none/debug/{krate}"
+        "snapshot tests/snapshots/{name}.txt (exit {exit}, input {REPL_INPUT:?} after \"qjs > \") \
+         <= timeout 30 \
+         qemu-system-aarch64 {args} -kernel target/aarch64-unknown-none/debug/{krate}"
     )
 }
 
@@ -184,9 +189,11 @@ fn snapshot_plan_checks_boot_panic_and_fault_output_for_each_bsp() {
             HW_BUILD.to_string(),
             KERNEL8_IMG.to_string(),
             // 実機用のイメージはセミホスティングで終われないので、止まったまま timeout(124)になる
-            "snapshot tests/snapshots/raspi3-hw.txt (exit 124) <= timeout 10 \
-             qemu-system-aarch64 -M raspi3b -nographic -kernel target/hw/kernel8.img"
-                .to_string(),
+            format!(
+                "snapshot tests/snapshots/raspi3-hw.txt (exit 124, input {REPL_INPUT:?} after \"qjs > \") \
+                 <= \
+                 timeout 10 qemu-system-aarch64 -M raspi3b -nographic -kernel target/hw/kernel8.img"
+            ),
         ]
     );
 }

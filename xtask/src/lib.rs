@@ -231,6 +231,10 @@ pub enum Step {
     Snapshot {
         expected: String,
         exit_code: i32,
+        /// コマンドの標準入力に送る内容(QEMU では UART への入力になる)。
+        /// 出力に `input_after` が n 回現れたら、n 番目の入力を送る
+        input: Vec<String>,
+        input_after: String,
         cmd: Cmd,
     },
 }
@@ -245,8 +249,14 @@ impl fmt::Display for Step {
             Self::Snapshot {
                 expected,
                 exit_code,
+                input,
+                input_after,
                 cmd,
-            } => write!(f, "snapshot {expected} (exit {exit_code}) <= {cmd}"),
+            } => write!(
+                f,
+                "snapshot {expected} (exit {exit_code}, input {input:?} after {input_after:?}) \
+                 <= {cmd}"
+            ),
         }
     }
 }
@@ -342,6 +352,12 @@ fn kernel_build(bsp: Bsp) -> Cmd {
     Cmd::cargo(&["build", "-p", bsp.crate_name(), "--target", TARGET])
 }
 
+/// スナップショットで UART に送る入力。起動の最後に動く REPL で 1+2 を計算し、^D で終える。
+/// まとめて送ると REPL が取りこぼすので、プロンプトが出るたびに1つずつ送る
+pub const REPL_INPUT: [&str; 2] = ["1+2\r", "\x04"];
+/// REPL のプロンプト。これが出てから入力を送る(UART の初期化より前の入力は捨てられるため)
+pub const REPL_PROMPT: &str = "qjs > ";
+
 /// 起動後にわざと異常を起こす feature(`<名前>-demo`)。報告の形をスナップショットで固定する。
 pub const DEMOS: &[&str] = &["panic", "fault"];
 
@@ -353,6 +369,8 @@ fn snapshot_tests() -> Vec<Step> {
             let snapshot = |suffix: &str, exit_code| Step::Snapshot {
                 expected: format!("tests/snapshots/{}{suffix}.txt", bsp.name()),
                 exit_code,
+                input: REPL_INPUT.map(String::from).to_vec(),
+                input_after: REPL_PROMPT.to_string(),
                 cmd: bsp.qemu(&bsp.kernel_elf()).with_timeout(30),
             };
             let mut steps = vec![Step::Run(kernel_build(bsp)), snapshot("", 0)];
@@ -372,6 +390,8 @@ fn snapshot_tests() -> Vec<Step> {
             // 終われずに止まるので、timeout の終了コード 124 が正しい結果
             expected: "tests/snapshots/raspi3-hw.txt".to_string(),
             exit_code: 124,
+            input: REPL_INPUT.map(String::from).to_vec(),
+            input_after: REPL_PROMPT.to_string(),
             cmd: Cmd::new(
                 "qemu-system-aarch64",
                 &["-M", "raspi3b", "-nographic", "-kernel", KERNEL8_IMG],

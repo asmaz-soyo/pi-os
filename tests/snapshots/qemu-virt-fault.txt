@@ -9,6 +9,11 @@ malloc ok
 init: /bin/hello_musl exited with status 0
 Hello from JS
 init: /bin/qjs exited with status 0
+QuickJS - Type "\h" for help
+qjs > {..}
+{..}3
+{..}qjs >{..}
+init: /bin/qjs exited with status 0
 
 !!! KERNEL PANIC !!!
 panicked at arch/aarch64/src/exception.rs:{..}
