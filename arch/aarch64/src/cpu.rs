@@ -121,3 +121,18 @@ pub fn counter() -> u64 {
     unsafe { asm!("isb", "mrs {}, cntpct_el0", out(reg) t, options(nomem, nostack)) };
     t
 }
+
+/// IRQ を禁止し、禁止する前に許可されていたかを返す。
+pub fn irq_save() -> bool {
+    let daif: u64;
+    // SAFETY: DAIF を読んで、IRQ を禁止するだけ
+    unsafe { asm!("mrs {}, daif", "msr daifset, #2", out(reg) daif, options(nomem, nostack)) };
+    daif & (1 << 7) == 0
+}
+
+/// `irq_save` の前の状態に戻す。
+pub fn irq_restore(enabled: bool) {
+    if enabled {
+        enable_irq();
+    }
+}

@@ -16,6 +16,7 @@ pub mod irq;
 pub mod mm;
 pub mod panic;
 pub mod process;
+pub mod sched;
 pub mod sync;
 pub mod syscall;
 pub mod time;

@@ -185,6 +185,27 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn kernel_threads_take_turns_with_yield() {
+            use core::sync::atomic::{AtomicUsize, Ordering};
+            static LOG: kernel::sync::SpinLock<[u8; 8]> = kernel::sync::SpinLock::new([0; 8]);
+            static LEN: AtomicUsize = AtomicUsize::new(0);
+            fn worker(id: usize) {
+                for _ in 0..3 {
+                    let n = LEN.fetch_add(1, Ordering::SeqCst);
+                    LOG.lock()[n] = b'A' + id as u8;
+                    kernel::sched::yield_now();
+                }
+            }
+            let before = kernel::sched::task_count();
+            kernel::sched::spawn(worker, 0).unwrap();
+            kernel::sched::spawn(worker, 1).unwrap();
+            while LEN.load(Ordering::SeqCst) < 6 || kernel::sched::task_count() > before {
+                kernel::sched::yield_now();
+            }
+            assert_eq!(&LOG.lock()[..6], b"ABABAB");
+        }
+
+        #[test_case]
         fn fp_simd_is_usable() {
             let x = core::hint::black_box(1.5f64);
             assert_eq!(x * 2.0, 3.0);

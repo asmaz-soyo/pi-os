@@ -62,7 +62,9 @@ pub fn init<B: Board>() {
     // 4. UART と割り込みコントローラ。ここから println! が使える
     B::init_devices();
     kernel::console::set_console(B::console());
-    // 5. タイマ割り込み
+    // 5. スケジューラ(ここまでの起動処理がタスク 0 になる)
+    init_scheduler();
+    // 6. タイマ割り込み
     start_timer::<B>();
     if cfg!(feature = "trace-syscalls") {
         kernel::syscall::TRACE.store(true, core::sync::atomic::Ordering::Relaxed);
@@ -116,6 +118,52 @@ fn init_heap() {
     let start = kernel::mm::alloc_frames(frames).expect("contiguous frames for the heap");
     // SAFETY: 割り当てたばかりのフレームで、線形マップで見えている
     unsafe { kernel::mm::HEAP.init(phys_to_virt(start).0 as usize, HEAP_SIZE) };
+}
+
+/// カーネルスタックの大きさ(16KiB)
+const KERNEL_STACK_PAGES: usize = 4;
+
+fn alloc_kernel_stack() -> Option<(usize, usize)> {
+    let pa = kernel::mm::alloc_frames(KERNEL_STACK_PAGES).ok()?;
+    let bottom = phys_to_virt(pa).0 as usize;
+    Some((bottom, bottom + KERNEL_STACK_PAGES * PAGE_SIZE as usize))
+}
+
+fn free_kernel_stack(bottom: usize) {
+    let pa = arch_aarch64::mmu::virt_to_phys(hal::addr::VirtAddr(bottom as u64));
+    for i in 0..KERNEL_STACK_PAGES {
+        let _ = kernel::mm::release_frame(pa + (i as u64) * PAGE_SIZE);
+    }
+}
+
+unsafe fn switch_context(
+    from: *mut kernel::sched::SavedContext,
+    to: *const kernel::sched::SavedContext,
+) {
+    // SAFETY: SavedContext は repr(C) の [u64; 16]。スケジューラが正しい文脈を渡す
+    unsafe { arch_aarch64::context::switch(from.cast(), to.cast()) }
+}
+
+fn new_context(
+    stack_top: usize,
+    entry: fn(usize),
+    arg: usize,
+    exit: fn(),
+) -> kernel::sched::SavedContext {
+    kernel::sched::SavedContext {
+        regs: arch_aarch64::context::new_thread_context(stack_top, entry, arg, exit),
+    }
+}
+
+fn init_scheduler() {
+    kernel::sched::init(kernel::sched::Platform {
+        switch: switch_context,
+        new_context,
+        alloc_stack: alloc_kernel_stack,
+        free_stack: free_kernel_stack,
+        irq_save: arch_aarch64::cpu::irq_save,
+        irq_restore: arch_aarch64::cpu::irq_restore,
+    });
 }
 
 /// 例外の受け口。IRQ は割り込みコントローラから番号を読み、カーネルの表で振り分ける。
