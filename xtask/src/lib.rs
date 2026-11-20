@@ -107,6 +107,9 @@ impl Bsp {
                 "cortex-a53",
                 "-m",
                 "128M",
+                // 既定のネットワークカードは使わない(ROM ファイルがない環境でも起動できるように)
+                "-nic",
+                "none",
                 "-nographic",
                 "-semihosting",
             ],

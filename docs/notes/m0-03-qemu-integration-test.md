@@ -78,6 +78,6 @@ cargo xtask test --bsp qemu-virt
 ```bash
 cargo xtask test --bsp qemu-virt
 # 起動を1命令ずつ追う場合(別の端末で gdb-multiarch をつなぐ)
-qemu-system-aarch64 -M virt -cpu cortex-a53 -m 128M -nographic -semihosting -s -S \
+qemu-system-aarch64 -M virt -cpu cortex-a53 -m 128M -nic none -nographic -semihosting -s -S \
   -kernel target/aarch64-unknown-none/debug/bsp-qemu-virt
 ```

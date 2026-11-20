@@ -25,7 +25,7 @@ const ALL_TARGET: [&str; 9] = [
 ];
 const EXCLUDES: &str = "--exclude userland --exclude boot --exclude ktest \
                         --exclude bsp-qemu-virt --exclude bsp-raspi3";
-const VIRT_ARGS: &str = "-M virt -cpu cortex-a53 -m 128M -nographic -semihosting";
+const VIRT_ARGS: &str = "-M virt -cpu cortex-a53 -m 128M -nic none -nographic -semihosting";
 const RASPI3_ARGS: &str = "-M raspi3b -nographic -semihosting";
 const KERNEL8_IMG: &str = "llvm-objcopy -O binary target/aarch64-unknown-none/debug/bsp-raspi3 \
     target/aarch64-unknown-none/debug/kernel8.img";
