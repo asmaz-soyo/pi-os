@@ -250,6 +250,13 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn a_realtime_task_wakes_on_time_despite_a_busy_task() {
+            // 5ms 周期で起き、遅れの最大が 1ms 以内(低い優先度のタスクが CPU を回していても)
+            let argv: [&[u8]; 3] = [b"jitter", b"rt", b"1000"];
+            assert_eq!(boot::run_program("/bin/jitter", &argv), Ok(0));
+        }
+
+        #[test_case]
         fn service_manager_runs_startup_periodic_and_restarting_services() {
             let argv: [&[u8]; 2] = [b"svcman", b"/etc/svcman-test.conf"];
             // startup 1 回 + 周期 3 回 + 失敗して起動し直し 3 回 = 7

@@ -308,3 +308,86 @@ fn fstat_reports_the_owner() {
         0o600
     );
 }
+
+const SCHED_OTHER: u64 = 0;
+const SCHED_FIFO: u64 = 1;
+
+#[test]
+fn sched_setscheduler_makes_the_process_realtime() {
+    let (mut p, _) = process();
+    assert_eq!(call(&mut p, nr::SCHED_GETSCHEDULER, [0; 6]), SCHED_OTHER);
+    put(&mut p, SCRATCH, &50i32.to_le_bytes());
+    assert_eq!(
+        call(
+            &mut p,
+            nr::SCHED_SETSCHEDULER,
+            [0, SCHED_FIFO, SCRATCH, 0, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(call(&mut p, nr::SCHED_GETSCHEDULER, [0; 6]), SCHED_FIFO);
+    assert_eq!(p.rt_priority, 50);
+    // 通常に戻すときは優先度 0
+    put(&mut p, SCRATCH, &0i32.to_le_bytes());
+    assert_eq!(
+        call(
+            &mut p,
+            nr::SCHED_SETSCHEDULER,
+            [0, SCHED_OTHER, SCRATCH, 0, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(p.rt_priority, 0);
+}
+
+#[test]
+fn sched_setscheduler_checks_its_arguments() {
+    let (mut p, _) = process();
+    put(&mut p, SCRATCH, &100i32.to_le_bytes());
+    assert_eq!(
+        call(
+            &mut p,
+            nr::SCHED_SETSCHEDULER,
+            [0, SCHED_FIFO, SCRATCH, 0, 0, 0]
+        ),
+        err(Errno::EINVAL)
+    );
+    put(&mut p, SCRATCH, &10i32.to_le_bytes());
+    assert_eq!(
+        call(
+            &mut p,
+            nr::SCHED_SETSCHEDULER,
+            [0, SCHED_OTHER, SCRATCH, 0, 0, 0]
+        ),
+        err(Errno::EINVAL)
+    );
+    assert_eq!(
+        call(&mut p, nr::SCHED_SETSCHEDULER, [0, 7, SCRATCH, 0, 0, 0]),
+        err(Errno::EINVAL)
+    );
+    // 他のプロセスはまだ対象にできない
+    assert_eq!(
+        call(
+            &mut p,
+            nr::SCHED_SETSCHEDULER,
+            [999, SCHED_FIFO, SCRATCH, 0, 0, 0]
+        ),
+        err(Errno::ESRCH)
+    );
+    // リアルタイムにできるのは root だけ
+    p.cred = crate::cred::Credentials::user(1000, 100);
+    assert_eq!(
+        call(
+            &mut p,
+            nr::SCHED_SETSCHEDULER,
+            [0, SCHED_FIFO, SCRATCH, 0, 0, 0]
+        ),
+        err(Errno::EPERM)
+    );
+}
+
+#[test]
+fn sched_yield_returns_zero() {
+    let (mut p, _) = process();
+    assert_eq!(call(&mut p, nr::SCHED_YIELD, [0; 6]), 0);
+}

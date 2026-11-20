@@ -154,6 +154,8 @@ fn start_child(mut child: Process, frame: &TrapFrame) -> Result<u64, Errno> {
         return Err(Errno::EAGAIN);
     };
     child.pid = pid;
+    // 優先度は親から受け継ぐ
+    kernel::sched::set_priority(pid, child.rt_priority);
     PROCESSES.insert(pid, child);
     Ok(pid as u64)
 }
@@ -266,7 +268,7 @@ pub fn wait(pid: kernel::process::Pid) -> i32 {
         if let Some(status) = PROCESSES.try_wait(pid) {
             return status.shell_code();
         }
-        kernel::sched::yield_now();
+        kernel::sched::relax();
     }
 }
 

@@ -228,8 +228,9 @@ fn gpio_irq<B: Board>() {
 }
 
 fn timer_tick() {
+    // ティックでも目覚ましでも、ユーザーに戻るときに選び直す
+    // (ほかに動けるタスク・起きる時刻になったタスクがあれば切り替わる。プリエンプション)
     kernel::time::CLOCK.tick(&mut GenericTimer);
-    // ほかに動けるタスクがあれば、ユーザーに戻るときに切り替える(プリエンプション)
     kernel::sched::request_resched();
 }
 
@@ -247,6 +248,7 @@ fn start_timer<B: Board>() {
         B::intc().lock().enable(irq);
     }
     kernel::time::CLOCK.start(&mut GenericTimer, B::TIMER_HZ);
+    kernel::time::set_alarm(|ns| kernel::time::CLOCK.request_wake_ns(&mut GenericTimer, ns));
     kernel::time::set_counter(arch_aarch64::cpu::counter, GenericTimer.frequency());
     arch_aarch64::cpu::enable_irq();
 }

@@ -53,7 +53,10 @@ pub mod nr {
     pub const NANOSLEEP: u64 = 101;
     pub const CLOCK_GETTIME: u64 = 113;
     pub const CLOCK_NANOSLEEP: u64 = 115;
+    pub const SCHED_SETSCHEDULER: u64 = 119;
+    pub const SCHED_GETSCHEDULER: u64 = 120;
     pub const SCHED_GETAFFINITY: u64 = 123;
+    pub const SCHED_YIELD: u64 = 124;
     pub const RT_SIGACTION: u64 = 134;
     pub const RT_SIGPROCMASK: u64 = 135;
     pub const UNAME: u64 = 160;
@@ -210,8 +213,16 @@ table! {
     nr::CLOCK_GETTIME, "clock_gettime", 2 => |p, a| result(misc::clock_gettime(p, a[0], a[1]));
     nr::CLOCK_NANOSLEEP, "clock_nanosleep", 4
         => |p, a| result(time::clock_nanosleep(p, a[0], a[1], a[2]));
+    nr::SCHED_SETSCHEDULER, "sched_setscheduler", 3
+        => |p, a| result(misc::sched_setscheduler(p, a[0], a[1], a[2]));
+    nr::SCHED_GETSCHEDULER, "sched_getscheduler", 1
+        => |p, a| result(misc::sched_getscheduler(p, a[0]));
     nr::SCHED_GETAFFINITY, "sched_getaffinity", 3
         => |p, a| result(misc::sched_getaffinity(p, a[1], a[2]));
+    nr::SCHED_YIELD, "sched_yield", 0 => |p, a| {
+        crate::sched::relax();
+        Action::Return(0)
+    };
     // シグナルはまだ配送しないので、設定は受け付けるだけ
     nr::RT_SIGACTION, "rt_sigaction", 4 => |p, a| Action::Return(0);
     nr::RT_SIGPROCMASK, "rt_sigprocmask", 4 => |p, a| Action::Return(0);

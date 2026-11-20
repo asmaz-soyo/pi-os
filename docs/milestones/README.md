@@ -19,5 +19,5 @@
 | UART 入力、TTY、JS の REPL | 完了 | `p2-repl` |
 | スケジューラ、fork、シェル、シバン(BusyBox は未:ソースのダウンロード許可待ち) | 完了 | `p2-shell` |
 | tmpfs、timerfd、epoll、サービスマネージャ(C 製。Rust 版はツールチェーンの追加待ち) | 完了 | `p2-services` |
-| GPIO 割り込みの fd、リアルタイム優先度、ジッタ計測 | 未着手 | |
+| GPIO 割り込みの fd、リアルタイム優先度、ジッタ計測 | 完了 | `p2-realtime` |
 | ブロック層(virtio-blk、MBR)、ext2 の読み書き、procfs(FAT32 とルートの ext2 化は未) | 完了 | `p2-ext2` |

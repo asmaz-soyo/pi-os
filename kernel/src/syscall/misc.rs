@@ -42,6 +42,53 @@ pub fn sched_getaffinity(p: &mut Process, size: u64, mask: u64) -> Result<u64, E
     Ok(8)
 }
 
+const SCHED_OTHER: u64 = 0;
+const SCHED_FIFO: u64 = 1;
+
+/// 対象のプロセス:0 か自分の番号だけ(他のプロセスはまだ扱わない)
+fn sched_target(p: &Process, pid: u64) -> Result<(), Errno> {
+    if pid == 0 || pid == p.pid as u64 {
+        Ok(())
+    } else {
+        Err(Errno::ESRCH)
+    }
+}
+
+/// sched_setscheduler(pid, policy, param):SCHED_OTHER(優先度 0)と SCHED_FIFO(1〜99)。
+/// リアルタイムにできるのは root だけ。
+pub fn sched_setscheduler(
+    p: &mut Process,
+    pid: u64,
+    policy: u64,
+    param: u64,
+) -> Result<u64, Errno> {
+    sched_target(p, pid)?;
+    let mut b = [0u8; 4];
+    p.mem.copy_from_user(VirtAddr(param), &mut b)?;
+    let prio = i32::from_le_bytes(b);
+    let prio = match policy {
+        SCHED_OTHER if prio == 0 => 0,
+        SCHED_FIFO if (1..=99).contains(&prio) => prio as u8,
+        _ => return Err(Errno::EINVAL),
+    };
+    if prio > 0 && p.cred.euid != 0 {
+        return Err(Errno::EPERM);
+    }
+    p.rt_priority = prio;
+    crate::sched::set_priority(p.pid, prio);
+    Ok(0)
+}
+
+/// sched_getscheduler(pid)
+pub fn sched_getscheduler(p: &mut Process, pid: u64) -> Result<u64, Errno> {
+    sched_target(p, pid)?;
+    Ok(if p.rt_priority > 0 {
+        SCHED_FIFO
+    } else {
+        SCHED_OTHER
+    })
+}
+
 /// uname(buf):`struct utsname`(65 バイトの文字列 × 6)
 pub fn uname(p: &mut Process, buf: u64) -> Result<u64, Errno> {
     let fields: [&[u8]; 6] = [b"Pi-OS", b"pi", b"0.1.0", b"#1 Pi-OS", b"aarch64", b""];

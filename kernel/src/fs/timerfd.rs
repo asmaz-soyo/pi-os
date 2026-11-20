@@ -83,7 +83,7 @@ impl File for TimerFd {
             return Err(Errno::EINVAL);
         }
         loop {
-            {
+            let next = {
                 let mut s = self.state.lock();
                 Self::update(&mut s, crate::time::now_ns());
                 if s.pending > 0 {
@@ -91,8 +91,13 @@ impl File for TimerFd {
                     s.pending = 0;
                     return Ok(8);
                 }
+                s.next
+            };
+            // 次の満了まで眠る(止まっているタイマーなら譲って待つ)
+            match next {
+                Some(t) => crate::sched::sleep_until(t),
+                None => crate::sched::relax(),
             }
-            crate::sched::relax();
         }
     }
 

@@ -42,7 +42,10 @@
 | 101 | `nanosleep` | 2 |
 | 113 | `clock_gettime` | 2 |
 | 115 | `clock_nanosleep` | 4 |
+| 119 | `sched_setscheduler` | 3 |
+| 120 | `sched_getscheduler` | 1 |
 | 123 | `sched_getaffinity` | 3 |
+| 124 | `sched_yield` | 0 |
 | 134 | `rt_sigaction` | 4 |
 | 135 | `rt_sigprocmask` | 4 |
 | 160 | `uname` | 1 |
@@ -64,4 +67,4 @@
 | 260 | `wait4` | 4 |
 | 278 | `getrandom` | 3 |
 
-合計 58 個
+合計 61 個

@@ -70,6 +70,8 @@ pub struct Process {
     pub cred: Credentials,
     /// 保留中のシグナル(今は強制終了だけ。ユーザーに戻る直前に処理する)
     pub pending_kill: Option<i32>,
+    /// リアルタイム優先度(0 = 通常 SCHED_OTHER、1〜99 = SCHED_FIFO)
+    pub rt_priority: u8,
 }
 
 impl Process {
@@ -94,6 +96,7 @@ impl Process {
             vfs,
             cred: Credentials::root(),
             pending_kill: None,
+            rt_priority: 0,
         }
     }
 
@@ -115,6 +118,7 @@ impl Process {
             vfs: self.vfs.clone(),
             cred: self.cred.clone(),
             pending_kill: None,
+            rt_priority: self.rt_priority,
         })
     }
 }

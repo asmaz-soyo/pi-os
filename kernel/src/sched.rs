@@ -48,6 +48,29 @@ impl RunQueue {
         self.queue.is_empty()
     }
 
+    /// 優先度を考えて次に動かすタスクを選ぶ。`prio` はタスクの優先度(大きいほど先)。
+    /// 一番高い優先度のうち、先に並んだものを選ぶ。今のタスクがまだ動けて、
+    /// それより優先度が高ければ `None`(今のタスクが動き続ける)。
+    pub fn next_by(
+        &mut self,
+        current: Tid,
+        current_runnable: bool,
+        prio: impl Fn(Tid) -> u8,
+    ) -> Option<Tid> {
+        let best = self.queue.iter().copied().max_by(|a, b| {
+            // max_by は同じなら後ろを選ぶので、比べ方を逆にして先頭を選ばせる
+            prio(*a).cmp(&prio(*b)).then(core::cmp::Ordering::Greater)
+        })?;
+        if current_runnable && prio(current) > prio(best) {
+            return None;
+        }
+        self.remove(best);
+        if current_runnable {
+            self.push(current);
+        }
+        Some(best)
+    }
+
     /// 次に動かすタスクを選ぶ。今のタスク `current` がまだ動けるなら列の最後に回す。
     /// ほかに動けるタスクがなければ `None`(今のタスクが動き続ける、またはするべきことがない)。
     pub fn next(&mut self, current: Tid, current_runnable: bool) -> Option<Tid> {
@@ -99,6 +122,12 @@ struct Task {
     ctx: SavedContext,
     /// カーネルスタックの一番下(起動時のタスクは持たない)
     stack: Option<usize>,
+    /// 優先度(0 = 通常、1〜99 = リアルタイム)
+    priority: u8,
+    /// 眠っているなら、起きる時刻(起動からのナノ秒)
+    wake_at: Option<u64>,
+    /// 待ちのループで譲った(次に動くまで、優先度を 0 として扱う)
+    yielded: bool,
 }
 
 struct Scheduler {
@@ -127,6 +156,9 @@ pub fn init(p: Platform) {
             state: State::Running,
             ctx: SavedContext::default(),
             stack: None,
+            priority: 0,
+            wake_at: None,
+            yielded: false,
         }),
     );
     *SCHED.lock() = Some(Scheduler {
@@ -164,6 +196,9 @@ pub fn spawn(entry: fn(usize), arg: usize) -> Option<Tid> {
                 state: State::Ready,
                 ctx,
                 stack: Some(bottom),
+                priority: 0,
+                wake_at: None,
+                yielded: false,
             }),
         );
         s.rq.push(tid);
@@ -173,11 +208,47 @@ pub fn spawn(entry: fn(usize), arg: usize) -> Option<Tid> {
     Some(tid)
 }
 
-/// 次のタスクに切り替える。`still_runnable` が false なら、今のタスクは列に戻さない。
-fn schedule(new_state: State) {
+/// 起きる時刻を過ぎた眠りのタスクを、実行待ちの列に戻す。
+/// まだ眠っているタスクのうち一番早い起床時刻に、タイマの割り込みを頼む
+/// (ティックを待たずに起こせるので、遅れがティックの間隔に縛られない)。
+fn wake_expired(s: &mut Scheduler) {
+    let now = crate::time::now_ns();
+    let mut earliest = None::<u64>;
+    for (&tid, task) in s.tasks.iter_mut() {
+        if task.state != State::Blocked {
+            continue;
+        }
+        match task.wake_at {
+            Some(w) if w <= now => {
+                task.state = State::Ready;
+                task.wake_at = None;
+                s.rq.push(tid);
+            }
+            Some(w) => earliest = Some(earliest.map_or(w, |e| e.min(w))),
+            None => {}
+        }
+    }
+    if let Some(w) = earliest {
+        crate::time::wake_at(w);
+    }
+}
+
+/// 次のタスクの選び方
+#[derive(Clone, Copy, PartialEq)]
+enum Pick {
+    /// 優先度の高いものから
+    ByPriority,
+    /// 優先度に関係なく、列の先頭(待ちの間に譲るとき。高い優先度のタスクが
+    /// 待ちのループで CPU を独り占めすると、待っている相手が永遠に動けない)
+    Anyone,
+}
+
+/// 次のタスクに切り替える。`new_state` が Running なら今のタスクはまだ動ける。
+/// Blocked なら `wake_at` まで眠る。Dead なら終わる。
+fn schedule(new_state: State, wake_at: Option<u64>, pick: Pick) {
     let p = platform();
     let flags = (p.irq_save)();
-    let switch = {
+    let switch = loop {
         let mut guard = SCHED.lock();
         let s = guard.as_mut().expect("scheduler is initialized");
         // 前に終わったタスクのスタックを返す(自分のスタックの上では返せないので、ここで)
@@ -191,23 +262,58 @@ fn schedule(new_state: State) {
         }
         let cur = s.current;
         let runnable = new_state == State::Running;
-        match s.rq.next(cur, runnable) {
-            Some(next) => {
-                let cur_task = s.tasks.get_mut(&cur).expect("current task");
-                cur_task.state = if runnable { State::Ready } else { new_state };
+        // 待ちのループにいる間は優先度を手放す。そうしないと、高い優先度のタスクが
+        // 待つたびに選ばれ続け、待っている相手(低い優先度)がほとんど動けない
+        s.tasks.get_mut(&cur).expect("current task").yielded = pick == Pick::Anyone;
+        if !runnable {
+            let cur_task = s.tasks.get_mut(&cur).expect("current task");
+            if cur_task.state == State::Running {
+                cur_task.state = new_state;
+                cur_task.wake_at = wake_at;
                 if new_state == State::Dead {
                     s.dead.push(cur);
+                }
+            }
+        }
+        wake_expired(s);
+        let tasks = &s.tasks;
+        let next = match pick {
+            Pick::ByPriority => s.rq.next_by(cur, runnable, |t| {
+                tasks
+                    .get(&t)
+                    .map_or(0, |t| if t.yielded { 0 } else { t.priority })
+            }),
+            Pick::Anyone => s.rq.next(cur, runnable),
+        };
+        match next {
+            None if runnable => break None,
+            // 眠っていた自分がもう起きる時刻になった
+            Some(next) if next == cur => {
+                s.tasks.get_mut(&cur).expect("current task").state = State::Running;
+                break None;
+            }
+            Some(next) => {
+                let cur_task = s.tasks.get_mut(&cur).expect("current task");
+                if runnable {
+                    cur_task.state = State::Ready;
                 }
                 let from: *mut SavedContext = &mut cur_task.ctx;
                 let next_task = s.tasks.get_mut(&next).expect("queued task");
                 next_task.state = State::Running;
+                next_task.yielded = false;
+                next_task.yielded = false;
                 let to: *const SavedContext = &next_task.ctx;
                 s.current = next;
-                Some((from, to, next))
+                break Some((from, to, next));
             }
             None => {
-                assert!(runnable, "no task to run");
-                None
+                // 動けるタスクがない:眠っているタスクが起きるまで待つ
+                assert!(
+                    s.tasks.values().any(|t| t.wake_at.is_some()),
+                    "no task to run"
+                );
+                drop(guard);
+                core::hint::spin_loop();
             }
         }
     };
@@ -219,15 +325,47 @@ fn schedule(new_state: State) {
     (p.irq_restore)(flags);
 }
 
+/// 時刻 `deadline`(起動からのナノ秒)まで、今のタスクを眠らせる。
+/// スケジューラが動いていなければ、その場で待つ。
+pub fn sleep_until(deadline: u64) {
+    if PLATFORM.get().is_none() || SCHED.lock().is_none() {
+        while crate::time::now_ns() < deadline {
+            core::hint::spin_loop();
+        }
+        return;
+    }
+    if crate::time::now_ns() < deadline {
+        schedule(State::Blocked, Some(deadline), Pick::ByPriority);
+    }
+}
+
+/// タスクの優先度を変える(0 = 通常、1〜99 = リアルタイム)。タスクがなければ false。
+pub fn set_priority(tid: Tid, priority: u8) -> bool {
+    SCHED
+        .lock()
+        .as_mut()
+        .and_then(|s| s.tasks.get_mut(&tid))
+        .map(|t| t.priority = priority)
+        .is_some()
+}
+
+pub fn priority(tid: Tid) -> u8 {
+    SCHED
+        .lock()
+        .as_ref()
+        .and_then(|s| s.tasks.get(&tid))
+        .map_or(0, |t| t.priority)
+}
+
 /// ほかに動けるタスクがあれば譲る。
 pub fn yield_now() {
-    schedule(State::Running);
+    schedule(State::Running, None, Pick::ByPriority);
 }
 
 /// 何かを待っている間に呼ぶ:スケジューラが動いていれば譲り、なければその場で少し待つ。
 pub fn relax() {
     if PLATFORM.get().is_some() && SCHED.lock().is_some() {
-        yield_now();
+        schedule(State::Running, None, Pick::Anyone);
     } else {
         core::hint::spin_loop();
     }
@@ -235,7 +373,7 @@ pub fn relax() {
 
 /// 今のタスクを終える。
 pub fn exit_current() -> ! {
-    schedule(State::Dead);
+    schedule(State::Dead, None, Pick::ByPriority);
     unreachable!("a dead task was scheduled again");
 }
 
@@ -316,5 +454,32 @@ mod tests {
         let mut rq = RunQueue::new();
         assert_eq!(rq.next(1, true), None, "keep running");
         assert_eq!(rq.next(1, false), None, "nothing to run");
+    }
+
+    fn prio(p: &[(Tid, u8)]) -> impl Fn(Tid) -> u8 + '_ {
+        move |t| p.iter().find(|(x, _)| *x == t).map_or(0, |(_, pr)| *pr)
+    }
+
+    #[test]
+    fn the_highest_priority_ready_task_runs_first() {
+        let mut rq = RunQueue::new();
+        rq.push(2);
+        rq.push(3);
+        rq.push(4);
+        let p = [(3, 50)];
+        assert_eq!(rq.next_by(1, true, prio(&p)), Some(3));
+        // 同じ優先度どうしは並んだ順(1 は列の最後に回った)
+        assert_eq!(rq.next_by(3, false, prio(&p)), Some(2));
+    }
+
+    #[test]
+    fn a_higher_priority_current_task_keeps_running() {
+        let mut rq = RunQueue::new();
+        rq.push(2);
+        let p = [(1, 10)];
+        assert_eq!(rq.next_by(1, true, prio(&p)), None, "1 outranks 2");
+        assert_eq!(rq.len(), 1);
+        // 動けなくなったら、低くても次を選ぶ
+        assert_eq!(rq.next_by(1, false, prio(&p)), Some(2));
     }
 }
