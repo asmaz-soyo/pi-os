@@ -224,6 +224,14 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn each_process_keeps_its_own_thread_pointer() {
+            let a = boot::spawn_program("/bin/tls", &[b"tls"]).unwrap();
+            let b = boot::spawn_program("/bin/tls", &[b"tls", b"x"]).unwrap();
+            assert_eq!(boot::wait(a), 0);
+            assert_eq!(boot::wait(b), 0);
+        }
+
+        #[test_case]
         fn fp_simd_is_usable() {
             let x = core::hint::black_box(1.5f64);
             assert_eq!(x * 2.0, 3.0);

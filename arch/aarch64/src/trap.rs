@@ -21,11 +21,15 @@ pub struct TrapFrame {
     pub esr: u64,
     /// アボートを起こしたアドレス
     pub far: u64,
+    /// EL0 のスレッドポインタ(musl の TLS)。プロセスごとに違うので、例外の出入りで保存・復元する
+    pub tpidr_el0: u64,
+    /// 16 バイト境界にそろえるための詰め物
+    pub _pad: u64,
 }
 
 impl TrapFrame {
     /// アセンブリが確保するバイト数。
-    pub const SIZE: usize = 36 * 8;
+    pub const SIZE: usize = 38 * 8;
 }
 
 impl fmt::Display for TrapFrame {
@@ -63,6 +67,8 @@ mod tests {
         assert_eq!(core::mem::offset_of!(TrapFrame, spsr), 33 * 8);
         assert_eq!(core::mem::offset_of!(TrapFrame, esr), 34 * 8);
         assert_eq!(core::mem::offset_of!(TrapFrame, far), 35 * 8);
+        assert_eq!(core::mem::offset_of!(TrapFrame, tpidr_el0), 36 * 8);
+        assert_eq!(TrapFrame::SIZE, 38 * 8);
     }
 
     #[test]

@@ -91,12 +91,12 @@ pub fn unhandled(kind: u64, frame: &TrapFrame) -> ! {
 /// カーネル実行中の同期例外を表す `kind`(`unhandled` に渡す)。
 pub const KIND_SYNC_CURRENT_EL: u64 = 4;
 
-// TrapFrame::SIZE = 288。並びは trap.rs の TrapFrame と同じ(ホストのテストで確かめている)。
+// TrapFrame::SIZE = 304。並びは trap.rs の TrapFrame と同じ(ホストのテストで確かめている)。
 core::arch::global_asm!(
     r#"
 .macro VECTOR kind
     .balign 0x80
-    sub     sp, sp, #288
+    sub     sp, sp, #304
     stp     x0, x1, [sp, #0]
     mov     x0, #\kind
     b       exception_common
@@ -147,7 +147,8 @@ exception_common:
     mrs     x3, esr_el1
     stp     x2, x3, [sp, #264]
     mrs     x2, far_el1
-    str     x2, [sp, #280]
+    mrs     x3, tpidr_el0
+    stp     x2, x3, [sp, #280]
 
     mov     x1, sp
     bl      arch_exception_entry
@@ -162,6 +163,8 @@ exception_return:
     msr     elr_el1, x3
     ldr     x2, [sp, #264]
     msr     spsr_el1, x2
+    ldr     x2, [sp, #288]
+    msr     tpidr_el0, x2
     ldp     x0, x1, [sp, #0]
     ldp     x2, x3, [sp, #16]
     ldp     x4, x5, [sp, #32]
@@ -178,7 +181,7 @@ exception_return:
     ldp     x26, x27, [sp, #208]
     ldp     x28, x29, [sp, #224]
     ldr     x30, [sp, #240]
-    add     sp, sp, #288
+    add     sp, sp, #304
     eret
 "#
 );

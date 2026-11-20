@@ -110,13 +110,13 @@ arch_enter_user:
     mov     x2, sp
     str     x2, [x0, #96]
     // トラップフレームをスタックに写し、例外の復帰経路から EL0 へ戻る
-    sub     sp, sp, #288
+    sub     sp, sp, #304
     mov     x2, #0
 1:
     ldr     x3, [x1, x2]
     str     x3, [sp, x2]
     add     x2, x2, #8
-    cmp     x2, #288
+    cmp     x2, #304
     b.lo    1b
     b       exception_return
 
@@ -139,13 +139,13 @@ arch_enter_user_frame:
     // x0 = frame。保存はしない(タスクのスタックの上で EL0 に入り、戻らない)
     msr     daifset, #2
     mov     x1, x0
-    sub     sp, sp, #288
+    sub     sp, sp, #304
     mov     x2, #0
 2:
     ldr     x3, [x1, x2]
     str     x3, [sp, x2]
     add     x2, x2, #8
-    cmp     x2, #288
+    cmp     x2, #304
     b.lo    2b
     b       exception_return
 

@@ -120,8 +120,8 @@ fn init_heap() {
     unsafe { kernel::mm::HEAP.init(phys_to_virt(start).0 as usize, HEAP_SIZE) };
 }
 
-/// カーネルスタックの大きさ(16KiB)
-const KERNEL_STACK_PAGES: usize = 4;
+/// カーネルスタックの大きさ(64KiB。デバッグビルドでも余裕を持たせる)
+const KERNEL_STACK_PAGES: usize = 16;
 
 fn alloc_kernel_stack() -> Option<(usize, usize)> {
     let pa = kernel::mm::alloc_frames(KERNEL_STACK_PAGES).ok()?;
