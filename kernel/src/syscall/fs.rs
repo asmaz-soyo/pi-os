@@ -296,3 +296,15 @@ pub fn readlinkat(p: &mut Process, dirfd: u64, path: u64) -> Result<u64, Errno> 
     p.vfs.lookup(&path)?;
     Err(Errno::EINVAL)
 }
+
+/// chdir(path)
+pub fn chdir(p: &mut Process, path: u64) -> Result<u64, Errno> {
+    let path = path_arg(p, AT_FDCWD as u64, path)?;
+    let st = p.vfs.lookup(&path)?.stat();
+    if st.kind != FileKind::Directory {
+        return Err(Errno::ENOTDIR);
+    }
+    p.cred.check(&st, Access::EXEC)?;
+    p.cwd = path;
+    Ok(0)
+}

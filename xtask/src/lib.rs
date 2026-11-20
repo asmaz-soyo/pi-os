@@ -232,9 +232,8 @@ pub enum Step {
         expected: String,
         exit_code: i32,
         /// コマンドの標準入力に送る内容(QEMU では UART への入力になる)。
-        /// 出力に `input_after` が n 回現れたら、n 番目の入力を送る
-        input: Vec<String>,
-        input_after: String,
+        /// (この文字列が出たら, これを打つ)を順に行う
+        script: Vec<(String, String)>,
         cmd: Cmd,
     },
 }
@@ -249,13 +248,11 @@ impl fmt::Display for Step {
             Self::Snapshot {
                 expected,
                 exit_code,
-                input,
-                input_after,
+                script,
                 cmd,
             } => write!(
                 f,
-                "snapshot {expected} (exit {exit_code}, input {input:?} after {input_after:?}) \
-                 <= {cmd}"
+                "snapshot {expected} (exit {exit_code}, script {script:?}) <= {cmd}"
             ),
         }
     }
@@ -352,11 +349,23 @@ fn kernel_build(bsp: Bsp) -> Cmd {
     Cmd::cargo(&["build", "-p", bsp.crate_name(), "--target", TARGET])
 }
 
-/// スナップショットで UART に送る入力。起動の最後に動く REPL で 1+2 を計算し、^D で終える。
-/// まとめて送ると REPL が取りこぼすので、プロンプトが出るたびに1つずつ送る
-pub const REPL_INPUT: [&str; 2] = ["1+2\r", "\x04"];
-/// REPL のプロンプト。これが出てから入力を送る(UART の初期化より前の入力は捨てられるため)
-pub const REPL_PROMPT: &str = "qjs > ";
+/// スナップショットで打つ入力:(この文字列が出たら, これを打つ)の並び。
+/// 起動の最後に動くシェルで hello を実行し、qjs の REPL で 1+2 を計算して ^D で戻り、exit する。
+/// UART の初期化より前の入力は捨てられ、REPL はまとめて打つと取りこぼすので、プロンプトを待って1つずつ打つ
+pub const SHELL_SCRIPT: &[(&str, &str)] = &[
+    ("$ ", "hello\r"),
+    ("$ ", "qjs\r"),
+    ("qjs > ", "1+2\r"),
+    ("qjs > ", "\x04"),
+    ("$ ", "exit\r"),
+];
+
+fn shell_script() -> Vec<(String, String)> {
+    SHELL_SCRIPT
+        .iter()
+        .map(|&(a, b)| (a.to_string(), b.to_string()))
+        .collect()
+}
 
 /// 起動後にわざと異常を起こす feature(`<名前>-demo`)。報告の形をスナップショットで固定する。
 pub const DEMOS: &[&str] = &["panic", "fault"];
@@ -369,8 +378,7 @@ fn snapshot_tests() -> Vec<Step> {
             let snapshot = |suffix: &str, exit_code| Step::Snapshot {
                 expected: format!("tests/snapshots/{}{suffix}.txt", bsp.name()),
                 exit_code,
-                input: REPL_INPUT.map(String::from).to_vec(),
-                input_after: REPL_PROMPT.to_string(),
+                script: shell_script(),
                 cmd: bsp.qemu(&bsp.kernel_elf()).with_timeout(30),
             };
             let mut steps = vec![Step::Run(kernel_build(bsp)), snapshot("", 0)];
@@ -390,8 +398,7 @@ fn snapshot_tests() -> Vec<Step> {
             // 終われずに止まるので、timeout の終了コード 124 が正しい結果
             expected: "tests/snapshots/raspi3-hw.txt".to_string(),
             exit_code: 124,
-            input: REPL_INPUT.map(String::from).to_vec(),
-            input_after: REPL_PROMPT.to_string(),
+            script: shell_script(),
             cmd: Cmd::new(
                 "qemu-system-aarch64",
                 &["-M", "raspi3b", "-nographic", "-kernel", KERNEL8_IMG],

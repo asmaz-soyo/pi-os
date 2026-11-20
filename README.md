@@ -24,13 +24,18 @@ malloc ok
 init: /bin/hello_musl exited with status 0
 Hello from JS
 init: /bin/qjs exited with status 0
+pi-os:/$ hello
+Hello from user space!
+pi-os:/$ qjs
 QuickJS - Type "\h" for help
 qjs > 1+2
 3
-qjs >
+qjs > ^D
+pi-os:/$ exit
+init: /bin/sh exited with status 0
 ```
 
-起動の最後に QuickJS の REPL(対話モード)が動く。`^D` で REPL を終えるとカーネルも終わる。QEMU 自体を止めるには `Ctrl-A` に続けて `x`。
+起動の最後に小さなシェル(`/bin/sh`)が動く。`/bin` のプログラムを名前で動かせる(`qjs` で JS の REPL)。組み込みコマンドは `cd`、`pwd`、`exit`。`exit` か `^D` でシェルを終えるとカーネルも終わる。QEMU 自体を止めるには `Ctrl-A` に続けて `x`。
 
 フェーズ1のゴール(自作 OS 上で `qjs hello.js` が「Hello from JS」を出す)は、QEMU で達成した。
 

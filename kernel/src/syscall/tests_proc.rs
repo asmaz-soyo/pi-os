@@ -167,3 +167,35 @@ fn wait4_without_children_is_echild_and_wnohang_does_not_block() {
     PROCESSES.exit(301, ExitStatus::Code(0));
     assert_eq!(call(&mut p, nr::WAIT4, [301, 0, 0, 0, 0, 0]), 301);
 }
+
+#[test]
+fn chdir_changes_the_working_directory_for_relative_paths() {
+    let (mut p, _) = process();
+    put(&mut p, SCRATCH + 0x200, b"/etc\0");
+    assert_eq!(call(&mut p, nr::CHDIR, [SCRATCH + 0x200, 0, 0, 0, 0, 0]), 0);
+    assert_eq!(call(&mut p, nr::GETCWD, [SCRATCH, 64, 0, 0, 0, 0]), 5);
+    assert_eq!(get(&mut p, SCRATCH, 5), b"/etc\0");
+    assert_eq!(
+        super::tests::open(&mut p, b"motd", 0),
+        3,
+        "relative to /etc"
+    );
+    put(&mut p, SCRATCH + 0x200, b"..\0");
+    assert_eq!(call(&mut p, nr::CHDIR, [SCRATCH + 0x200, 0, 0, 0, 0, 0]), 0);
+    assert_eq!(p.cwd, "/");
+}
+
+#[test]
+fn chdir_errors() {
+    let (mut p, _) = process();
+    put(&mut p, SCRATCH + 0x200, b"/nope\0");
+    assert_eq!(
+        call(&mut p, nr::CHDIR, [SCRATCH + 0x200, 0, 0, 0, 0, 0]),
+        err(Errno::ENOENT)
+    );
+    put(&mut p, SCRATCH + 0x200, b"/etc/motd\0");
+    assert_eq!(
+        call(&mut p, nr::CHDIR, [SCRATCH + 0x200, 0, 0, 0, 0, 0]),
+        err(Errno::ENOTDIR)
+    );
+}

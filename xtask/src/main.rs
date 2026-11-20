@@ -41,10 +41,9 @@ fn execute(step: &Step) -> Result<(), String> {
         Step::Snapshot {
             expected,
             exit_code,
-            input,
-            input_after,
+            script,
             cmd,
-        } => snapshot(expected, *exit_code, input, input_after, cmd),
+        } => snapshot(expected, *exit_code, script, cmd),
     }
 }
 
@@ -53,8 +52,7 @@ fn execute(step: &Step) -> Result<(), String> {
 fn snapshot(
     expected: &str,
     exit_code: i32,
-    input: &[String],
-    input_after: &str,
+    script: &[(String, String)],
     cmd: &Cmd,
 ) -> Result<(), String> {
     use std::io::{Read, Write};
@@ -82,22 +80,24 @@ fn snapshot(
     };
     // 入力を送ったあとも標準入力は閉じない(閉じると QEMU が残りの入力を受け取らないことがある)
     let mut stdin = child.stdin.take();
-    let mut sent = 0;
+    let mut step = 0;
+    // 前の入力を送ったときまでに読んだ出力の長さ。次の合図はそれより後ろから探す
+    let mut seen_upto = 0;
     loop {
         if child.try_wait().map_err(|e| e.to_string())?.is_some() {
             break;
         }
-        let seen = {
-            let out = collected.lock().unwrap();
-            String::from_utf8_lossy(&out).matches(input_after).count()
-        };
-        // プロンプトが n 回出たら、n 番目までの入力を送る
-        while sent < seen.min(input.len()) {
-            if let Some(s) = stdin.as_mut() {
-                let _ = s.write_all(input[sent].as_bytes());
-                let _ = s.flush();
+        if let Some((trigger, text)) = script.get(step) {
+            let out = collected.lock().unwrap().clone();
+            let rest = String::from_utf8_lossy(&out[seen_upto.min(out.len())..]).into_owned();
+            if let Some(i) = rest.find(trigger.as_str()) {
+                seen_upto += rest[..i + trigger.len()].len();
+                if let Some(s) = stdin.as_mut() {
+                    let _ = s.write_all(text.as_bytes());
+                    let _ = s.flush();
+                }
+                step += 1;
             }
-            sent += 1;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }

@@ -17,6 +17,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 pub mod nr {
     pub const GETCWD: u64 = 17;
     pub const IOCTL: u64 = 29;
+    pub const CHDIR: u64 = 49;
     pub const OPENAT: u64 = 56;
     pub const CLOSE: u64 = 57;
     pub const LSEEK: u64 = 62;
@@ -141,6 +142,7 @@ macro_rules! table {
 table! {
     nr::GETCWD, "getcwd", 2 => |p, a| result(fs::getcwd(p, a[0], a[1]));
     nr::IOCTL, "ioctl", 3 => |p, a| result(fs::ioctl(p, a[0], a[1], a[2]));
+    nr::CHDIR, "chdir", 1 => |p, a| result(fs::chdir(p, a[0]));
     nr::OPENAT, "openat", 4 => |p, a| result(fs::openat(p, a[0], a[1], a[2]));
     nr::CLOSE, "close", 1 => |p, a| result(p.fds.close(a[0]).map(|_| 0));
     nr::LSEEK, "lseek", 3 => |p, a| result(fs::lseek(p, a[0], a[1] as i64, a[2]));
