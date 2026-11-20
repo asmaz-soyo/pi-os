@@ -101,6 +101,11 @@ mod tests {
     ktest::common_tests!();
 
     #[test_case]
+    fn the_ext2_partition_of_the_disk_is_mounted_on_mnt() {
+        assert_eq!(boot::run_program("/bin/ext2read", &[b"ext2read"]), Ok(0));
+    }
+
+    #[test_case]
     fn virtio_disk_is_readable_and_writable_through_dev_vda() {
         assert_eq!(boot::run_program("/bin/diskread", &[b"diskread"]), Ok(0));
     }

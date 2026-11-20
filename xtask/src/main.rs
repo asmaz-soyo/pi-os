@@ -181,20 +181,39 @@ fn generate_docs(path: &str, check: bool) -> Result<(), String> {
     std::fs::write(&full, want).map_err(|e| e.to_string())
 }
 
-/// QEMU virt に渡すテスト用のディスクイメージ(1MiB)を作る。
+/// QEMU virt に渡すテスト用のディスクイメージ(4MiB)を作る。
 ///
-/// セクタ 0 は MBR(パーティション 1 つ、種類 0x83)、セクタ 1 は目印の文字列。
+/// セクタ 0 は MBR、セクタ 1 は目印の文字列、LBA 2048 から ext2 のパーティション
+/// (`user/diskroot/` の中身を `mke2fs -d` で入れる)。
 fn make_disk(path: &str) -> Result<(), String> {
-    let mut disk = vec![0u8; 1024 * 1024];
+    const PART_START: usize = 2048;
+    const PART_SECTORS: usize = 6144;
+    let mut disk = vec![0u8; (PART_START + PART_SECTORS) * 512];
     let entry = &mut disk[446..462];
     entry[4] = 0x83;
-    entry[8..12].copy_from_slice(&16u32.to_le_bytes());
-    entry[12..16].copy_from_slice(&2032u32.to_le_bytes());
+    entry[8..12].copy_from_slice(&(PART_START as u32).to_le_bytes());
+    entry[12..16].copy_from_slice(&(PART_SECTORS as u32).to_le_bytes());
     disk[510] = 0x55;
     disk[511] = 0xaa;
     let mark = b"Pi-OS test disk\n";
     disk[512..512 + mark.len()].copy_from_slice(mark);
+
     let full = root().join(path);
     std::fs::create_dir_all(full.parent().unwrap()).map_err(|e| e.to_string())?;
+    let ext2 = full.with_extension("ext2");
+    // 先に空のファイルを作っておくと、mke2fs が「Creating regular file」と言わない
+    std::fs::write(&ext2, b"").map_err(|e| e.to_string())?;
+    let status = Command::new("mke2fs")
+        .args(["-q", "-F", "-t", "ext2", "-b", "1024", "-I", "128", "-d"])
+        .arg(root().join("user/diskroot"))
+        .arg(&ext2)
+        .arg((PART_SECTORS / 2).to_string())
+        .status()
+        .map_err(|e| format!("mke2fs (e2fsprogs) is needed: {e}"))?;
+    if !status.success() {
+        return Err("mke2fs failed".to_string());
+    }
+    let fs = std::fs::read(&ext2).map_err(|e| e.to_string())?;
+    disk[PART_START * 512..PART_START * 512 + fs.len()].copy_from_slice(&fs);
     std::fs::write(&full, disk).map_err(|e| e.to_string())
 }

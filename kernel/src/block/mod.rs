@@ -40,6 +40,51 @@ pub fn names() -> Vec<String> {
     DISKS.lock().iter().map(|(n, _)| n.clone()).collect()
 }
 
+/// ディスクの一部(パーティション)を、1 つのブロックデバイスとして見せる。
+pub struct PartitionDevice {
+    disk: SharedDisk,
+    start: u64,
+    count: u64,
+}
+
+impl PartitionDevice {
+    pub fn new(disk: SharedDisk, start: u64, count: u64) -> Self {
+        Self { disk, start, count }
+    }
+
+    fn map(&self, lba: u64) -> Result<u64, hal::block::BlockError> {
+        if lba < self.count {
+            Ok(self.start + lba)
+        } else {
+            Err(hal::block::BlockError::OutOfRange)
+        }
+    }
+}
+
+impl BlockDevice for PartitionDevice {
+    fn block_count(&self) -> u64 {
+        self.count
+    }
+
+    fn read_block(
+        &mut self,
+        lba: u64,
+        buf: &mut [u8; BLOCK_SIZE],
+    ) -> Result<(), hal::block::BlockError> {
+        let lba = self.map(lba)?;
+        self.disk.lock().read_block(lba, buf)
+    }
+
+    fn write_block(
+        &mut self,
+        lba: u64,
+        buf: &[u8; BLOCK_SIZE],
+    ) -> Result<(), hal::block::BlockError> {
+        let lba = self.map(lba)?;
+        self.disk.lock().write_block(lba, buf)
+    }
+}
+
 /// ブロックデバイスを、バイト単位の位置で読み書きできるファイルとして見せる(`/dev/vda`)。
 pub struct BlockFile {
     disk: SharedDisk,
@@ -162,5 +207,26 @@ mod tests {
         assert!(find("testdisk").is_some());
         assert!(names().iter().any(|n| n == "testdisk"));
         assert!(find("nope").is_none());
+    }
+}
+
+#[cfg(test)]
+mod partition_tests {
+    use super::*;
+    use alloc::boxed::Box;
+    use hal::block::{BlockDevice, BlockError};
+
+    #[test]
+    fn a_partition_shifts_and_limits_block_numbers() {
+        let disk = shared(Box::new(ramdisk::RamDisk::new(10)));
+        let mut sector = [0u8; 512];
+        sector[0] = 42;
+        disk.lock().write_block(3, &sector).unwrap();
+        let mut part = PartitionDevice::new(disk, 3, 4);
+        assert_eq!(part.block_count(), 4);
+        let mut buf = [0u8; 512];
+        part.read_block(0, &mut buf).unwrap();
+        assert_eq!(buf[0], 42);
+        assert_eq!(part.read_block(4, &mut buf), Err(BlockError::OutOfRange));
     }
 }

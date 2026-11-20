@@ -1,0 +1,1 @@
+ext2 can hold directories too.

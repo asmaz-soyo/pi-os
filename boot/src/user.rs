@@ -291,9 +291,38 @@ fn vfs() -> (Arc<Vfs>, Arc<dyn File>) {
         vfs.mount("/dev", Arc::new(Devfs::new(console.clone())));
         vfs.mount("/tmp", Arc::new(kernel::fs::tmpfs::Tmpfs::new()));
         vfs.mount("/proc", Arc::new(kernel::fs::procfs::Procfs::new()));
+        mount_disk(&mut vfs);
         (Arc::new(vfs), console)
     });
     (vfs.clone(), console.clone())
+}
+
+/// `/dev/vda` に MBR と Linux のパーティション(0x83)があれば、ext2 として `/mnt` にマウントする。
+fn mount_disk(vfs: &mut Vfs) {
+    let Some(disk) = kernel::block::find("vda") else {
+        return;
+    };
+    let mut sector = [0u8; 512];
+    if disk.lock().read_block(0, &mut sector).is_err() {
+        return;
+    }
+    let Some(parts) = kernel::block::mbr::parse(&sector) else {
+        return;
+    };
+    let Some(part) = parts
+        .iter()
+        .find(|p| p.kind == kernel::block::mbr::KIND_LINUX)
+    else {
+        return;
+    };
+    let dev = kernel::block::PartitionDevice::new(disk, part.start as u64, part.count as u64);
+    match kernel::fs::ext2::Ext2::new(kernel::block::shared(Box::new(dev))) {
+        Ok(fs) => {
+            vfs.mount("/mnt", Arc::new(fs));
+            kernel::println!("ext2: /dev/vda1 mounted on /mnt");
+        }
+        Err(e) => kernel::println!("ext2: cannot mount /dev/vda1: {e:?}"),
+    }
 }
 
 /// initramfs のプログラム `path` を新しいプロセスとして動かし始める。
