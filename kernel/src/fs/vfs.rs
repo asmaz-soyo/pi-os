@@ -87,6 +87,11 @@ pub trait File: Send + Sync {
     fn is_read_only(&self) -> bool {
         false
     }
+
+    /// 具体的な型として取り出す(timerfd や epoll の操作で使う)
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        None
+    }
 }
 
 /// ディレクトリの中の1項目。

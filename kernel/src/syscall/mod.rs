@@ -9,6 +9,7 @@ mod misc;
 mod mm;
 mod poll;
 mod proc;
+mod time;
 
 use crate::process::Process;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -16,6 +17,9 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 /// システムコールの番号(Linux AArch64、`include/uapi/asm-generic/unistd.h`)。
 pub mod nr {
     pub const GETCWD: u64 = 17;
+    pub const EPOLL_CREATE1: u64 = 20;
+    pub const EPOLL_CTL: u64 = 21;
+    pub const EPOLL_PWAIT: u64 = 22;
     pub const DUP: u64 = 23;
     pub const DUP3: u64 = 24;
     pub const FCNTL: u64 = 25;
@@ -38,10 +42,15 @@ pub mod nr {
     pub const READLINKAT: u64 = 78;
     pub const NEWFSTATAT: u64 = 79;
     pub const FSTAT: u64 = 80;
+    pub const TIMERFD_CREATE: u64 = 85;
+    pub const TIMERFD_SETTIME: u64 = 86;
+    pub const TIMERFD_GETTIME: u64 = 87;
     pub const EXIT: u64 = 93;
     pub const EXIT_GROUP: u64 = 94;
     pub const SET_TID_ADDRESS: u64 = 96;
+    pub const NANOSLEEP: u64 = 101;
     pub const CLOCK_GETTIME: u64 = 113;
+    pub const CLOCK_NANOSLEEP: u64 = 115;
     pub const SCHED_GETAFFINITY: u64 = 123;
     pub const RT_SIGACTION: u64 = 134;
     pub const RT_SIGPROCMASK: u64 = 135;
@@ -149,6 +158,10 @@ macro_rules! table {
 
 table! {
     nr::GETCWD, "getcwd", 2 => |p, a| result(fs::getcwd(p, a[0], a[1]));
+    nr::EPOLL_CREATE1, "epoll_create1", 1 => |p, a| result(time::epoll_create1(p));
+    nr::EPOLL_CTL, "epoll_ctl", 4 => |p, a| result(time::epoll_ctl(p, a[0], a[1], a[2], a[3]));
+    nr::EPOLL_PWAIT, "epoll_pwait", 4
+        => |p, a| result(time::epoll_pwait(p, a[0], a[1], a[2], a[3] as i32));
     nr::DUP, "dup", 1 => |p, a| result(fs::dup(p, a[0]));
     nr::DUP3, "dup3", 3 => |p, a| result(fs::dup3(p, a[0], a[1], a[2]));
     nr::FCNTL, "fcntl", 3 => |p, a| result(fs::fcntl(p, a[0], a[1], a[2]));
@@ -171,11 +184,18 @@ table! {
     nr::READLINKAT, "readlinkat", 4 => |p, a| result(fs::readlinkat(p, a[0], a[1]));
     nr::NEWFSTATAT, "newfstatat", 4 => |p, a| result(fs::newfstatat(p, a[0], a[1], a[2], a[3]));
     nr::FSTAT, "fstat", 2 => |p, a| result(fs::fstat(p, a[0], a[1]));
+    nr::TIMERFD_CREATE, "timerfd_create", 2 => |p, a| result(time::timerfd_create(p));
+    nr::TIMERFD_SETTIME, "timerfd_settime", 4
+        => |p, a| result(time::timerfd_settime(p, a[0], a[1], a[2], a[3]));
+    nr::TIMERFD_GETTIME, "timerfd_gettime", 2 => |p, a| result(time::timerfd_gettime(p, a[0], a[1]));
     nr::EXIT, "exit", 1 => |p, a| Action::Exit(proc::exit_status(a[0]));
     nr::EXIT_GROUP, "exit_group", 1 => |p, a| Action::Exit(proc::exit_status(a[0]));
     // フェーズ1はプロセスもスレッドも1つ
     nr::SET_TID_ADDRESS, "set_tid_address", 1 => |p, a| Action::Return(1);
+    nr::NANOSLEEP, "nanosleep", 2 => |p, a| result(time::nanosleep(p, a[0]));
     nr::CLOCK_GETTIME, "clock_gettime", 2 => |p, a| result(misc::clock_gettime(p, a[0], a[1]));
+    nr::CLOCK_NANOSLEEP, "clock_nanosleep", 4
+        => |p, a| result(time::clock_nanosleep(p, a[0], a[1], a[2]));
     nr::SCHED_GETAFFINITY, "sched_getaffinity", 3
         => |p, a| result(misc::sched_getaffinity(p, a[1], a[2]));
     // シグナルはまだ配送しないので、設定は受け付けるだけ
@@ -258,6 +278,8 @@ pub fn dispatch(p: &mut Process, nr: u64, a: [u64; 6]) -> Action {
 mod tests_mm;
 #[cfg(test)]
 mod tests_proc;
+#[cfg(test)]
+mod tests_time;
 #[cfg(test)]
 mod tests_tmp;
 #[cfg(test)]

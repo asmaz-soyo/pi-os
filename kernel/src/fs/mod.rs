@@ -1,7 +1,9 @@
 //! ファイルシステム。
 
 pub mod devfs;
+pub mod epoll;
 pub mod initramfs;
 pub mod tar;
+pub mod timerfd;
 pub mod tmpfs;
 pub mod vfs;

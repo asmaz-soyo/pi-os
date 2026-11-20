@@ -6,6 +6,9 @@
 | 番号 | 名前 | 引数の数 |
 | --- | --- | --- |
 | 17 | `getcwd` | 2 |
+| 20 | `epoll_create1` | 1 |
+| 21 | `epoll_ctl` | 4 |
+| 22 | `epoll_pwait` | 4 |
 | 23 | `dup` | 1 |
 | 24 | `dup3` | 3 |
 | 25 | `fcntl` | 3 |
@@ -28,10 +31,15 @@
 | 78 | `readlinkat` | 4 |
 | 79 | `newfstatat` | 4 |
 | 80 | `fstat` | 2 |
+| 85 | `timerfd_create` | 2 |
+| 86 | `timerfd_settime` | 4 |
+| 87 | `timerfd_gettime` | 2 |
 | 93 | `exit` | 1 |
 | 94 | `exit_group` | 1 |
 | 96 | `set_tid_address` | 1 |
+| 101 | `nanosleep` | 2 |
 | 113 | `clock_gettime` | 2 |
+| 115 | `clock_nanosleep` | 4 |
 | 123 | `sched_getaffinity` | 3 |
 | 134 | `rt_sigaction` | 4 |
 | 135 | `rt_sigprocmask` | 4 |
@@ -54,4 +62,4 @@
 | 260 | `wait4` | 4 |
 | 278 | `getrandom` | 3 |
 
-合計 48 個
+合計 56 個
