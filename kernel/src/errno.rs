@@ -24,6 +24,7 @@ pub enum Errno {
     ENOTTY = 25,
     ESPIPE = 29,
     ERANGE = 34,
+    ENAMETOOLONG = 36,
     ENOSYS = 38,
 }
 

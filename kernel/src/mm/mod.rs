@@ -3,6 +3,7 @@
 pub mod frame;
 pub mod heap;
 pub mod layout;
+pub mod user;
 
 use crate::Errno;
 use crate::sync::SpinLock;

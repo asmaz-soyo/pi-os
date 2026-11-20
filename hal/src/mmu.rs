@@ -62,3 +62,38 @@ impl MapFlags {
         device: false,
     };
 }
+
+use crate::addr::{PhysAddr, VirtAddr};
+
+/// マッピングの失敗。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapError {
+    AlreadyMapped,
+    Misaligned,
+    OutOfMemory,
+}
+
+/// プロセスのアドレス空間(ユーザー空間のページテーブル)。
+pub trait AddressSpace: Send {
+    /// 4KiB ページを1枚マップする。
+    fn map_page(&mut self, va: VirtAddr, pa: PhysAddr, flags: MapFlags) -> Result<(), MapError>;
+    /// マッピングを外し、指していたフレームを返す(TLB の無効化も行う)。
+    fn unmap_page(&mut self, va: VirtAddr) -> Option<PhysAddr>;
+    /// 変換する。マップされていなければ `None`。
+    fn translate(&mut self, va: VirtAddr) -> Option<(PhysAddr, MapFlags)>;
+    /// このアドレス空間を CPU に設定する(TTBR0 を切り替える)。
+    fn activate(&mut self);
+}
+
+/// 物理フレームの確保と、その中身への読み書き。
+pub trait PhysMemory: Sync {
+    /// 0 で埋めたフレームを1枚取る。
+    fn alloc_frame(&self) -> Option<PhysAddr>;
+    /// フレームを返す。
+    fn release_frame(&self, pa: PhysAddr);
+    /// フレームの中身を指すポインタ(カーネルから読み書きするため)。
+    ///
+    /// # Safety
+    /// `pa` は `alloc_frame` で取ったフレームであること。ポインタは 4KiB の範囲だけ有効。
+    unsafe fn frame_ptr(&self, pa: PhysAddr) -> *mut u8;
+}
