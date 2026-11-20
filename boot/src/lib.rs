@@ -49,10 +49,12 @@ pub fn init<B: Board>() {
     exception::init();
     // 2. 物理メモリとページテーブル(デバイスのアドレスが見えるようになる)
     init_memory::<B>();
-    // 3. UART と割り込みコントローラ。ここから println! が使える
+    // 3. カーネルヒープ(ここから Box や Vec が使える)
+    init_heap();
+    // 4. UART と割り込みコントローラ。ここから println! が使える
     B::init_devices();
     kernel::console::set_console(B::console());
-    // 4. タイマ割り込み
+    // 5. タイマ割り込み
     start_timer::<B>();
 }
 
@@ -91,6 +93,17 @@ fn init_memory<B: Board>() {
         arch_aarch64::cpu::set_kernel_table(kernel_table.root());
         arch_aarch64::cpu::set_user_table(user_table.root());
     }
+}
+
+/// カーネルヒープの大きさ
+const HEAP_SIZE: usize = 4 * 1024 * 1024;
+
+/// 連続したフレームを取ってヒープにする。
+fn init_heap() {
+    let frames = HEAP_SIZE / PAGE_SIZE as usize;
+    let start = kernel::mm::alloc_frames(frames).expect("contiguous frames for the heap");
+    // SAFETY: 割り当てたばかりのフレームで、線形マップで見えている
+    unsafe { kernel::mm::HEAP.init(phys_to_virt(start).0 as usize, HEAP_SIZE) };
 }
 
 /// 例外の受け口。IRQ は割り込みコントローラから番号を読み、カーネルの表で振り分ける。

@@ -1,6 +1,7 @@
 //! メモリ管理。
 
 pub mod frame;
+pub mod heap;
 pub mod layout;
 
 use crate::Errno;
@@ -43,3 +44,7 @@ pub fn frame_stats() -> (usize, usize) {
         .map(|f| (f.free_frames(), f.total_frames()))
         .unwrap_or((0, 0))
 }
+
+/// カーネルのヒープ。カーネルのビルドでだけ、`alloc` クレートの割り当て先になる。
+#[cfg_attr(target_os = "none", global_allocator)]
+pub static HEAP: heap::LockedHeap = heap::LockedHeap::empty();

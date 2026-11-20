@@ -1,6 +1,8 @@
 //! カーネルのコア。ハードウェアの知識は持たず、`hal` のトレイトにだけ依存する。
 #![no_std]
 
+extern crate alloc;
+
 #[cfg(test)]
 extern crate std;
 

@@ -125,6 +125,20 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn heap_supports_box_vec_and_string_and_returns_memory() {
+            extern crate alloc;
+            let before = kernel::mm::HEAP.free_bytes();
+            assert!(before > 0, "heap is initialized");
+            {
+                let b = alloc::boxed::Box::new(41u64);
+                let v: alloc::vec::Vec<u32> = (0..1000).collect();
+                let s = alloc::format!("{}-{}", *b + 1, v.len());
+                assert_eq!(s, "42-1000");
+            }
+            assert_eq!(kernel::mm::HEAP.free_bytes(), before);
+        }
+
+        #[test_case]
         fn fp_simd_is_usable() {
             let x = core::hint::black_box(1.5f64);
             assert_eq!(x * 2.0, 3.0);
