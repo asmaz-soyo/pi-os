@@ -27,6 +27,8 @@ impl File for ConsoleFile {
             mode: 0o620,
             size: 0,
             ino: 0x1_0001,
+            uid: 0,
+            gid: 0,
         }
     }
 
@@ -54,6 +56,8 @@ impl File for NullFile {
             mode: 0o666,
             size: 0,
             ino: 0x1_0002,
+            uid: 0,
+            gid: 0,
         }
     }
 
@@ -75,6 +79,8 @@ impl File for DevDir {
             mode: 0o755,
             size: 0,
             ino: 0x1_0000,
+            uid: 0,
+            gid: 0,
         }
     }
 }

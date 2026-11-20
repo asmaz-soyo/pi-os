@@ -3,6 +3,7 @@
 //! フェーズ1では同時に動くプロセスは1つだけ(qjs は1プロセスで動く)。
 //! マルチタスクはフェーズ2で、ここにスケジューラを足す。
 
+use crate::cred::Credentials;
 use crate::exec::Loaded;
 use crate::fs::vfs::{FdTable, File, O_RDWR, OpenFile, Vfs};
 use crate::mm::user::UserMemory;
@@ -24,6 +25,8 @@ pub struct Process {
     pub fds: FdTable,
     pub cwd: String,
     pub vfs: Arc<Vfs>,
+    /// 誰として動いているか(ADR-0005)
+    pub cred: Credentials,
 }
 
 impl Process {
@@ -42,6 +45,7 @@ impl Process {
             fds,
             cwd: String::from("/"),
             vfs,
+            cred: Credentials::root(),
         }
     }
 }

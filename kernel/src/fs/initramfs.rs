@@ -11,6 +11,8 @@ struct RamFile {
     data: &'static [u8],
     mode: u32,
     ino: u64,
+    uid: u32,
+    gid: u32,
 }
 
 impl File for RamFile {
@@ -20,6 +22,8 @@ impl File for RamFile {
             mode: self.mode & 0o777,
             size: self.data.len() as u64,
             ino: self.ino,
+            uid: self.uid,
+            gid: self.gid,
         }
     }
 
@@ -50,6 +54,8 @@ impl File for RamDir {
             mode: 0o755,
             size: 0,
             ino: self.ino,
+            uid: 0,
+            gid: 0,
         }
     }
 
@@ -95,6 +101,8 @@ impl Initramfs {
                     data: entry.data,
                     mode: entry.mode,
                     ino: next_ino(),
+                    uid: entry.uid,
+                    gid: entry.gid,
                 }),
                 _ => continue,
             };

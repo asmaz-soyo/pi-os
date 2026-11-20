@@ -198,6 +198,8 @@ fn vfs() -> (Arc<Vfs>, Arc<dyn File>) {
 /// initramfs のプログラム `path` を実行する。
 pub fn run_program(path: &str, argv: &[&[u8]]) -> Result<i32, Errno> {
     let file = vfs().0.lookup(path)?;
+    // init は root として動く(ADR-0005)。root でも実行ビットのないファイルは実行できない
+    kernel::cred::Credentials::root().check(&file.stat(), kernel::cred::Access::EXEC)?;
     let image = file.contents().ok_or(Errno::EACCES)?;
     run_user(image, argv)
 }

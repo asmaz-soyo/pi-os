@@ -2,8 +2,9 @@
 
 use super::TIOCGWINSZ;
 use crate::Errno;
+use crate::cred::Access;
 use crate::fs::vfs::{
-    self, FileKind, O_ACCMODE, O_CREAT, O_DIRECTORY, O_RDONLY, O_TRUNC, OpenFile, Stat,
+    self, FileKind, O_ACCMODE, O_CREAT, O_DIRECTORY, O_RDONLY, O_TRUNC, O_WRONLY, OpenFile, Stat,
 };
 use crate::process::Process;
 use alloc::sync::Arc;
@@ -42,6 +43,15 @@ pub fn openat(p: &mut Process, dirfd: u64, path: u64, flags: u64) -> Result<u64,
         return Err(Errno::ENOTDIR);
     }
     let wants_write = flags & O_ACCMODE != O_RDONLY || flags & (O_CREAT | O_TRUNC) != 0;
+    let wants_read = flags & O_ACCMODE != O_WRONLY;
+    let mut want = Access::NONE;
+    if wants_read && st.kind != FileKind::Directory {
+        want = want | Access::READ;
+    }
+    if wants_write {
+        want = want | Access::WRITE;
+    }
+    p.cred.check(&st, want)?;
     if wants_write && st.kind != FileKind::CharDevice {
         // 今あるファイルシステムはすべて読み出し専用
         return Err(if st.kind == FileKind::Directory {
@@ -197,6 +207,8 @@ fn stat_bytes(st: &Stat) -> [u8; 128] {
     b[8..16].copy_from_slice(&st.ino.to_le_bytes()); // st_ino
     b[16..20].copy_from_slice(&(kind | st.mode).to_le_bytes()); // st_mode
     b[20..24].copy_from_slice(&1u32.to_le_bytes()); // st_nlink
+    b[24..28].copy_from_slice(&st.uid.to_le_bytes()); // st_uid
+    b[28..32].copy_from_slice(&st.gid.to_le_bytes()); // st_gid
     b[48..56].copy_from_slice(&st.size.to_le_bytes()); // st_size
     b[56..60].copy_from_slice(&4096u32.to_le_bytes()); // st_blksize
     b[64..72].copy_from_slice(&st.size.div_ceil(512).to_le_bytes()); // st_blocks

@@ -264,3 +264,47 @@ fn readlinkat_on_files_without_links_is_einval_or_enoent() {
         err(Errno::ENOENT)
     );
 }
+
+#[test]
+fn identity_syscalls_report_the_process_credentials() {
+    let (mut p, _) = process();
+    p.cred = crate::cred::Credentials::user(1000, 100);
+    p.cred.euid = 1001;
+    p.cred.egid = 101;
+    assert_eq!(call(&mut p, nr::GETUID, [0; 6]), 1000);
+    assert_eq!(call(&mut p, nr::GETEUID, [0; 6]), 1001);
+    assert_eq!(call(&mut p, nr::GETGID, [0; 6]), 100);
+    assert_eq!(call(&mut p, nr::GETEGID, [0; 6]), 101);
+}
+
+#[test]
+fn open_checks_permissions_against_the_process_credentials() {
+    let (mut p, _) = process();
+    // テスト用の initramfs の /etc/secret は root 所有の 0600
+    p.cred = crate::cred::Credentials::user(1000, 100);
+    assert_eq!(open(&mut p, b"/etc/secret", 0), err(Errno::EACCES));
+    assert_eq!(
+        open(&mut p, b"/etc/motd", 0),
+        3,
+        "0644 is readable by others"
+    );
+    p.cred = crate::cred::Credentials::root();
+    assert_eq!(open(&mut p, b"/etc/secret", 0), 4);
+}
+
+#[test]
+fn fstat_reports_the_owner() {
+    let (mut p, _) = process();
+    let fd = open(&mut p, b"/etc/secret", 0);
+    assert_eq!(call(&mut p, nr::FSTAT, [fd, SCRATCH, 0, 0, 0, 0]), 0);
+    let st = get(&mut p, SCRATCH, 128);
+    assert_eq!(
+        u32::from_le_bytes(st[24..28].try_into().unwrap()),
+        0,
+        "st_uid"
+    );
+    assert_eq!(
+        u32::from_le_bytes(st[16..20].try_into().unwrap()) & 0o777,
+        0o600
+    );
+}

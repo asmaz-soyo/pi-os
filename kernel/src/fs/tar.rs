@@ -25,6 +25,9 @@ pub struct Entry<'a> {
     pub data: &'a [u8],
     /// シンボリックリンクの指す先
     pub link: &'a str,
+    /// 所有者
+    pub uid: u32,
+    pub gid: u32,
 }
 
 fn octal(field: &[u8]) -> Option<u64> {
@@ -87,6 +90,8 @@ fn parse_header<'a>(tar: &'a [u8], at: usize) -> Result<Option<(Entry<'a>, usize
         mode: octal(&h[100..108]).ok_or(Errno::EIO)? as u32,
         data,
         link: cstr(&h[157..257]),
+        uid: octal(&h[108..116]).ok_or(Errno::EIO)? as u32,
+        gid: octal(&h[116..124]).ok_or(Errno::EIO)? as u32,
     };
     Ok(Some((entry, at + BLOCK + size.div_ceil(BLOCK) * BLOCK)))
 }
@@ -153,6 +158,36 @@ pub(crate) mod tests {
         }
         out.extend_from_slice(&[0; 1024]);
         out
+    }
+
+    /// テスト用:`name` の項目のモードを書き換え、チェックサムを直す。
+    pub fn set_mode(tar: &mut [u8], name: &str, mode: u32) {
+        let mut at = 0;
+        while at + 512 <= tar.len() && tar[at] != 0 {
+            let size = super::octal(&tar[at + 124..at + 136]).unwrap() as usize;
+            if super::cstr(&tar[at..at + 100]) == name {
+                let h = &mut tar[at..at + 512];
+                h[100..107].copy_from_slice(std::format!("{mode:07o}").as_bytes());
+                h[148..156].copy_from_slice(b"        ");
+                let sum: u32 = h.iter().map(|&b| b as u32).sum();
+                h[148..156].copy_from_slice(std::format!("{sum:06o}\0 ").as_bytes());
+                return;
+            }
+            at += 512 + size.div_ceil(512) * 512;
+        }
+        panic!("{name} not in tar");
+    }
+
+    #[test]
+    fn owner_ids_are_read_from_the_header() {
+        let mut tar = build(&[("a", b'0', b"x")]);
+        tar[108..115].copy_from_slice(b"0001750"); // uid 1000
+        tar[116..123].copy_from_slice(b"0000144"); // gid 100
+        tar[148..156].copy_from_slice(b"        ");
+        let sum: u32 = tar[..512].iter().map(|&b| b as u32).sum();
+        tar[148..156].copy_from_slice(std::format!("{sum:06o}\0 ").as_bytes());
+        let e = entries(&tar).next().unwrap().unwrap();
+        assert_eq!((e.uid, e.gid), (1000, 100));
     }
 
     #[test]

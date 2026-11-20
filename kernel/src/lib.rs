@@ -7,6 +7,7 @@ extern crate alloc;
 extern crate std;
 
 pub mod console;
+pub mod cred;
 pub mod errno;
 pub mod exec;
 pub mod fs;

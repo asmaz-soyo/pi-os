@@ -131,11 +131,11 @@ table! {
     nr::RT_SIGPROCMASK, "rt_sigprocmask", 4 => |p, a| Action::Return(0);
     nr::UNAME, "uname", 1 => |p, a| result(misc::uname(p, a[0]));
     nr::GETPID, "getpid", 0 => |p, a| Action::Return(1);
-    // ユーザーは root だけ
-    nr::GETUID, "getuid", 0 => |p, a| Action::Return(0);
-    nr::GETEUID, "geteuid", 0 => |p, a| Action::Return(0);
-    nr::GETGID, "getgid", 0 => |p, a| Action::Return(0);
-    nr::GETEGID, "getegid", 0 => |p, a| Action::Return(0);
+    // 資格情報(ADR-0005)
+    nr::GETUID, "getuid", 0 => |p, a| Action::Return(p.cred.uid as u64);
+    nr::GETEUID, "geteuid", 0 => |p, a| Action::Return(p.cred.euid as u64);
+    nr::GETGID, "getgid", 0 => |p, a| Action::Return(p.cred.gid as u64);
+    nr::GETEGID, "getegid", 0 => |p, a| Action::Return(p.cred.egid as u64);
     nr::GETTID, "gettid", 0 => |p, a| Action::Return(1);
     nr::BRK, "brk", 1 => |p, a| Action::Return(mm::brk(p, a[0]));
     nr::MUNMAP, "munmap", 2 => |p, a| result(mm::munmap(p, a[0], a[1]));
@@ -236,10 +236,13 @@ pub(crate) mod tests {
         mem.map_zeroed(VirtAddr(SCRATCH), 0x4000, MapFlags::USER_RW)
             .unwrap();
         let out = Capture::default();
-        let tar = build(&[
+        let mut tar = build(&[
             ("etc/motd", b'0', b"Welcome to Pi-OS!\n"),
             ("bin/x", b'0', b"ELF"),
+            ("etc/secret", b'0', b"s3cret"),
         ]);
+        crate::fs::tar::tests::set_mode(&mut tar, "etc/motd", 0o644);
+        crate::fs::tar::tests::set_mode(&mut tar, "etc/secret", 0o600);
         let root = Initramfs::new(Box::leak(tar.into_boxed_slice())).unwrap();
         let console = Arc::new(ConsoleFile::new(Box::new(out.clone())));
         let mut vfs = Vfs::new(Arc::new(root));

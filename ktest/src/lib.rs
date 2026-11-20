@@ -177,6 +177,14 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn files_without_exec_permission_cannot_be_run() {
+            assert_eq!(
+                boot::run_program("/etc/motd", &[b"motd"]),
+                Err(kernel::Errno::EACCES)
+            );
+        }
+
+        #[test_case]
         fn fp_simd_is_usable() {
             let x = core::hint::black_box(1.5f64);
             assert_eq!(x * 2.0, 3.0);

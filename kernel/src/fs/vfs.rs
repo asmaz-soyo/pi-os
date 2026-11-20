@@ -36,6 +36,9 @@ pub struct Stat {
     pub mode: u32,
     pub size: u64,
     pub ino: u64,
+    /// 所有者
+    pub uid: u32,
+    pub gid: u32,
 }
 
 /// ファイルの実体。読み書きは位置を引数で受け取る(位置は `OpenFile` が持つ)。
@@ -217,6 +220,8 @@ mod tests {
                 mode: 0o644,
                 size: 0,
                 ino: 1,
+                uid: 0,
+                gid: 0,
             }
         }
     }
