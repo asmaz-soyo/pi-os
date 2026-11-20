@@ -21,4 +21,5 @@
 | tmpfs、timerfd、epoll、サービスマネージャ(C 製。Rust 版はツールチェーンの追加待ち) | 完了 | `p2-services` |
 | GPIO 割り込みの fd、リアルタイム優先度、ジッタ計測 | 完了 | `p2-realtime` |
 | ブロック層(virtio-blk、MBR)、ext2 の読み書き、procfs | 完了 | `p2-ext2` |
-| FAT32 の読み込み(`/boot`)。ルートの ext2 化は未 | 完了 | `p2-fat32` |
+| FAT32 の読み込み(`/boot`) | 完了 | `p2-fat32` |
+| ルート(`/`)を ext2 に(QEMU virt。ディスクのない実機は initramfs) | 完了 | `p2-rootfs` |

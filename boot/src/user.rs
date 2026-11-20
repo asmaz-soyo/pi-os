@@ -15,7 +15,7 @@ use hal::mmu::{AddressSpace, MapError, MapFlags, PhysMemory};
 use kernel::Errno;
 use kernel::fs::devfs::{ConsoleFile, Devfs};
 use kernel::fs::initramfs::Initramfs;
-use kernel::fs::vfs::{File, Vfs};
+use kernel::fs::vfs::{File, FileSystem, Vfs};
 use kernel::mm::user::UserMemory;
 use kernel::process::{ExitStatus, PROCESSES, Process};
 use kernel::syscall::Action;
@@ -283,58 +283,78 @@ pub fn run_user(image: &[u8], argv: &[&[u8]]) -> Result<i32, Errno> {
     Ok(wait(pid))
 }
 
-/// ルートに initramfs、`/dev` に devfs、`/tmp` に tmpfs、`/proc` に procfs をマウントした VFS。
+/// VFS:ルート(`/`)、`/dev` に devfs、`/tmp` に tmpfs、`/proc` に procfs、`/boot` に FAT32。
+///
+/// ディスクの ext2 にユーザーランド(`/bin/sh`)があれば、それをルートにする。なければ
+/// (ディスクがない Pi の実機など)カーネルに埋め込んだ initramfs をルートにする。
 fn vfs() -> (Arc<Vfs>, Arc<dyn File>) {
     static VFS: spin::Once<(Arc<Vfs>, Arc<ConsoleFile>)> = spin::Once::new();
     let (vfs, console) = VFS.call_once(|| {
-        let root = Initramfs::new(userland::INITRAMFS).expect("initramfs is a valid tar");
         let console = Arc::new(ConsoleFile::new(Box::new(kernel::console::Global)));
-        let mut vfs = Vfs::new(Arc::new(root));
+        let mut mounts = disk_filesystems();
+        let root_at = mounts
+            .iter()
+            .position(|(_, at, fs)| *at == "/mnt" && fs.lookup("/bin/sh").is_ok());
+        let mut vfs = match root_at {
+            Some(i) => {
+                let (dev, _, fs) = mounts.remove(i);
+                kernel::println!("ext2: {dev} mounted on /");
+                Vfs::new(fs)
+            }
+            None => Vfs::new(Arc::new(
+                Initramfs::new(userland::INITRAMFS).expect("initramfs is a valid tar"),
+            )),
+        };
         vfs.mount("/dev", Arc::new(Devfs::new(console.clone())));
         vfs.mount("/tmp", Arc::new(kernel::fs::tmpfs::Tmpfs::new()));
         vfs.mount("/proc", Arc::new(kernel::fs::procfs::Procfs::new()));
-        mount_disk(&mut vfs);
+        for (dev, at, fs) in mounts {
+            let kind = if at == "/boot" { "fat32" } else { "ext2" };
+            kernel::println!("{kind}: {dev} mounted on {at}");
+            vfs.mount(at, fs);
+        }
         (Arc::new(vfs), console)
     });
     (vfs.clone(), console.clone())
 }
 
-/// `/dev/vda` の MBR を読み、FAT32 のパーティションを `/boot` に、Linux のパーティション(ext2)を
-/// `/mnt` にマウントする(SD カードの「p1 = FAT32、p2 = ext2」と同じ形)。
-fn mount_disk(vfs: &mut Vfs) {
+/// `/dev/vda` の MBR を読み、パーティションのファイルシステムを開く(SD カードの
+/// 「p1 = FAT32、p2 = ext2」と同じ形)。(デバイス名, マウントする場所, ファイルシステム) を返す。
+/// FAT32 は `/boot`、ext2 は `/mnt`(ルートにできるなら、呼ぶ側がルートにする)。
+fn disk_filesystems() -> alloc::vec::Vec<(alloc::string::String, &'static str, Arc<dyn FileSystem>)>
+{
     use kernel::block::mbr;
+    let mut out = alloc::vec::Vec::new();
     let Some(disk) = kernel::block::find("vda") else {
-        return;
+        return out;
     };
     let mut sector = [0u8; 512];
     if disk.lock().read_block(0, &mut sector).is_err() {
-        return;
+        return out;
     }
     let Some(parts) = mbr::parse(&sector) else {
-        return;
+        return out;
     };
     for (i, part) in parts.iter().enumerate() {
         let dev =
             kernel::block::PartitionDevice::new(disk.clone(), part.start as u64, part.count as u64);
         let dev = kernel::block::shared(Box::new(dev));
-        let n = i + 1;
-        let mounted: Result<(&str, &str, Arc<dyn kernel::fs::vfs::FileSystem>), Errno> =
-            match part.kind {
-                mbr::KIND_FAT32_LBA => kernel::fs::fat32::Fat32::new(dev)
-                    .map(|fs| ("fat32", "/boot", Arc::new(fs) as _)),
-                mbr::KIND_LINUX => {
-                    kernel::fs::ext2::Ext2::new(dev).map(|fs| ("ext2", "/mnt", Arc::new(fs) as _))
-                }
-                _ => continue,
-            };
-        match mounted {
-            Ok((kind, at, fs)) => {
-                vfs.mount(at, fs);
-                kernel::println!("{kind}: /dev/vda{n} mounted on {at}");
+        let name = alloc::format!("/dev/vda{}", i + 1);
+        let opened: Result<(&'static str, Arc<dyn FileSystem>), Errno> = match part.kind {
+            mbr::KIND_FAT32_LBA => {
+                kernel::fs::fat32::Fat32::new(dev).map(|fs| ("/boot", Arc::new(fs) as _))
             }
-            Err(e) => kernel::println!("cannot mount /dev/vda{n}: {e:?}"),
+            mbr::KIND_LINUX => {
+                kernel::fs::ext2::Ext2::new(dev).map(|fs| ("/mnt", Arc::new(fs) as _))
+            }
+            _ => continue,
+        };
+        match opened {
+            Ok((at, fs)) => out.push((name, at, fs)),
+            Err(e) => kernel::println!("cannot mount {name}: {e:?}"),
         }
     }
+    out
 }
 
 /// プログラム `path` を新しいプロセスとして動かし始める。

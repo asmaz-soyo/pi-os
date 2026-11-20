@@ -191,7 +191,7 @@ fn make_disk(path: &str) -> Result<(), String> {
     const BOOT_MIB: usize = 34; // FAT32 にはクラスタが 65525 個以上いる(1 クラスタ 512 バイトで約 33MiB)
     const BOOT_SECTORS: usize = BOOT_MIB * 2048;
     const EXT2_START: usize = BOOT_START + BOOT_SECTORS;
-    const EXT2_SECTORS: usize = 6144;
+    const EXT2_SECTORS: usize = 32 * 2048; // 32MiB(ユーザーランド全体が入る大きさ)
     let mut disk = vec![0u8; (EXT2_START + EXT2_SECTORS) * 512];
     let parts = [
         (0x0c, BOOT_START, BOOT_SECTORS),
@@ -218,25 +218,116 @@ fn make_disk(path: &str) -> Result<(), String> {
     let fat = fatimg::build(BOOT_MIB as u32, "PIOSBOOT", &refs);
     disk[BOOT_START * 512..BOOT_START * 512 + fat.len()].copy_from_slice(&fat);
 
-    // p2:user/diskroot の中身を ext2 に
+    // p2:ルートのファイルシステム(ext2)。initramfs と同じ中身に user/diskroot を足す
     let full = root().join(path);
     std::fs::create_dir_all(full.parent().unwrap()).map_err(|e| e.to_string())?;
+    let stage = full.with_extension("root");
+    let _ = std::fs::remove_dir_all(&stage);
+    unpack_tar(
+        &std::fs::read(initramfs_tar()?).map_err(|e| e.to_string())?,
+        &stage,
+    )?;
+    copy_tree(&root().join("user/diskroot"), &stage)?;
     let ext2 = full.with_extension("ext2");
     // 先に空のファイルを作っておくと、mke2fs が「Creating regular file」と言わない
     std::fs::write(&ext2, b"").map_err(|e| e.to_string())?;
-    let status = Command::new("mke2fs")
-        .args(["-q", "-F", "-t", "ext2", "-b", "1024", "-I", "128", "-d"])
-        .arg(root().join("user/diskroot"))
-        .arg(&ext2)
-        .arg((EXT2_SECTORS / 2).to_string())
+    // fakeroot の中で持ち主を root にしてから作る(ディスクのファイルは root の持ち物にする)
+    let script = format!(
+        "chown -R 0:0 '{}' && mke2fs -q -F -t ext2 -b 1024 -I 128 -d '{}' '{}' {}",
+        stage.display(),
+        stage.display(),
+        ext2.display(),
+        EXT2_SECTORS / 2
+    );
+    let status = Command::new("fakeroot")
+        .args(["sh", "-c", &script])
         .status()
-        .map_err(|e| format!("mke2fs (e2fsprogs) is needed: {e}"))?;
+        .map_err(|e| format!("fakeroot and mke2fs (e2fsprogs) are needed: {e}"))?;
     if !status.success() {
         return Err("mke2fs failed".to_string());
     }
     let fs = std::fs::read(&ext2).map_err(|e| e.to_string())?;
     disk[EXT2_START * 512..EXT2_START * 512 + fs.len()].copy_from_slice(&fs);
     std::fs::write(&full, disk).map_err(|e| e.to_string())
+}
+
+/// ユーザーランドをビルドし、build.rs が作った initramfs.tar の場所を cargo に聞く
+fn initramfs_tar() -> Result<std::path::PathBuf, String> {
+    let out = Command::new("cargo")
+        .args([
+            "build",
+            "-q",
+            "-p",
+            "userland",
+            "--target",
+            "aarch64-unknown-none",
+        ])
+        .arg("--message-format=json")
+        .current_dir(root())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!(
+            "building userland failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text
+        .lines()
+        .find(|l| l.contains("\"build-script-executed\"") && l.contains("userland"))
+        .ok_or("cargo did not report the userland build script")?;
+    let key = "\"out_dir\":\"";
+    let start = line.find(key).ok_or("no out_dir")? + key.len();
+    let end = start + line[start..].find('"').ok_or("no out_dir")?;
+    Ok(std::path::PathBuf::from(&line[start..end]).join("initramfs.tar"))
+}
+
+/// ustar の tar を `dest` に展開する(ファイルのモードも写す)
+fn unpack_tar(tar: &[u8], dest: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let octal = |b: &[u8]| {
+        let s = String::from_utf8_lossy(b);
+        u64::from_str_radix(s.trim_matches(|c: char| c == '\0' || c == ' '), 8).unwrap_or(0)
+    };
+    let mut off = 0;
+    while off + 512 <= tar.len() && tar[off] != 0 {
+        let h = &tar[off..off + 512];
+        let cstr =
+            |b: &[u8]| String::from_utf8_lossy(b.split(|&c| c == 0).next().unwrap()).into_owned();
+        let (prefix, name) = (cstr(&h[345..500]), cstr(&h[..100]));
+        let name = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let size = octal(&h[124..136]) as usize;
+        let mode = octal(&h[100..108]) as u32;
+        let data = &tar[off + 512..off + 512 + size];
+        let path = dest.join(name.trim_start_matches("./"));
+        if h[156] == b'5' {
+            std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+        } else {
+            std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+            std::fs::write(&path, data).map_err(|e| e.to_string())?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode & 0o7777))
+                .map_err(|e| e.to_string())?;
+        }
+        off += 512 + size.div_ceil(512) * 512;
+    }
+    Ok(())
+}
+
+/// `src` の中身を `dest` に写す
+fn copy_tree(src: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    let mut files = Vec::new();
+    collect_files(src, "", &mut files)?;
+    for (name, data) in files {
+        let path = dest.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+        std::fs::write(path, data).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// ディレクトリの中のファイルを (相対パス, 中身) で集める
