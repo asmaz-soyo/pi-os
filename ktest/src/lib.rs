@@ -89,6 +89,42 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn kernel_runs_in_the_higher_half() {
+            let pc: u64;
+            // SAFETY: 今の命令のアドレスを読むだけ
+            unsafe { core::arch::asm!("adr {}, .", out(reg) pc) };
+            assert!(pc >= arch_aarch64::mmu::KERNEL_VBASE, "pc = {pc:#x}");
+        }
+
+        #[test_case]
+        fn mmu_maps_ram_linearly_and_leaves_low_addresses_unmapped() {
+            use arch_aarch64::mmu::{phys_to_virt, virt_to_phys};
+            use hal::addr::VirtAddr;
+            let image = arch_aarch64::boot::kernel_image_phys();
+            assert!(arch_aarch64::cpu::mmu_enabled());
+            // カーネルの先頭は線形マップの位置に見える
+            assert_eq!(
+                arch_aarch64::cpu::translate(phys_to_virt(image.start)),
+                Some(image.start)
+            );
+            // 恒等マップ(低いアドレス)は消えている。ユーザー空間のために空けてある
+            assert_eq!(arch_aarch64::cpu::translate(VirtAddr(image.start.0)), None);
+            assert_eq!(virt_to_phys(phys_to_virt(image.start)), image.start);
+        }
+
+        #[test_case]
+        fn frame_allocator_hands_out_usable_ram() {
+            let frame = kernel::mm::alloc_frame().expect("free frame");
+            let ptr = arch_aarch64::mmu::phys_to_virt(frame).0 as *mut u64;
+            // SAFETY: 割り当てたばかりのフレームで、線形マップに見えている
+            unsafe {
+                ptr.write_volatile(0xdead_beef);
+                assert_eq!(ptr.read_volatile(), 0xdead_beef);
+            }
+            kernel::mm::release_frame(frame).unwrap();
+        }
+
+        #[test_case]
         fn fp_simd_is_usable() {
             let x = core::hint::black_box(1.5f64);
             assert_eq!(x * 2.0, 3.0);

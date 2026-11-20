@@ -3,7 +3,7 @@ Hello from Pi-OS
 timer: 10 ticks at 100 Hz
 
 !!! KERNEL PANIC !!!
-panicked at bsp/raspi3/src/main.rs:{..}
+panicked at boot/src/lib.rs:{..}
 panic demo
 registers:
   CurrentEL = 1  SP = 0x{..}  FP = 0x{..}  LR = 0x{..}

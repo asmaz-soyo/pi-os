@@ -12,16 +12,18 @@ fn clippy(krate: &str) -> String {
     format!("cargo clippy -p {krate} --target aarch64-unknown-none -- -D warnings")
 }
 
-const ALL_TARGET: [&str; 7] = [
+const ALL_TARGET: [&str; 8] = [
     "hal",
     "kernel",
     "pl011",
     "arch-aarch64",
+    "boot",
     "ktest",
     "bsp-qemu-virt",
     "bsp-raspi3",
 ];
-const EXCLUDES: &str = "--exclude ktest --exclude bsp-qemu-virt --exclude bsp-raspi3";
+const EXCLUDES: &str =
+    "--exclude boot --exclude ktest --exclude bsp-qemu-virt --exclude bsp-raspi3";
 const VIRT_ARGS: &str = "-M virt -cpu cortex-a53 -m 128M -nographic -semihosting";
 const RASPI3_ARGS: &str = "-M raspi3b -nographic -semihosting";
 const KERNEL8_IMG: &str = "llvm-objcopy -O binary target/aarch64-unknown-none/debug/bsp-raspi3 \

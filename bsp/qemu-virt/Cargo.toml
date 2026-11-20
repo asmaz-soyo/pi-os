@@ -9,6 +9,7 @@ publish = false
 hal = { path = "../../hal" }
 arch-aarch64 = { path = "../../arch/aarch64" }
 kernel = { path = "../../kernel" }
+boot = { path = "../../boot" }
 pl011 = { path = "../../drivers/pl011" }
 gicv2 = { path = "../../drivers/gicv2" }
 

@@ -69,11 +69,11 @@ impl Level {
     }
 }
 
-pub fn phys_to_virt(pa: PhysAddr) -> VirtAddr {
+pub const fn phys_to_virt(pa: PhysAddr) -> VirtAddr {
     VirtAddr(pa.0 + KERNEL_VBASE)
 }
 
-pub fn virt_to_phys(va: VirtAddr) -> PhysAddr {
+pub const fn virt_to_phys(va: VirtAddr) -> PhysAddr {
     PhysAddr(va.0 - KERNEL_VBASE)
 }
 
@@ -276,6 +276,33 @@ impl PageTable {
         let pa = PhysAddr(*entry & ADDR_MASK);
         *entry = 0;
         Some(pa)
+    }
+}
+
+/// 線形マップを通してテーブルを読み書きする `TableMemory`(カーネルで使う)。
+/// `alloc` は空きフレームを1枚返す関数(カーネルのフレーム割り当て器)。
+pub struct LinearTableMemory<F: FnMut() -> Option<PhysAddr>> {
+    alloc: F,
+}
+
+impl<F: FnMut() -> Option<PhysAddr>> LinearTableMemory<F> {
+    /// # Safety
+    /// `alloc` が返すフレームは RAM にあり、線形マップ(`phys_to_virt`)で読み書きできること。
+    pub unsafe fn new(alloc: F) -> Self {
+        Self { alloc }
+    }
+}
+
+impl<F: FnMut() -> Option<PhysAddr>> TableMemory for LinearTableMemory<F> {
+    fn alloc_table(&mut self) -> Option<PhysAddr> {
+        let pa = (self.alloc)()?;
+        self.table(pa).fill(0);
+        Some(pa)
+    }
+
+    fn table(&mut self, pa: PhysAddr) -> &mut [u64; ENTRIES] {
+        // SAFETY: new の契約により、pa は線形マップで見える RAM のフレーム
+        unsafe { &mut *(phys_to_virt(pa).0 as *mut [u64; ENTRIES]) }
     }
 }
 

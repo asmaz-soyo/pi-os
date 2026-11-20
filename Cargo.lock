@@ -18,10 +18,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "boot"
+version = "0.1.0"
+dependencies = [
+ "arch-aarch64",
+ "hal",
+ "kernel",
+]
+
+[[package]]
 name = "bsp-qemu-virt"
 version = "0.1.0"
 dependencies = [
  "arch-aarch64",
+ "boot",
  "gicv2",
  "hal",
  "kernel",
@@ -35,6 +45,7 @@ version = "0.1.0"
 dependencies = [
  "arch-aarch64",
  "bcm2836-local-intc",
+ "boot",
  "hal",
  "kernel",
  "ktest",

@@ -55,3 +55,52 @@ pub fn disable_irq() {
     // SAFETY: 割り込みマスクの変更
     unsafe { asm!("msr daifset, #2", options(nomem, nostack)) };
 }
+
+/// MMU が有効か(SCTLR_EL1.M)。
+pub fn mmu_enabled() -> bool {
+    let sctlr: u64;
+    // SAFETY: 読み出しだけ
+    unsafe { asm!("mrs {}, sctlr_el1", out(reg) sctlr, options(nomem, nostack)) };
+    sctlr & 1 != 0
+}
+
+/// 今のページテーブルで `va` を変換する(CPU の `at s1e1r` 命令を使う)。マップされていなければ `None`。
+pub fn translate(va: hal::addr::VirtAddr) -> Option<hal::addr::PhysAddr> {
+    let par: u64;
+    // SAFETY: アドレス変換の問い合わせだけで、メモリには触らない
+    unsafe {
+        asm!("at s1e1r, {}", "isb", "mrs {}, par_el1",
+             in(reg) va.0, out(reg) par, options(nostack));
+    }
+    if par & 1 != 0 {
+        None
+    } else {
+        Some(hal::addr::PhysAddr(
+            (par & 0x0000_ffff_ffff_f000) | (va.0 & 0xfff),
+        ))
+    }
+}
+
+/// カーネル(上位アドレス)のページテーブルを切り替える。
+///
+/// # Safety
+/// `root` は今実行中のコードとスタックを同じ仮想アドレスでマップしていること。
+pub unsafe fn set_kernel_table(root: hal::addr::PhysAddr) {
+    // SAFETY: 呼び出し元が保証する
+    unsafe {
+        asm!("dsb ishst", "msr ttbr1_el1, {}", "isb", "tlbi vmalle1", "dsb ish", "isb",
+             in(reg) root.0, options(nostack));
+    }
+}
+
+/// ユーザー(下位アドレス)のページテーブルを切り替える。
+///
+/// # Safety
+/// 下位アドレスを使っているコードやデータがないこと。
+pub unsafe fn set_user_table(root: hal::addr::PhysAddr) {
+    // SAFETY: 呼び出し元が保証する
+    unsafe {
+        asm!("dsb ishst", "msr ttbr0_el1, {}", "isb", "tlbi vmalle1", "dsb ish", "isb",
+             in(reg) root.0, options(nostack));
+    }
+}

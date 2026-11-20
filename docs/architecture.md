@@ -14,8 +14,10 @@ flowchart TB
     bsp_pi[bsp/raspi3]
     kernel --> hal
     drivers -.実装.-> hal
-    bsp_virt --> kernel & drivers & arch
-    bsp_pi --> kernel & drivers & arch
+    boot[boot<br/>初期化の順番・Board トレイト]
+    boot --> kernel & arch
+    bsp_virt --> boot & drivers
+    bsp_pi --> boot & drivers
 ```
 
 ## ポート一覧
@@ -40,6 +42,14 @@ flowchart TB
 | `bcm2836-local-intc`(`drivers/bcm2836-local-intc`) | ○ | ○ |
 | `xtask` | ○ | × |
 | `arch-aarch64` | ○(純粋な部分だけ) | ○ |
+| `boot` | × | ○(初期化の順番、`Board` トレイト) |
 | `ktest` | × | ○(カーネル内テストの枠組み) |
 | `bsp-qemu-virt` | × | ○(QEMU `-M virt` で起動するイメージ) |
 | `bsp-raspi3` | × | ○(QEMU `-M raspi3b` と実機のイメージ、`kernel8.img`) |
+
+## アドレス空間
+
+| 範囲 | 中身 |
+| --- | --- |
+| `0x0000_0000_0000_0000`〜 | ユーザー空間(TTBR0、プロセスごと) |
+| `0xFFFF_0000_0000_0000 + 物理アドレス` | 線形マップ(TTBR1):RAM 全体、デバイス、カーネルのイメージ |
