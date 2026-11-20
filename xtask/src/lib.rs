@@ -25,15 +25,24 @@ pub const TARGET_CRATES: &[&str] = &[
 pub const TARGET_ONLY_CRATES: &[&str] =
     &["userland", "boot", "ktest", "bsp-qemu-virt", "bsp-raspi3"];
 
-pub const USAGE: &str = "usage: cargo xtask <build | run [--bsp <bsp>] | \
-                         test [--bsp <bsp> | --snapshot] | ci>\n  bsp: qemu-virt, raspi3";
+pub const USAGE: &str = "usage: cargo xtask <build | run [--bsp <bsp> | --trace syscall] | \
+                         test [--bsp <bsp> | --snapshot] | docs [--check] | ci>\n  \
+                         bsp: qemu-virt, raspi3";
 
 /// xtask のサブコマンド。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Task {
     Build,
-    Run(Bsp),
+    /// QEMU で起動する。`trace` ならシステムコールを表示する
+    Run {
+        bsp: Bsp,
+        trace: bool,
+    },
     Test(TestKind),
+    /// 自動生成のドキュメントを作る。`check` なら作らずに差分がないことだけ確かめる
+    Docs {
+        check: bool,
+    },
     Ci,
 }
 
@@ -129,8 +138,20 @@ impl Bsp {
 pub fn parse(args: &[&str]) -> Result<Task, String> {
     match args {
         ["build"] => Ok(Task::Build),
-        ["run"] => Ok(Task::Run(Bsp::QemuVirt)),
-        ["run", "--bsp", bsp] => Ok(Task::Run(Bsp::parse(bsp)?)),
+        ["run"] => Ok(Task::Run {
+            bsp: Bsp::QemuVirt,
+            trace: false,
+        }),
+        ["run", "--bsp", bsp] => Ok(Task::Run {
+            bsp: Bsp::parse(bsp)?,
+            trace: false,
+        }),
+        ["run", "--trace", "syscall"] => Ok(Task::Run {
+            bsp: Bsp::QemuVirt,
+            trace: true,
+        }),
+        ["docs"] => Ok(Task::Docs { check: false }),
+        ["docs", "--check"] => Ok(Task::Docs { check: true }),
         ["test"] => Ok(Task::Test(TestKind::Host)),
         ["test", "--bsp", bsp] => Ok(Task::Test(TestKind::Qemu(Bsp::parse(bsp)?))),
         ["test", "--snapshot"] => Ok(Task::Test(TestKind::Snapshot)),
@@ -200,6 +221,8 @@ impl fmt::Display for Cmd {
 pub enum Step {
     /// コマンドを実行し、失敗したら止める
     Run(Cmd),
+    /// 自動生成のドキュメント `path` を作る(`check` なら差分がないことだけ確かめる)
+    GenerateDocs { path: String, check: bool },
     /// コマンドの標準出力を `expected`(ルートからの相対パス)の内容と比べ、
     /// 終了コードが `exit_code` であることを確かめる
     Snapshot {
@@ -213,6 +236,9 @@ impl fmt::Display for Step {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Run(cmd) => write!(f, "{cmd}"),
+            Self::GenerateDocs { path, check } => {
+                write!(f, "generate {path}{}", if *check { " (check)" } else { "" })
+            }
             Self::Snapshot {
                 expected,
                 exit_code,
@@ -226,15 +252,24 @@ impl fmt::Display for Step {
 pub fn plan(task: Task) -> Vec<Step> {
     match task {
         Task::Build => target_builds(),
-        Task::Run(bsp) => vec![
-            Step::Run(kernel_build(bsp)),
-            Step::Run(bsp.qemu(&bsp.kernel_elf())),
-        ],
+        Task::Run { bsp, trace } => {
+            let mut build = kernel_build(bsp);
+            if trace {
+                build
+                    .args
+                    .extend(["--features".into(), "trace-syscalls".into()]);
+            }
+            vec![Step::Run(build), Step::Run(bsp.qemu(&bsp.kernel_elf()))]
+        }
+        Task::Docs { check } => vec![docs_step(check)],
         Task::Test(TestKind::Host) => vec![Step::Run(host_tests())],
         Task::Test(TestKind::Qemu(bsp)) => vec![Step::Run(qemu_tests(bsp))],
         Task::Test(TestKind::Snapshot) => snapshot_tests(),
         Task::Ci => {
-            let mut steps = vec![Step::Run(Cmd::cargo(&["fmt", "--all", "--check"]))];
+            let mut steps = vec![
+                docs_step(true),
+                Step::Run(Cmd::cargo(&["fmt", "--all", "--check"])),
+            ];
             let mut host_clippy = vec!["clippy".to_string(), "--workspace".to_string()];
             host_clippy.extend(exclude_target_only());
             host_clippy.extend(
@@ -253,6 +288,31 @@ pub fn plan(task: Task) -> Vec<Step> {
             steps
         }
     }
+}
+
+/// 自動生成のシステムコール表の置き場所
+pub const SYSCALL_DOC: &str = "docs/generated/syscalls.md";
+
+fn docs_step(check: bool) -> Step {
+    Step::GenerateDocs {
+        path: SYSCALL_DOC.to_string(),
+        check,
+    }
+}
+
+/// カーネルのシステムコール表から作る Markdown。
+pub fn syscall_table_markdown() -> String {
+    let mut md = String::from(
+        "<!-- cargo xtask docs で生成。手で編集しない -->\n\
+         # 実装済みのシステムコール\n\n\
+         番号は Linux AArch64 と同じ。表の元は `kernel/src/syscall/mod.rs` の `TABLE`。\n\n\
+         | 番号 | 名前 | 引数の数 |\n| --- | --- | --- |\n",
+    );
+    for s in kernel::syscall::TABLE {
+        md.push_str(&format!("| {} | `{}` | {} |\n", s.nr, s.name, s.args));
+    }
+    md.push_str(&format!("\n合計 {} 個\n", kernel::syscall::TABLE.len()));
+    md
 }
 
 fn exclude_target_only() -> Vec<String> {

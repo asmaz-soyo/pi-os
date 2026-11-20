@@ -212,3 +212,31 @@ fn user_memory_protect_keeps_frames() {
         .unwrap();
     assert_eq!(get(&mut p, SCRATCH, 4), b"data");
 }
+
+#[test]
+fn table_numbers_are_sorted_and_unique_with_names() {
+    for pair in TABLE.windows(2) {
+        assert!(
+            pair[0].nr < pair[1].nr,
+            "{} / {}",
+            pair[0].name,
+            pair[1].name
+        );
+    }
+    assert!(TABLE.iter().all(|s| !s.name.is_empty() && s.args <= 6));
+    assert_eq!(lookup(nr::OPENAT).map(|s| s.name), Some("openat"));
+    assert!(lookup(511).is_none());
+}
+
+#[test]
+fn trace_line_shows_name_arguments_and_result() {
+    let s = lookup(nr::OPENAT).unwrap();
+    let line = trace_line(s, &[0xffff_ffff_ffff_ff9c, 0x40_3000, 0, 0, 0, 0], 3);
+    assert_eq!(
+        line,
+        "[trace] openat(0xffffffffffffff9c, 0x403000, 0x0) = 3"
+    );
+    let s = lookup(nr::READ).unwrap();
+    let line = trace_line(s, &[9, 0, 1, 0, 0, 0], Errno::EBADF.as_syscall_return());
+    assert_eq!(line, "[trace] read(0x9, 0x0, 0x1) = -9 (EBADF)");
+}

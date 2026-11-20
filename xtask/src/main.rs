@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
-use xtask::{Cmd, Step, compare_snapshot, normalize_output, parse, plan};
+use xtask::{Cmd, Step, compare_snapshot, normalize_output, parse, plan, syscall_table_markdown};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -37,6 +37,7 @@ fn execute(step: &Step) -> Result<(), String> {
                 Err(format!("`{cmd}` failed ({status})"))
             }
         }
+        Step::GenerateDocs { path, check } => generate_docs(path, *check),
         Step::Snapshot {
             expected,
             exit_code,
@@ -106,4 +107,19 @@ fn llvm_tool(name: &str) -> String {
         })
         .unwrap_or_default();
     format!("{sysroot}/lib/rustlib/{host}/bin/{name}")
+}
+
+/// 自動生成のドキュメントを書く。`check` なら、今のファイルと違えば失敗する。
+fn generate_docs(path: &str, check: bool) -> Result<(), String> {
+    let full = root().join(path);
+    let want = syscall_table_markdown();
+    if check {
+        let have = std::fs::read_to_string(&full).unwrap_or_default();
+        if have != want {
+            return Err(format!("{path} is out of date (run `cargo xtask docs`)"));
+        }
+        return Ok(());
+    }
+    std::fs::create_dir_all(full.parent().unwrap()).map_err(|e| e.to_string())?;
+    std::fs::write(&full, want).map_err(|e| e.to_string())
 }

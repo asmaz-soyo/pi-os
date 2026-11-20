@@ -15,3 +15,7 @@ spin = { version = "0.9", default-features = false, features = ["once"] }
 [lib]
 test = false
 bench = false
+
+[features]
+# システムコールを呼ばれるたびに表示する(cargo xtask run --trace syscall)
+trace-syscalls = []

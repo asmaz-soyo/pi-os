@@ -10,7 +10,7 @@ mod mm;
 mod proc;
 
 use crate::process::Process;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// システムコールの番号(Linux AArch64、`include/uapi/asm-generic/unistd.h`)。
 pub mod nr {
@@ -77,46 +77,121 @@ fn result(r: Result<u64, crate::Errno>) -> Action {
     })
 }
 
+/// システムコール表の1行。
+pub struct Syscall {
+    pub nr: u64,
+    pub name: &'static str,
+    /// 引数の数(トレースの表示用)
+    pub args: usize,
+    pub handler: fn(&mut Process, [u64; 6]) -> Action,
+}
+
+/// 表を作るマクロ:`番号, "名前", 引数の数 => |プロセス, 引数| 本体;`
+macro_rules! table {
+    ($($nr:expr, $name:literal, $args:literal => |$p:ident, $a:ident| $body:expr;)*) => {
+        /// 実装済みのシステムコールの表(番号の順)。`docs/generated/syscalls.md` はここから作る。
+        pub static TABLE: &[Syscall] = &[$(Syscall {
+            nr: $nr,
+            name: $name,
+            args: $args,
+            handler: {
+                #[allow(unused_variables)]
+                fn handler($p: &mut Process, $a: [u64; 6]) -> Action {
+                    $body
+                }
+                handler
+            },
+        }),*];
+    };
+}
+
+table! {
+    nr::GETCWD, "getcwd", 2 => |p, a| result(fs::getcwd(p, a[0], a[1]));
+    nr::IOCTL, "ioctl", 3 => |p, a| result(fs::ioctl(p, a[0], a[1], a[2]));
+    nr::OPENAT, "openat", 4 => |p, a| result(fs::openat(p, a[0], a[1], a[2]));
+    nr::CLOSE, "close", 1 => |p, a| result(p.fds.close(a[0]).map(|_| 0));
+    nr::LSEEK, "lseek", 3 => |p, a| result(fs::lseek(p, a[0], a[1] as i64, a[2]));
+    nr::READ, "read", 3 => |p, a| result(fs::read(p, a[0], a[1], a[2]));
+    nr::WRITE, "write", 3 => |p, a| result(fs::write(p, a[0], a[1], a[2]));
+    nr::READV, "readv", 3 => |p, a| result(fs::readv(p, a[0], a[1], a[2]));
+    nr::WRITEV, "writev", 3 => |p, a| result(fs::writev(p, a[0], a[1], a[2]));
+    nr::NEWFSTATAT, "newfstatat", 4 => |p, a| result(fs::newfstatat(p, a[0], a[1], a[2], a[3]));
+    nr::FSTAT, "fstat", 2 => |p, a| result(fs::fstat(p, a[0], a[1]));
+    nr::EXIT, "exit", 1 => |p, a| Action::Exit(proc::exit_status(a[0]));
+    nr::EXIT_GROUP, "exit_group", 1 => |p, a| Action::Exit(proc::exit_status(a[0]));
+    // フェーズ1はプロセスもスレッドも1つ
+    nr::SET_TID_ADDRESS, "set_tid_address", 1 => |p, a| Action::Return(1);
+    nr::CLOCK_GETTIME, "clock_gettime", 2 => |p, a| result(misc::clock_gettime(p, a[0], a[1]));
+    nr::SCHED_GETAFFINITY, "sched_getaffinity", 3
+        => |p, a| result(misc::sched_getaffinity(p, a[1], a[2]));
+    // シグナルはまだ配送しないので、設定は受け付けるだけ
+    nr::RT_SIGACTION, "rt_sigaction", 4 => |p, a| Action::Return(0);
+    nr::RT_SIGPROCMASK, "rt_sigprocmask", 4 => |p, a| Action::Return(0);
+    nr::UNAME, "uname", 1 => |p, a| result(misc::uname(p, a[0]));
+    nr::GETPID, "getpid", 0 => |p, a| Action::Return(1);
+    // ユーザーは root だけ
+    nr::GETUID, "getuid", 0 => |p, a| Action::Return(0);
+    nr::GETEUID, "geteuid", 0 => |p, a| Action::Return(0);
+    nr::GETGID, "getgid", 0 => |p, a| Action::Return(0);
+    nr::GETEGID, "getegid", 0 => |p, a| Action::Return(0);
+    nr::GETTID, "gettid", 0 => |p, a| Action::Return(1);
+    nr::BRK, "brk", 1 => |p, a| Action::Return(mm::brk(p, a[0]));
+    nr::MUNMAP, "munmap", 2 => |p, a| result(mm::munmap(p, a[0], a[1]));
+    // 断ると、libc は「新しく確保してコピー」に切り替える
+    nr::MREMAP, "mremap", 5 => |p, a| Action::Return(crate::Errno::ENOMEM.as_syscall_return());
+    nr::MMAP, "mmap", 6 => |p, a| result(mm::mmap(p, a[0], a[1], a[2], a[3], a[4], a[5]));
+    nr::MPROTECT, "mprotect", 3 => |p, a| result(mm::mprotect(p, a[0], a[1], a[2]));
+    // 助言は無視してよい
+    nr::MADVISE, "madvise", 3 => |p, a| Action::Return(0);
+    nr::GETRANDOM, "getrandom", 3 => |p, a| result(misc::getrandom(p, a[0], a[1]));
+}
+
+/// 番号から表の行を探す。
+pub fn lookup(nr: u64) -> Option<&'static Syscall> {
+    TABLE.iter().find(|s| s.nr == nr)
+}
+
+/// トレースを表示するか(`trace-syscalls` feature でビルドしたとき BSP が有効にする)
+pub static TRACE: AtomicBool = AtomicBool::new(false);
+
+/// トレースの1行:`[trace] openat(0xffffffffffffff9c, 0x403000, 0x0) = 3`
+pub fn trace_line(s: &Syscall, a: &[u64; 6], ret: u64) -> alloc::string::String {
+    use core::fmt::Write;
+    let mut line = alloc::format!("[trace] {}(", s.name);
+    for (i, v) in a.iter().take(s.args.min(3)).enumerate() {
+        let sep = if i == 0 { "" } else { ", " };
+        let _ = write!(line, "{sep}{v:#x}");
+    }
+    let signed = ret as i64;
+    let _ = if (-4095..0).contains(&signed) {
+        let name = crate::errno::name(-signed as i32).unwrap_or("?");
+        write!(line, ") = {signed} ({name})")
+    } else if ret < 0x1000 {
+        write!(line, ") = {ret}") // 小さな値(fd、バイト数)は 10 進数
+    } else {
+        write!(line, ") = {ret:#x}") // アドレスは 16 進数
+    };
+    line
+}
+
 /// システムコールを1つ処理する。
 pub fn dispatch(p: &mut Process, nr: u64, a: [u64; 6]) -> Action {
-    match nr {
-        nr::GETCWD => result(fs::getcwd(p, a[0], a[1])),
-        nr::IOCTL => result(fs::ioctl(p, a[0], a[1], a[2])),
-        nr::OPENAT => result(fs::openat(p, a[0], a[1], a[2])),
-        nr::CLOSE => result(p.fds.close(a[0]).map(|_| 0)),
-        nr::LSEEK => result(fs::lseek(p, a[0], a[1] as i64, a[2])),
-        nr::READ => result(fs::read(p, a[0], a[1], a[2])),
-        nr::WRITE => result(fs::write(p, a[0], a[1], a[2])),
-        nr::READV => result(fs::readv(p, a[0], a[1], a[2])),
-        nr::WRITEV => result(fs::writev(p, a[0], a[1], a[2])),
-        nr::NEWFSTATAT => result(fs::newfstatat(p, a[0], a[1], a[2], a[3])),
-        nr::FSTAT => result(fs::fstat(p, a[0], a[1])),
-        nr::EXIT | nr::EXIT_GROUP => Action::Exit(proc::exit_status(a[0])),
-        // フェーズ1はプロセスもスレッドも1つ、ユーザーは root だけ
-        nr::SET_TID_ADDRESS | nr::GETPID | nr::GETTID => Action::Return(1),
-        nr::GETUID | nr::GETEUID | nr::GETGID | nr::GETEGID => Action::Return(0),
-        // シグナルはまだ配送しないので、設定は受け付けるだけ(入れ物は後で作る)
-        nr::RT_SIGACTION | nr::RT_SIGPROCMASK => Action::Return(0),
-        nr::CLOCK_GETTIME => result(misc::clock_gettime(p, a[0], a[1])),
-        nr::SCHED_GETAFFINITY => result(misc::sched_getaffinity(p, a[1], a[2])),
-        nr::UNAME => result(misc::uname(p, a[0])),
-        nr::GETRANDOM => result(misc::getrandom(p, a[0], a[1])),
-        nr::BRK => Action::Return(mm::brk(p, a[0])),
-        nr::MMAP => result(mm::mmap(p, a[0], a[1], a[2], a[3], a[4], a[5])),
-        nr::MUNMAP => result(mm::munmap(p, a[0], a[1])),
-        nr::MPROTECT => result(mm::mprotect(p, a[0], a[1], a[2])),
-        // 助言は無視してよい。mremap を断ると、libc は「新しく確保してコピー」に切り替える
-        nr::MADVISE => Action::Return(0),
-        nr::MREMAP => Action::Return(crate::Errno::ENOMEM.as_syscall_return()),
-        _ => {
-            if let Some(count) = UNIMPLEMENTED.get(nr as usize)
-                && count.fetch_add(1, Ordering::Relaxed) == 0
-            {
-                crate::println!("[pi-os] unimplemented syscall {nr}");
-            }
-            Action::Return(crate::Errno::ENOSYS.as_syscall_return())
+    let Some(syscall) = lookup(nr) else {
+        if let Some(count) = UNIMPLEMENTED.get(nr as usize)
+            && count.fetch_add(1, Ordering::Relaxed) == 0
+        {
+            crate::println!("[pi-os] unimplemented syscall {nr}");
+        }
+        return Action::Return(crate::Errno::ENOSYS.as_syscall_return());
+    };
+    let action = (syscall.handler)(p, a);
+    if TRACE.load(Ordering::Relaxed) {
+        match action {
+            Action::Return(ret) => crate::println!("{}", trace_line(syscall, &a, ret)),
+            Action::Exit(status) => crate::println!("[trace] {}({status}) = ?", syscall.name),
         }
     }
+    action
 }
 
 #[cfg(test)]

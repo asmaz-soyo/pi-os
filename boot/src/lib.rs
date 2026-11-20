@@ -64,6 +64,9 @@ pub fn init<B: Board>() {
     kernel::console::set_console(B::console());
     // 5. タイマ割り込み
     start_timer::<B>();
+    if cfg!(feature = "trace-syscalls") {
+        kernel::syscall::TRACE.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// カーネルのイメージより後ろの RAM をフレーム割り当て器に渡し、

@@ -36,6 +36,36 @@ impl Errno {
     }
 }
 
+/// errno の名前(トレースの表示用)。
+pub fn name(errno: i32) -> Option<&'static str> {
+    Some(match errno {
+        1 => "EPERM",
+        2 => "ENOENT",
+        3 => "ESRCH",
+        4 => "EINTR",
+        5 => "EIO",
+        8 => "ENOEXEC",
+        9 => "EBADF",
+        10 => "ECHILD",
+        11 => "EAGAIN",
+        12 => "ENOMEM",
+        13 => "EACCES",
+        14 => "EFAULT",
+        17 => "EEXIST",
+        20 => "ENOTDIR",
+        21 => "EISDIR",
+        22 => "EINVAL",
+        24 => "EMFILE",
+        25 => "ENOTTY",
+        29 => "ESPIPE",
+        30 => "EROFS",
+        34 => "ERANGE",
+        36 => "ENAMETOOLONG",
+        38 => "ENOSYS",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

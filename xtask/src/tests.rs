@@ -69,10 +69,19 @@ fn parses_each_subcommand() {
 
 #[test]
 fn run_defaults_to_qemu_virt() {
-    assert_eq!(parse(&["run"]), Ok(Task::Run(Bsp::QemuVirt)));
+    assert_eq!(
+        parse(&["run"]),
+        Ok(Task::Run {
+            bsp: Bsp::QemuVirt,
+            trace: false
+        })
+    );
     assert_eq!(
         parse(&["run", "--bsp", "qemu-virt"]),
-        Ok(Task::Run(Bsp::QemuVirt))
+        Ok(Task::Run {
+            bsp: Bsp::QemuVirt,
+            trace: false
+        })
     );
 }
 
@@ -96,7 +105,10 @@ fn parses_snapshot_test() {
 fn parses_raspi3_bsp() {
     assert_eq!(
         parse(&["run", "--bsp", "raspi3"]),
-        Ok(Task::Run(Bsp::Raspi3))
+        Ok(Task::Run {
+            bsp: Bsp::Raspi3,
+            trace: false
+        })
     );
     assert_eq!(
         parse(&["test", "--bsp", "raspi3"]),
@@ -172,7 +184,10 @@ fn snapshot_plan_checks_boot_panic_and_fault_output_for_each_bsp() {
 #[test]
 fn run_plan_builds_then_boots_interactively() {
     assert_eq!(
-        displays(&plan(Task::Run(Bsp::Raspi3))),
+        displays(&plan(Task::Run {
+            bsp: Bsp::Raspi3,
+            trace: false
+        })),
         [
             build("bsp-raspi3"),
             format!(
@@ -185,6 +200,7 @@ fn run_plan_builds_then_boots_interactively() {
 #[test]
 fn ci_plan_runs_checks_then_all_test_layers_then_builds() {
     let mut want = vec![
+        "generate docs/generated/syscalls.md (check)".to_string(),
         "cargo fmt --all --check".to_string(),
         format!("cargo clippy --workspace {EXCLUDES} --all-targets --all-features -- -D warnings"),
     ];
@@ -239,4 +255,50 @@ fn ellipsis_line_matches_any_number_of_lines() {
 fn literal_braces_without_dots_must_match_exactly() {
     assert!(compare_snapshot("a{b}\n", "a{b}\n").is_ok());
     assert!(compare_snapshot("a{b}\n", "axb\n").is_err());
+}
+
+#[test]
+fn run_with_syscall_trace_builds_the_trace_feature() {
+    assert_eq!(
+        parse(&["run", "--trace", "syscall"]),
+        Ok(Task::Run {
+            bsp: Bsp::QemuVirt,
+            trace: true
+        })
+    );
+    assert!(parse(&["run", "--trace", "everything"]).is_err());
+    let steps = displays(&plan(Task::Run {
+        bsp: Bsp::QemuVirt,
+        trace: true,
+    }));
+    assert_eq!(
+        steps[0],
+        "cargo build -p bsp-qemu-virt --target aarch64-unknown-none --features trace-syscalls"
+    );
+}
+
+#[test]
+fn docs_task_generates_and_checks_the_syscall_table() {
+    assert_eq!(parse(&["docs"]), Ok(Task::Docs { check: false }));
+    assert_eq!(parse(&["docs", "--check"]), Ok(Task::Docs { check: true }));
+    assert_eq!(
+        displays(&plan(Task::Docs { check: true })),
+        ["generate docs/generated/syscalls.md (check)"]
+    );
+}
+
+#[test]
+fn generated_syscall_table_lists_every_syscall() {
+    let md = syscall_table_markdown();
+    assert!(md.starts_with("<!-- cargo xtask docs で生成。手で編集しない -->"));
+    assert!(md.contains("| 56 | `openat` | 4 |"));
+    assert!(md.contains("| 222 | `mmap` | 6 |"));
+}
+
+#[test]
+fn ci_checks_generated_docs_first() {
+    assert_eq!(
+        displays(&plan(Task::Ci))[0],
+        "generate docs/generated/syscalls.md (check)"
+    );
 }

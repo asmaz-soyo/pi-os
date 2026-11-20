@@ -18,6 +18,8 @@ gicv2 = { path = "../../drivers/gicv2" }
 panic-demo = []
 # 起動後にわざと未定義命令を実行する(未処理の例外の報告のスナップショットテスト用)
 fault-demo = []
+# システムコールのトレース
+trace-syscalls = ["boot/trace-syscalls"]
 
 [dev-dependencies]
 ktest = { path = "../../ktest" }
