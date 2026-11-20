@@ -176,3 +176,9 @@ pub fn run_user(image: &[u8], argv: &[&[u8]]) -> Result<i32, Errno> {
     drop(CURRENT.lock().take());
     Ok(status)
 }
+
+/// initramfs のプログラム `path` を実行する。
+pub fn run_program(path: &str, argv: &[&[u8]]) -> Result<i32, Errno> {
+    let image = kernel::fs::tar::find(userland::INITRAMFS, path).ok_or(Errno::ENOENT)?;
+    run_user(image, argv)
+}

@@ -8,7 +8,7 @@ extern crate alloc;
 
 mod user;
 
-pub use user::{STATUS_SEGV, run_user};
+pub use user::{STATUS_SEGV, run_program, run_user};
 pub use userland;
 
 use arch_aarch64::exception::{self, Handler};
@@ -182,7 +182,7 @@ pub fn run_demos(panic_demo: bool, fault_demo: bool) {
 
 /// 最初のユーザープログラム(init)を動かす。
 pub fn run_init() {
-    match run_user(userland::HELLO, &[b"hello"]) {
+    match run_program("/bin/hello", &[b"hello"]) {
         Ok(status) => kernel::println!("init exited with status {status}"),
         Err(e) => kernel::println!("init failed to start: {e:?}"),
     }
