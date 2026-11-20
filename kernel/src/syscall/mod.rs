@@ -16,10 +16,18 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 /// システムコールの番号(Linux AArch64、`include/uapi/asm-generic/unistd.h`)。
 pub mod nr {
     pub const GETCWD: u64 = 17;
+    pub const DUP: u64 = 23;
+    pub const DUP3: u64 = 24;
+    pub const FCNTL: u64 = 25;
     pub const IOCTL: u64 = 29;
+    pub const MKDIRAT: u64 = 34;
+    pub const UNLINKAT: u64 = 35;
+    pub const FTRUNCATE: u64 = 46;
+    pub const FACCESSAT: u64 = 48;
     pub const CHDIR: u64 = 49;
     pub const OPENAT: u64 = 56;
     pub const CLOSE: u64 = 57;
+    pub const GETDENTS64: u64 = 61;
     pub const LSEEK: u64 = 62;
     pub const READ: u64 = 63;
     pub const WRITE: u64 = 64;
@@ -141,10 +149,18 @@ macro_rules! table {
 
 table! {
     nr::GETCWD, "getcwd", 2 => |p, a| result(fs::getcwd(p, a[0], a[1]));
+    nr::DUP, "dup", 1 => |p, a| result(fs::dup(p, a[0]));
+    nr::DUP3, "dup3", 3 => |p, a| result(fs::dup3(p, a[0], a[1], a[2]));
+    nr::FCNTL, "fcntl", 3 => |p, a| result(fs::fcntl(p, a[0], a[1], a[2]));
     nr::IOCTL, "ioctl", 3 => |p, a| result(fs::ioctl(p, a[0], a[1], a[2]));
+    nr::MKDIRAT, "mkdirat", 3 => |p, a| result(fs::mkdirat(p, a[0], a[1], a[2]));
+    nr::UNLINKAT, "unlinkat", 3 => |p, a| result(fs::unlinkat(p, a[0], a[1], a[2]));
+    nr::FTRUNCATE, "ftruncate", 2 => |p, a| result(fs::ftruncate(p, a[0], a[1]));
+    nr::FACCESSAT, "faccessat", 3 => |p, a| result(fs::faccessat(p, a[0], a[1], a[2]));
     nr::CHDIR, "chdir", 1 => |p, a| result(fs::chdir(p, a[0]));
-    nr::OPENAT, "openat", 4 => |p, a| result(fs::openat(p, a[0], a[1], a[2]));
+    nr::OPENAT, "openat", 4 => |p, a| result(fs::openat(p, a[0], a[1], a[2], a[3]));
     nr::CLOSE, "close", 1 => |p, a| result(p.fds.close(a[0]).map(|_| 0));
+    nr::GETDENTS64, "getdents64", 3 => |p, a| result(fs::getdents64(p, a[0], a[1], a[2]));
     nr::LSEEK, "lseek", 3 => |p, a| result(fs::lseek(p, a[0], a[1] as i64, a[2]));
     nr::READ, "read", 3 => |p, a| result(fs::read(p, a[0], a[1], a[2]));
     nr::WRITE, "write", 3 => |p, a| result(fs::write(p, a[0], a[1], a[2]));
@@ -243,6 +259,8 @@ mod tests_mm;
 #[cfg(test)]
 mod tests_proc;
 #[cfg(test)]
+mod tests_tmp;
+#[cfg(test)]
 mod tests_tty;
 
 #[cfg(test)]
@@ -334,6 +352,7 @@ pub(crate) mod tests {
         let console = Arc::new(ConsoleFile::new(Box::new(out.clone())));
         let mut vfs = Vfs::new(Arc::new(root));
         vfs.mount("/dev", Arc::new(Devfs::new(console.clone())));
+        vfs.mount("/tmp", Arc::new(crate::fs::tmpfs::Tmpfs::new()));
         let loaded = Loaded {
             entry: SCRATCH,
             sp: SCRATCH + 0x1000,

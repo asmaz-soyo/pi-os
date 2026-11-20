@@ -19,6 +19,7 @@ pub const O_WRONLY: u32 = 1;
 pub const O_RDWR: u32 = 2;
 pub const O_ACCMODE: u32 = 3;
 pub const O_CREAT: u32 = 0o100;
+pub const O_EXCL: u32 = 0o200;
 pub const O_TRUNC: u32 = 0o1000;
 pub const O_DIRECTORY: u32 = 0o200000;
 
@@ -76,6 +77,24 @@ pub trait File: Send + Sync {
     fn set_termios(&self, _t: crate::tty::Termios) -> Result<(), Errno> {
         Err(Errno::ENOTTY)
     }
+
+    /// 大きさを変える(書けるファイルだけ)
+    fn truncate(&self, _len: u64) -> Result<(), Errno> {
+        Err(Errno::EINVAL)
+    }
+
+    /// 書き込めないファイルシステムのファイルか(open で書き込みを求められたら EROFS にする)
+    fn is_read_only(&self) -> bool {
+        false
+    }
+}
+
+/// ディレクトリの中の1項目。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirEntry {
+    pub name: String,
+    pub kind: FileKind,
+    pub ino: u64,
 }
 
 /// 開いたファイル。読み書きの位置とフラグを持つ。
@@ -83,6 +102,8 @@ pub struct OpenFile {
     pub file: Arc<dyn File>,
     pub flags: u32,
     pub offset: SpinLock<u64>,
+    /// 開いたときの絶対パス(ディレクトリの一覧に使う)
+    pub path: Option<String>,
 }
 
 impl OpenFile {
@@ -91,6 +112,16 @@ impl OpenFile {
             file,
             flags,
             offset: SpinLock::new(0),
+            path: None,
+        })
+    }
+
+    pub fn with_path(file: Arc<dyn File>, flags: u32, path: String) -> Arc<Self> {
+        Arc::new(Self {
+            file,
+            flags,
+            offset: SpinLock::new(0),
+            path: Some(path),
         })
     }
 
@@ -107,6 +138,8 @@ impl OpenFile {
 #[derive(Clone)]
 pub struct FdTable {
     fds: Vec<Option<Arc<OpenFile>>>,
+    /// close-on-exec の印が付いた番号(execve で閉じる)
+    cloexec: alloc::collections::BTreeSet<usize>,
 }
 
 /// 1つのプロセスが開けるファイルの数
@@ -114,20 +147,37 @@ pub const MAX_FDS: usize = 256;
 
 impl FdTable {
     pub const fn new() -> Self {
-        Self { fds: Vec::new() }
+        Self {
+            fds: Vec::new(),
+            cloexec: alloc::collections::BTreeSet::new(),
+        }
     }
 
     /// 空いている一番小さい番号に入れる。
     pub fn insert(&mut self, file: Arc<OpenFile>) -> Result<usize, Errno> {
-        if let Some(fd) = self.fds.iter().position(Option::is_none) {
-            self.fds[fd] = Some(file);
-            return Ok(fd);
+        self.insert_from(0, file)
+    }
+
+    /// `min` 以上で空いている一番小さい番号に入れる。
+    pub fn insert_from(&mut self, min: usize, file: Arc<OpenFile>) -> Result<usize, Errno> {
+        let fd = (min..MAX_FDS)
+            .find(|&i| self.fds.get(i).is_none_or(Option::is_none))
+            .ok_or(Errno::EMFILE)?;
+        self.insert_at(fd, file)?;
+        Ok(fd)
+    }
+
+    /// 番号 `fd` に入れる(開いていれば閉じてから)。
+    pub fn insert_at(&mut self, fd: usize, file: Arc<OpenFile>) -> Result<(), Errno> {
+        if fd >= MAX_FDS {
+            return Err(Errno::EBADF);
         }
-        if self.fds.len() >= MAX_FDS {
-            return Err(Errno::EMFILE);
+        if self.fds.len() <= fd {
+            self.fds.resize(fd + 1, None);
         }
-        self.fds.push(Some(file));
-        Ok(self.fds.len() - 1)
+        self.fds[fd] = Some(file);
+        self.cloexec.remove(&fd);
+        Ok(())
     }
 
     pub fn get(&self, fd: u64) -> Result<Arc<OpenFile>, Errno> {
@@ -139,7 +189,31 @@ impl FdTable {
 
     pub fn close(&mut self, fd: u64) -> Result<(), Errno> {
         let slot = self.fds.get_mut(fd as usize).ok_or(Errno::EBADF)?;
+        self.cloexec.remove(&(fd as usize));
         slot.take().map(|_| ()).ok_or(Errno::EBADF)
+    }
+
+    pub fn set_cloexec(&mut self, fd: u64, on: bool) -> Result<(), Errno> {
+        self.get(fd)?;
+        if on {
+            self.cloexec.insert(fd as usize);
+        } else {
+            self.cloexec.remove(&(fd as usize));
+        }
+        Ok(())
+    }
+
+    pub fn is_cloexec(&self, fd: u64) -> bool {
+        self.cloexec.contains(&(fd as usize))
+    }
+
+    /// close-on-exec の印が付いたものを閉じる(execve の成功時)。
+    pub fn close_on_exec(&mut self) {
+        for fd in core::mem::take(&mut self.cloexec) {
+            if let Some(slot) = self.fds.get_mut(fd) {
+                *slot = None;
+            }
+        }
     }
 }
 
@@ -175,6 +249,25 @@ pub fn normalize(cwd: &str, path: &str) -> String {
 pub trait FileSystem: Send + Sync {
     /// `path` はこのファイルシステムの中の絶対パス(`/` で始まる)
     fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno>;
+
+    /// 新しいファイルを作る
+    fn create(&self, _path: &str, _mode: u32) -> Result<Arc<dyn File>, Errno> {
+        Err(Errno::EROFS)
+    }
+
+    fn mkdir(&self, _path: &str, _mode: u32) -> Result<(), Errno> {
+        Err(Errno::EROFS)
+    }
+
+    /// ファイル(`dir` なら空のディレクトリ)を消す
+    fn unlink(&self, _path: &str, _dir: bool) -> Result<(), Errno> {
+        Err(Errno::EROFS)
+    }
+
+    /// ディレクトリの中身(名前の順)
+    fn readdir(&self, _path: &str) -> Result<Vec<DirEntry>, Errno> {
+        Err(Errno::ENOTDIR)
+    }
 }
 
 /// マウントの表。長いマウントポイントから順に調べる。
@@ -195,8 +288,8 @@ impl Vfs {
             .sort_by_key(|(p, _)| core::cmp::Reverse(p.len()));
     }
 
-    /// 絶対パスの実体を探す。
-    pub fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
+    /// 絶対パスを、担当するファイルシステムとその中のパスに分ける。
+    fn resolve<'a>(&'a self, path: &'a str) -> Result<(&'a dyn FileSystem, &'a str), Errno> {
         for (at, fs) in &self.mounts {
             let rest = if at == "/" {
                 Some(path)
@@ -206,10 +299,53 @@ impl Vfs {
             };
             if let Some(rest) = rest {
                 let inner = if rest.is_empty() { "/" } else { rest };
-                return fs.lookup(inner);
+                return Ok((fs.as_ref(), inner));
             }
         }
         Err(Errno::ENOENT)
+    }
+
+    /// 絶対パスの実体を探す。
+    pub fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
+        let (fs, inner) = self.resolve(path)?;
+        fs.lookup(inner)
+    }
+
+    pub fn create(&self, path: &str, mode: u32) -> Result<Arc<dyn File>, Errno> {
+        let (fs, inner) = self.resolve(path)?;
+        fs.create(inner, mode)
+    }
+
+    pub fn mkdir(&self, path: &str, mode: u32) -> Result<(), Errno> {
+        let (fs, inner) = self.resolve(path)?;
+        fs.mkdir(inner, mode)
+    }
+
+    pub fn unlink(&self, path: &str, dir: bool) -> Result<(), Errno> {
+        let (fs, inner) = self.resolve(path)?;
+        fs.unlink(inner, dir)
+    }
+
+    /// ディレクトリの中身。マウントポイントもその名前の項目として見せる。
+    pub fn readdir(&self, path: &str) -> Result<Vec<DirEntry>, Errno> {
+        let (fs, inner) = self.resolve(path)?;
+        let mut entries = fs.readdir(inner)?;
+        for (at, _) in &self.mounts {
+            if let Some(name) = at.strip_prefix(path).map(|r| r.trim_start_matches('/'))
+                && !name.is_empty()
+                && !name.contains('/')
+                && at != path
+                && !entries.iter().any(|e| e.name == name)
+            {
+                entries.push(DirEntry {
+                    name: String::from(name),
+                    kind: FileKind::Directory,
+                    ino: 0,
+                });
+            }
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(entries)
     }
 }
 

@@ -107,6 +107,7 @@ fn exec_inner(p: &mut Process, path: u64, argv: u64, envp: u64) -> Result<(u64, 
     super::misc::fill_random(&mut random);
     let loaded = crate::exec::load(&mut mem, image, &argv_refs, &envp_refs, random)?;
     p.mem = mem;
+    p.fds.close_on_exec();
     p.entry = loaded;
     p.brk = loaded.brk;
     p.mmap_next = MMAP_BASE;

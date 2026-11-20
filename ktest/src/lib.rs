@@ -240,6 +240,11 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn tmpfs_supports_files_and_directories_from_c() {
+            assert_eq!(boot::run_program("/bin/tmpfiles", &[b"tmpfiles"]), Ok(0));
+        }
+
+        #[test_case]
         fn fp_simd_is_usable() {
             let x = core::hint::black_box(1.5f64);
             assert_eq!(x * 2.0, 3.0);

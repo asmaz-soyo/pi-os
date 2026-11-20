@@ -11,7 +11,8 @@ const TCSETSF: u64 = 0x5404;
 use crate::Errno;
 use crate::cred::Access;
 use crate::fs::vfs::{
-    self, FileKind, O_ACCMODE, O_CREAT, O_DIRECTORY, O_RDONLY, O_TRUNC, O_WRONLY, OpenFile, Stat,
+    self, FileKind, O_ACCMODE, O_CREAT, O_DIRECTORY, O_EXCL, O_RDONLY, O_TRUNC, O_WRONLY, OpenFile,
+    Stat,
 };
 use crate::process::Process;
 use alloc::sync::Arc;
@@ -37,19 +38,35 @@ fn path_arg(p: &mut Process, dirfd: u64, ptr: u64) -> Result<alloc::string::Stri
 }
 
 /// openat(dirfd, path, flags, mode)
-pub fn openat(p: &mut Process, dirfd: u64, path: u64, flags: u64) -> Result<u64, Errno> {
+pub fn openat(p: &mut Process, dirfd: u64, path: u64, flags: u64, mode: u64) -> Result<u64, Errno> {
     let flags = flags as u32;
     let path = path_arg(p, dirfd, path)?;
     let file = match p.vfs.lookup(&path) {
+        Ok(_) if flags & O_CREAT != 0 && flags & O_EXCL != 0 => return Err(Errno::EEXIST),
         Ok(file) => file,
-        Err(Errno::ENOENT) if flags & O_CREAT != 0 => return Err(Errno::EROFS),
+        Err(Errno::ENOENT) if flags & O_CREAT != 0 => {
+            // 作るには、親ディレクトリに書き込みと実行(たどる)の権限が要る
+            let parent = vfs::normalize(&path, "..");
+            if let Ok(dir) = p.vfs.lookup(&parent) {
+                p.cred.check(&dir.stat(), Access::WRITE | Access::EXEC)?;
+            }
+            p.vfs.create(&path, mode as u32 & 0o777)?
+        }
         Err(e) => return Err(e),
     };
     let st = file.stat();
     if flags & O_DIRECTORY != 0 && st.kind != FileKind::Directory {
         return Err(Errno::ENOTDIR);
     }
-    let wants_write = flags & O_ACCMODE != O_RDONLY || flags & (O_CREAT | O_TRUNC) != 0;
+    let wants_write = flags & O_ACCMODE != O_RDONLY || flags & O_TRUNC != 0;
+    if wants_write {
+        if st.kind == FileKind::Directory {
+            return Err(Errno::EISDIR);
+        }
+        if file.is_read_only() {
+            return Err(Errno::EROFS);
+        }
+    }
     let wants_read = flags & O_ACCMODE != O_WRONLY;
     let mut want = Access::NONE;
     if wants_read && st.kind != FileKind::Directory {
@@ -59,16 +76,87 @@ pub fn openat(p: &mut Process, dirfd: u64, path: u64, flags: u64) -> Result<u64,
         want = want | Access::WRITE;
     }
     p.cred.check(&st, want)?;
-    if wants_write && st.kind != FileKind::CharDevice {
-        // 今あるファイルシステムはすべて読み出し専用
-        return Err(if st.kind == FileKind::Directory {
-            Errno::EISDIR
-        } else {
-            Errno::EROFS
-        });
+    if flags & O_TRUNC != 0 && st.kind == FileKind::Regular {
+        file.truncate(0)?;
     }
-    let fd = p.fds.insert(OpenFile::new(file, flags))?;
+    let fd = p.fds.insert(OpenFile::with_path(file, flags, path))?;
     Ok(fd as u64)
+}
+
+const AT_REMOVEDIR: u64 = 0x200;
+
+/// mkdirat(dirfd, path, mode)
+pub fn mkdirat(p: &mut Process, dirfd: u64, path: u64, mode: u64) -> Result<u64, Errno> {
+    let path = path_arg(p, dirfd, path)?;
+    p.vfs.mkdir(&path, mode as u32 & 0o7777)?;
+    Ok(0)
+}
+
+/// unlinkat(dirfd, path, flags)
+pub fn unlinkat(p: &mut Process, dirfd: u64, path: u64, flags: u64) -> Result<u64, Errno> {
+    let path = path_arg(p, dirfd, path)?;
+    p.vfs.unlink(&path, flags & AT_REMOVEDIR != 0)?;
+    Ok(0)
+}
+
+/// ftruncate(fd, length)
+pub fn ftruncate(p: &mut Process, fd: u64, len: u64) -> Result<u64, Errno> {
+    let f = p.fds.get(fd)?;
+    if !f.writable() {
+        return Err(Errno::EINVAL);
+    }
+    f.file.truncate(len)?;
+    Ok(0)
+}
+
+/// getdents64(fd, dirp, count):ディレクトリの中身を `struct linux_dirent64` の並びで返す。
+/// 読む位置(`OpenFile::offset`)は項目の番号。0 と 1 は `.` と `..`。
+pub fn getdents64(p: &mut Process, fd: u64, buf: u64, count: u64) -> Result<u64, Errno> {
+    let f = p.fds.get(fd)?;
+    if f.file.stat().kind != FileKind::Directory {
+        return Err(Errno::ENOTDIR);
+    }
+    let path = f.path.clone().ok_or(Errno::EBADF)?;
+    let mut entries = alloc::vec![
+        vfs::DirEntry {
+            name: alloc::string::String::from("."),
+            kind: FileKind::Directory,
+            ino: 1
+        },
+        vfs::DirEntry {
+            name: alloc::string::String::from(".."),
+            kind: FileKind::Directory,
+            ino: 1
+        },
+    ];
+    entries.extend(p.vfs.readdir(&path)?);
+    let mut out = alloc::vec::Vec::new();
+    let mut index = *f.offset.lock() as usize;
+    while let Some(e) = entries.get(index) {
+        // d_ino(8) d_off(8) d_reclen(2) d_type(1) 名前 NUL、8 バイト境界に切り上げ
+        let reclen = (19 + e.name.len() + 1).div_ceil(8) * 8;
+        if out.len() + reclen > count as usize {
+            if out.is_empty() {
+                return Err(Errno::EINVAL); // 1 項目も入らない
+            }
+            break;
+        }
+        let d_type: u8 = match e.kind {
+            FileKind::Directory => 4,
+            FileKind::Regular => 8,
+            FileKind::CharDevice => 2,
+        };
+        out.extend_from_slice(&e.ino.to_le_bytes());
+        out.extend_from_slice(&((index + 1) as u64).to_le_bytes());
+        out.extend_from_slice(&(reclen as u16).to_le_bytes());
+        out.push(d_type);
+        out.extend_from_slice(e.name.as_bytes());
+        out.resize(out.len() + (reclen - 19 - e.name.len()), 0);
+        index += 1;
+    }
+    p.mem.copy_to_user(VirtAddr(buf), &out)?;
+    *f.offset.lock() = index as u64;
+    Ok(out.len() as u64)
 }
 
 fn readable(p: &Process, fd: u64) -> Result<Arc<OpenFile>, Errno> {
@@ -306,5 +394,73 @@ pub fn chdir(p: &mut Process, path: u64) -> Result<u64, Errno> {
     }
     p.cred.check(&st, Access::EXEC)?;
     p.cwd = path;
+    Ok(0)
+}
+
+const O_CLOEXEC: u64 = 0o2000000;
+const FD_CLOEXEC: u64 = 1;
+
+/// dup(fd)
+pub fn dup(p: &mut Process, fd: u64) -> Result<u64, Errno> {
+    let f = p.fds.get(fd)?;
+    Ok(p.fds.insert(f)? as u64)
+}
+
+/// dup3(oldfd, newfd, flags)
+pub fn dup3(p: &mut Process, old: u64, new: u64, flags: u64) -> Result<u64, Errno> {
+    if old == new {
+        return Err(Errno::EINVAL);
+    }
+    let f = p.fds.get(old)?;
+    p.fds.insert_at(new as usize, f)?;
+    p.fds.set_cloexec(new, flags & O_CLOEXEC != 0)?;
+    Ok(new)
+}
+
+/// fcntl(fd, cmd, arg)
+pub fn fcntl(p: &mut Process, fd: u64, cmd: u64, arg: u64) -> Result<u64, Errno> {
+    const F_DUPFD: u64 = 0;
+    const F_GETFD: u64 = 1;
+    const F_SETFD: u64 = 2;
+    const F_GETFL: u64 = 3;
+    const F_SETFL: u64 = 4;
+    const F_DUPFD_CLOEXEC: u64 = 1030;
+    let f = p.fds.get(fd)?;
+    match cmd {
+        F_DUPFD | F_DUPFD_CLOEXEC => {
+            let new = p.fds.insert_from(arg as usize, f)? as u64;
+            p.fds.set_cloexec(new, cmd == F_DUPFD_CLOEXEC)?;
+            Ok(new)
+        }
+        F_GETFD => Ok(if p.fds.is_cloexec(fd) { FD_CLOEXEC } else { 0 }),
+        F_SETFD => {
+            p.fds.set_cloexec(fd, arg & FD_CLOEXEC != 0)?;
+            Ok(0)
+        }
+        F_GETFL => Ok(f.flags as u64),
+        // O_NONBLOCK などはまだ扱わない(受け付けるだけ)
+        F_SETFL => Ok(0),
+        _ => Err(Errno::EINVAL),
+    }
+}
+
+/// faccessat(dirfd, path, mode):実ユーザー ID で、存在と権限を確かめる。
+pub fn faccessat(p: &mut Process, dirfd: u64, path: u64, mode: u64) -> Result<u64, Errno> {
+    let path = path_arg(p, dirfd, path)?;
+    let st = p.vfs.lookup(&path)?.stat();
+    if mode & 7 == 0 {
+        return Ok(0); // F_OK:あるかどうかだけ
+    }
+    let mut want = Access::NONE;
+    for (bit, access) in [(4, Access::READ), (2, Access::WRITE), (1, Access::EXEC)] {
+        if mode & bit != 0 {
+            want = want | access;
+        }
+    }
+    // access は実効 ID ではなく実 ID で判定する
+    let mut real = p.cred.clone();
+    real.euid = real.uid;
+    real.egid = real.gid;
+    real.check(&st, want)?;
     Ok(0)
 }

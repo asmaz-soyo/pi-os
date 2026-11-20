@@ -6,10 +6,18 @@
 | 番号 | 名前 | 引数の数 |
 | --- | --- | --- |
 | 17 | `getcwd` | 2 |
+| 23 | `dup` | 1 |
+| 24 | `dup3` | 3 |
+| 25 | `fcntl` | 3 |
 | 29 | `ioctl` | 3 |
+| 34 | `mkdirat` | 3 |
+| 35 | `unlinkat` | 3 |
+| 46 | `ftruncate` | 2 |
+| 48 | `faccessat` | 3 |
 | 49 | `chdir` | 1 |
 | 56 | `openat` | 4 |
 | 57 | `close` | 1 |
+| 61 | `getdents64` | 3 |
 | 62 | `lseek` | 3 |
 | 63 | `read` | 3 |
 | 64 | `write` | 3 |
@@ -46,4 +54,4 @@
 | 260 | `wait4` | 4 |
 | 278 | `getrandom` | 3 |
 
-合計 40 個
+合計 48 個

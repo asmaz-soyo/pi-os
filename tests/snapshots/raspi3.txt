@@ -11,6 +11,12 @@ Hello from JS
 init: /bin/qjs exited with status 0
 pi-os:/$ hello
 Hello from user space!
+pi-os:/$ ls /
+bin
+dev
+etc
+hello.js
+tmp
 pi-os:/$ qjs
 QuickJS - Type "\h" for help
 qjs > {..}

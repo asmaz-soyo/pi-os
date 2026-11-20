@@ -2,7 +2,7 @@
 
 use crate::Errno;
 use crate::fs::tar::{self, Kind};
-use crate::fs::vfs::{File, FileKind, FileSystem, Stat};
+use crate::fs::vfs::{DirEntry, File, FileKind, FileSystem, Stat};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -40,6 +40,10 @@ impl File for RamFile {
 
     fn contents(&self) -> Option<&[u8]> {
         Some(self.data)
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
     }
 }
 
@@ -115,6 +119,33 @@ impl Initramfs {
 impl FileSystem for Initramfs {
     fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
         self.nodes.get(path).cloned().ok_or(Errno::ENOENT)
+    }
+
+    fn readdir(&self, path: &str) -> Result<alloc::vec::Vec<DirEntry>, Errno> {
+        let dir = self.nodes.get(path).ok_or(Errno::ENOENT)?;
+        if dir.stat().kind != FileKind::Directory {
+            return Err(Errno::ENOTDIR);
+        }
+        let prefix = if path == "/" {
+            String::from("/")
+        } else {
+            alloc::format!("{path}/")
+        };
+        Ok(self
+            .nodes
+            .iter()
+            .filter_map(|(p, f)| {
+                let name = p.strip_prefix(prefix.as_str())?;
+                (!name.is_empty() && !name.contains('/')).then(|| {
+                    let st = f.stat();
+                    DirEntry {
+                        name: String::from(name),
+                        kind: st.kind,
+                        ino: st.ino,
+                    }
+                })
+            })
+            .collect())
     }
 }
 

@@ -1,7 +1,7 @@
 //! デバイスファイル(`/dev/console`、`/dev/null`)。
 
 use crate::Errno;
-use crate::fs::vfs::{File, FileKind, FileSystem, Stat};
+use crate::fs::vfs::{DirEntry, File, FileKind, FileSystem, Stat};
 use crate::sync::SpinLock;
 use crate::tty::{Termios, Tty};
 use alloc::boxed::Box;
@@ -145,5 +145,19 @@ impl FileSystem for Devfs {
             "/null" => Ok(Arc::new(NullFile)),
             _ => Err(Errno::ENOENT),
         }
+    }
+
+    fn readdir(&self, path: &str) -> Result<Vec<DirEntry>, Errno> {
+        if path != "/" {
+            return Err(Errno::ENOTDIR);
+        }
+        Ok(["console", "null", "tty"]
+            .iter()
+            .map(|name| DirEntry {
+                name: alloc::string::String::from(*name),
+                kind: FileKind::CharDevice,
+                ino: 0x1_0001,
+            })
+            .collect())
     }
 }

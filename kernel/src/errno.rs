@@ -28,6 +28,7 @@ pub enum Errno {
     ERANGE = 34,
     ENAMETOOLONG = 36,
     ENOSYS = 38,
+    ENOTEMPTY = 39,
     ELOOP = 40,
 }
 
@@ -65,6 +66,7 @@ pub fn name(errno: i32) -> Option<&'static str> {
         34 => "ERANGE",
         36 => "ENAMETOOLONG",
         38 => "ENOSYS",
+        39 => "ENOTEMPTY",
         40 => "ELOOP",
         _ => return None,
     })

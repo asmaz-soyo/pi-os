@@ -278,7 +278,7 @@ pub fn run_user(image: &[u8], argv: &[&[u8]]) -> Result<i32, Errno> {
     Ok(wait(pid))
 }
 
-/// ルートに initramfs、`/dev` に devfs をマウントした VFS(最初の呼び出しで作る)。
+/// ルートに initramfs、`/dev` に devfs、`/tmp` に tmpfs をマウントした VFS(最初の呼び出しで作る)。
 fn vfs() -> (Arc<Vfs>, Arc<dyn File>) {
     static VFS: spin::Once<(Arc<Vfs>, Arc<ConsoleFile>)> = spin::Once::new();
     let (vfs, console) = VFS.call_once(|| {
@@ -286,6 +286,7 @@ fn vfs() -> (Arc<Vfs>, Arc<dyn File>) {
         let console = Arc::new(ConsoleFile::new(Box::new(kernel::console::Global)));
         let mut vfs = Vfs::new(Arc::new(root));
         vfs.mount("/dev", Arc::new(Devfs::new(console.clone())));
+        vfs.mount("/tmp", Arc::new(kernel::fs::tmpfs::Tmpfs::new()));
         (Arc::new(vfs), console)
     });
     (vfs.clone(), console.clone())
