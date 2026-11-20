@@ -4,6 +4,7 @@
 extern crate std;
 
 pub mod addr;
+pub mod block;
 pub mod console;
 pub mod irq;
 pub mod mmio;
