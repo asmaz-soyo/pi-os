@@ -24,6 +24,7 @@ dependencies = [
  "arch-aarch64",
  "hal",
  "kernel",
+ "userland",
 ]
 
 [[package]]
@@ -91,6 +92,10 @@ name = "spin"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
+
+[[package]]
+name = "userland"
+version = "0.1.0"
 
 [[package]]
 name = "xtask"

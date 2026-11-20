@@ -23,6 +23,11 @@ jobs:
       - name: Install QEMU
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-arm
 
+      # ユーザープログラム(musl の静的リンク)は zig cc でビルドする
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+
       - name: Install Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install
 

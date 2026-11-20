@@ -21,3 +21,13 @@ fn ci_workflow_installs_qemu_for_integration_tests() {
 fn ci_workflow_cancels_superseded_runs() {
     assert!(workflow().contains("cancel-in-progress: true"));
 }
+
+#[test]
+fn ci_workflow_installs_zig_for_user_programs() {
+    let wf = workflow();
+    assert!(wf.contains("setup-zig"), "zig builds the user programs");
+    assert!(
+        wf.contains("version: 0.17.1"),
+        "same zig version as the dev PC"
+    );
+}

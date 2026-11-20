@@ -21,6 +21,13 @@ pub trait Handler: Sync {
     fn synchronous(&self, frame: &mut TrapFrame);
     /// 割り込み
     fn irq(&self, frame: &mut TrapFrame);
+    /// EL0 に戻る直前に毎回呼ばれる(シグナル、プリエンプション、トレースの差し込み口)
+    fn before_return_to_user(&self, _frame: &mut TrapFrame) {}
+}
+
+/// `frame` が EL0 から来た例外か(SPSR.M が EL0t)。
+pub fn from_user(frame: &TrapFrame) -> bool {
+    frame.spsr & 0xf == 0
 }
 
 static HANDLER: Mutex<Option<&'static dyn Handler>> = Mutex::new(None);
@@ -63,6 +70,11 @@ extern "C" fn arch_exception_entry(kind: u64, frame: &mut TrapFrame) {
         (0, Some(handler)) => handler.synchronous(frame),
         (1, Some(handler)) => handler.irq(frame),
         _ => unhandled(kind, frame),
+    }
+    if let Some(handler) = handler
+        && from_user(frame)
+    {
+        handler.before_return_to_user(frame);
     }
 }
 
@@ -139,6 +151,10 @@ exception_common:
 
     mov     x1, sp
     bl      arch_exception_entry
+
+    // ここが例外からの唯一の復帰経路。EL0 へ戻る eret もここだけ(context.rs も ここに飛ぶ)
+    .global exception_return
+exception_return:
 
     // ハンドラが書き換えたかもしれない値を CPU に戻す
     ldp     x2, x3, [sp, #248]

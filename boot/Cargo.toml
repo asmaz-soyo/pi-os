@@ -9,6 +9,7 @@ publish = false
 hal = { path = "../hal" }
 kernel = { path = "../kernel" }
 arch-aarch64 = { path = "../arch/aarch64" }
+userland = { path = "../user" }
 
 [lib]
 test = false

@@ -4,6 +4,13 @@
 //! 初期化の順番やパニックの処理はここで共通にする。
 #![no_std]
 
+extern crate alloc;
+
+mod user;
+
+pub use user::{STATUS_SEGV, run_user};
+pub use userland;
+
 use arch_aarch64::exception::{self, Handler};
 use arch_aarch64::mmu::{LinearTableMemory, PageTable, phys_to_virt};
 use arch_aarch64::timer::GenericTimer;
@@ -87,6 +94,7 @@ fn init_memory<B: Board>() {
             .expect("kernel mapping");
     }
     let user_table = PageTable::new(&mut mem).expect("frame for user table");
+    *user::EMPTY_USER_TABLE.lock() = Some(user_table.root());
     // SAFETY: 新しいテーブルはカーネルのイメージとスタックを同じ仮想アドレスでマップしている。
     // 下位アドレス(恒等マップ)はもう使っていない
     unsafe {
@@ -111,7 +119,15 @@ struct Exceptions<B>(PhantomData<fn() -> B>);
 
 impl<B: Board> Handler for Exceptions<B> {
     fn synchronous(&self, frame: &mut TrapFrame) {
-        exception::unhandled(exception::KIND_SYNC_CURRENT_EL, frame)
+        if exception::from_user(frame) {
+            user::user_synchronous(frame)
+        } else {
+            exception::unhandled(exception::KIND_SYNC_CURRENT_EL, frame)
+        }
+    }
+
+    fn before_return_to_user(&self, _frame: &mut TrapFrame) {
+        kernel::process::before_return_to_user();
     }
 
     fn irq(&self, _frame: &mut TrapFrame) {
@@ -161,5 +177,13 @@ pub fn run_demos(panic_demo: bool, fault_demo: bool) {
     if fault_demo {
         // SAFETY: 未定義命令で例外を起こすだけ(未処理なのでパニックになる)
         unsafe { core::arch::asm!("udf #0") };
+    }
+}
+
+/// 最初のユーザープログラム(init)を動かす。
+pub fn run_init() {
+    match run_user(userland::HELLO, &[b"hello"]) {
+        Ok(status) => kernel::println!("init exited with status {status}"),
+        Err(e) => kernel::println!("init failed to start: {e:?}"),
     }
 }

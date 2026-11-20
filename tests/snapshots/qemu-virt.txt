@@ -1,3 +1,5 @@
 Pi-OS booting on qemu-virt
 Hello from Pi-OS
 timer: 10 ticks at 100 Hz
+Hello from user space!
+init exited with status 0

@@ -14,6 +14,8 @@ pub mod trap;
 #[cfg(target_os = "none")]
 pub mod boot;
 #[cfg(target_os = "none")]
+pub mod context;
+#[cfg(target_os = "none")]
 pub mod cpu;
 #[cfg(target_os = "none")]
 pub mod exception;

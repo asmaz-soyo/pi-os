@@ -14,6 +14,7 @@ pub const TARGET_CRATES: &[&str] = &[
     "kernel",
     "pl011",
     "arch-aarch64",
+    "userland",
     "boot",
     "ktest",
     "bsp-qemu-virt",
@@ -21,7 +22,8 @@ pub const TARGET_CRATES: &[&str] = &[
 ];
 
 /// ホストではビルドできない(`TARGET` 専用の)クレート。ホストのテストと clippy から外す。
-pub const TARGET_ONLY_CRATES: &[&str] = &["boot", "ktest", "bsp-qemu-virt", "bsp-raspi3"];
+pub const TARGET_ONLY_CRATES: &[&str] =
+    &["userland", "boot", "ktest", "bsp-qemu-virt", "bsp-raspi3"];
 
 pub const USAGE: &str = "usage: cargo xtask <build | run [--bsp <bsp>] | \
                          test [--bsp <bsp> | --snapshot] | ci>\n  bsp: qemu-virt, raspi3";

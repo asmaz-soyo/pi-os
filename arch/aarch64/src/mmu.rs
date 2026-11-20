@@ -106,6 +106,18 @@ pub fn leaf_descriptor(pa: PhysAddr, flags: MapFlags, level: Level) -> u64 {
     d
 }
 
+/// 記述子の属性ビットを `MapFlags` に戻す。
+fn decode_flags(d: u64) -> MapFlags {
+    let user = d & AP_EL0 != 0;
+    let device = (d >> 2) & 0b111 == 0;
+    MapFlags {
+        write: d & AP_RO == 0,
+        exec: if user { d & UXN == 0 } else { d & PXN == 0 },
+        user,
+        device,
+    }
+}
+
 fn table_descriptor(pa: PhysAddr) -> u64 {
     (pa.0 & ADDR_MASK) | VALID | TABLE_OR_PAGE
 }
@@ -256,6 +268,57 @@ impl PageTable {
             ));
         }
         None
+    }
+
+    /// 変換し、記述子の属性も返す。
+    pub fn translate_with_flags(
+        &self,
+        mem: &mut impl TableMemory,
+        va: VirtAddr,
+    ) -> Option<(PhysAddr, MapFlags)> {
+        let mut table = self.root;
+        for level in [Level::L0, Level::L1, Level::L2, Level::L3] {
+            let d = mem.table(table)[level.index(va)];
+            if !is_valid(d) {
+                return None;
+            }
+            if is_table(d, level) {
+                table = PhysAddr(d & ADDR_MASK);
+                continue;
+            }
+            let size = level.block_size();
+            let pa = PhysAddr((d & ADDR_MASK & !(size - 1)) | (va.0 & (size - 1)));
+            return Some((pa, decode_flags(d)));
+        }
+        None
+    }
+
+    /// このアドレス空間のテーブル(L0〜L3)のフレームをすべて `release` に渡す。
+    /// 末端のページが指すフレームは渡さない(持ち主が別に解放する)。
+    pub fn free_tables(self, mem: &mut impl TableMemory, mut release: impl FnMut(PhysAddr)) {
+        fn walk(
+            mem: &mut impl TableMemory,
+            table: PhysAddr,
+            level: Level,
+            release: &mut impl FnMut(PhysAddr),
+        ) {
+            let next = match level {
+                Level::L0 => Some(Level::L1),
+                Level::L1 => Some(Level::L2),
+                Level::L2 => Some(Level::L3),
+                Level::L3 => None,
+            };
+            if let Some(next) = next {
+                for i in 0..ENTRIES {
+                    let d = mem.table(table)[i];
+                    if is_table(d, level) {
+                        walk(mem, PhysAddr(d & ADDR_MASK), next, release);
+                    }
+                }
+            }
+            release(table);
+        }
+        walk(mem, self.root, Level::L0, &mut release);
     }
 
     /// 4KiB ページのマッピングを外し、指していたフレームを返す。
@@ -503,5 +566,49 @@ mod tests {
             virt_to_phys(VirtAddr(0xffff_0000_4008_0000)),
             PhysAddr(0x4008_0000)
         );
+    }
+
+    #[test]
+    fn translate_with_flags_decodes_permissions() {
+        let (mut mem, pt) = new_table();
+        for (va, flags) in [
+            (0x40_0000, MapFlags::USER_RX),
+            (0x40_1000, MapFlags::USER_RW),
+            (0x40_2000, MapFlags::USER_R),
+            (0x40_3000, MapFlags::KERNEL_RW),
+            (0x40_4000, MapFlags::DEVICE),
+        ] {
+            pt.map_page(&mut mem, VirtAddr(va), PhysAddr(0x9000), flags)
+                .unwrap();
+            assert_eq!(
+                pt.translate_with_flags(&mut mem, VirtAddr(va + 8)),
+                Some((PhysAddr(0x9008), flags)),
+                "{va:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn free_tables_returns_every_table_frame() {
+        let (mut mem, pt) = new_table();
+        pt.map_page(
+            &mut mem,
+            VirtAddr(0x40_0000),
+            PhysAddr(0x1000),
+            MapFlags::USER_RW,
+        )
+        .unwrap();
+        pt.map_page(
+            &mut mem,
+            VirtAddr(0x7fff_0000_0000),
+            PhysAddr(0x2000),
+            MapFlags::USER_RW,
+        )
+        .unwrap();
+        let tables: std::vec::Vec<u64> = mem.tables.keys().copied().collect();
+        let mut freed = std::vec::Vec::new();
+        pt.free_tables(&mut mem, |pa| freed.push(pa.0));
+        freed.sort();
+        assert_eq!(freed, tables);
     }
 }

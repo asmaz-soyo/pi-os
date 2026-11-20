@@ -104,3 +104,20 @@ pub unsafe fn set_user_table(root: hal::addr::PhysAddr) {
              in(reg) root.0, options(nostack));
     }
 }
+
+/// `va` を含むページの TLB を(全コアで)無効にする。
+pub fn flush_tlb_page(va: hal::addr::VirtAddr) {
+    // SAFETY: TLB の無効化は副作用としてメモリを壊さない
+    unsafe {
+        asm!("dsb ishst", "tlbi vaae1is, {}", "dsb ish", "isb",
+             in(reg) va.0 >> 12, options(nostack));
+    }
+}
+
+/// カウンタの値(乱数の種などに使う)。
+pub fn counter() -> u64 {
+    let t: u64;
+    // SAFETY: 読み出しだけ
+    unsafe { asm!("isb", "mrs {}, cntpct_el0", out(reg) t, options(nomem, nostack)) };
+    t
+}

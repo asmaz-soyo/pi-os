@@ -139,6 +139,29 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn user_program_runs_at_el0_and_returns_its_exit_status() {
+            assert_eq!(boot::run_user(boot::userland::EXIT42, &[b"exit42"]), Ok(42));
+        }
+
+        #[test_case]
+        fn bad_pointer_in_a_syscall_is_efault_not_a_crash() {
+            assert_eq!(boot::run_user(boot::userland::EFAULT, &[b"efault"]), Ok(14));
+        }
+
+        #[test_case]
+        fn user_fault_ends_only_the_process() {
+            assert_eq!(boot::run_user(boot::userland::FAULT, &[b"fault"]), Ok(boot::STATUS_SEGV));
+        }
+
+        #[test_case]
+        fn running_a_process_returns_all_its_frames() {
+            boot::run_user(boot::userland::EXIT42, &[b"exit42"]).unwrap();
+            let before = kernel::mm::frame_stats().0;
+            boot::run_user(boot::userland::EXIT42, &[b"exit42"]).unwrap();
+            assert_eq!(kernel::mm::frame_stats().0, before);
+        }
+
+        #[test_case]
         fn fp_simd_is_usable() {
             let x = core::hint::black_box(1.5f64);
             assert_eq!(x * 2.0, 3.0);

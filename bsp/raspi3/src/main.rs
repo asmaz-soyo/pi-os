@@ -66,6 +66,7 @@ extern "C" fn kernel_main(_dtb: usize) -> ! {
     test_main();
 
     kernel::kmain(<Board as boot::Board>::NAME);
+    boot::run_init();
     boot::run_demos(cfg!(feature = "panic-demo"), cfg!(feature = "fault-demo"));
     boot::exit(0)
 }

@@ -12,7 +12,9 @@ pub mod exec;
 pub mod irq;
 pub mod mm;
 pub mod panic;
+pub mod process;
 pub mod sync;
+pub mod syscall;
 pub mod time;
 
 pub use errno::Errno;
