@@ -99,6 +99,13 @@ name = "userland"
 version = "0.1.0"
 
 [[package]]
+name = "virtio-blk"
+version = "0.1.0"
+dependencies = [
+ "hal",
+]
+
+[[package]]
 name = "xtask"
 version = "0.1.0"
 dependencies = [

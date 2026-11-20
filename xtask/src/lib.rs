@@ -13,6 +13,7 @@ pub const TARGET_CRATES: &[&str] = &[
     "hal",
     "kernel",
     "pl011",
+    "virtio-blk",
     "arch-aarch64",
     "userland",
     "boot",

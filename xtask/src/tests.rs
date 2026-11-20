@@ -12,10 +12,11 @@ fn clippy(krate: &str) -> String {
     format!("cargo clippy -p {krate} --target aarch64-unknown-none -- -D warnings")
 }
 
-const ALL_TARGET: [&str; 9] = [
+const ALL_TARGET: [&str; 10] = [
     "hal",
     "kernel",
     "pl011",
+    "virtio-blk",
     "arch-aarch64",
     "userland",
     "boot",
