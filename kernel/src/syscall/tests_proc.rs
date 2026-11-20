@@ -199,3 +199,26 @@ fn chdir_errors() {
         err(Errno::ENOTDIR)
     );
 }
+
+#[test]
+fn execve_runs_programs_that_are_not_in_memory() {
+    // tmpfs(や ext2)のファイルは中身を直接見せないので、読んでから読み込む
+    let (mut p, _) = process();
+    let tiny = p
+        .vfs
+        .lookup("/bin/tiny")
+        .unwrap()
+        .contents()
+        .unwrap()
+        .to_vec();
+    p.vfs
+        .create("/tmp/tiny", 0o755)
+        .unwrap()
+        .write(0, &tiny)
+        .unwrap();
+    let Action::Exec { entry, .. } = exec(&mut p, b"/tmp/tiny", &[b"tiny"]) else {
+        panic!("exec from tmpfs failed")
+    };
+    assert_eq!(entry, 0x40_1000);
+    assert_eq!(p.name, "tiny");
+}

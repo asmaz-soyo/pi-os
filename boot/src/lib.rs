@@ -299,7 +299,7 @@ pub fn run_init() {
             return;
         }
     };
-    let script = core::str::from_utf8(script).unwrap_or("");
+    let script = core::str::from_utf8(&script).unwrap_or("");
     for args in kernel::init::parse(script) {
         let argv: alloc::vec::Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
         match run_program(args[0], &argv) {

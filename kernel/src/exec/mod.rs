@@ -39,6 +39,29 @@ pub struct Loaded {
 
 /// ELF の `image` を `mem` に読み込み、`argv` と `envp` を積んだスタックを作る。
 /// `random` は AT_RANDOM で渡す 16 バイト(musl がスタック保護の値などに使う)。
+/// 実行ファイルの中身。initramfs ならメモリの中をそのまま指し、それ以外(tmpfs、ext2)は読んで持つ。
+pub fn read_image(
+    file: &dyn crate::fs::vfs::File,
+) -> Result<alloc::borrow::Cow<'static, [u8]>, crate::Errno> {
+    if let Some(bytes) = file.contents() {
+        // SAFETY: contents を見せるのは initramfs だけで、その中身は 'static な埋め込みデータ
+        let bytes: &'static [u8] =
+            unsafe { core::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) };
+        return Ok(alloc::borrow::Cow::Borrowed(bytes));
+    }
+    let size = file.stat().size as usize;
+    let mut buf = alloc::vec![0u8; size];
+    let mut done = 0;
+    while done < size {
+        match file.read(done as u64, &mut buf[done..])? {
+            0 => break,
+            n => done += n,
+        }
+    }
+    buf.truncate(done);
+    Ok(alloc::borrow::Cow::Owned(buf))
+}
+
 pub fn load(
     mem: &mut UserMemory,
     image: &[u8],

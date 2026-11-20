@@ -337,24 +337,22 @@ fn mount_disk(vfs: &mut Vfs) {
     }
 }
 
-/// initramfs のプログラム `path` を新しいプロセスとして動かし始める。
+/// プログラム `path` を新しいプロセスとして動かし始める。
 pub fn spawn_program(path: &str, argv: &[&[u8]]) -> Result<kernel::process::Pid, Errno> {
     let file = vfs().0.lookup(path)?;
     // init は root として動く(ADR-0005)。root でも実行ビットのないファイルは実行できない
     kernel::cred::Credentials::root().check(&file.stat(), kernel::cred::Access::EXEC)?;
-    let image = file.contents().ok_or(Errno::EACCES)?;
-    spawn_user(image, argv)
+    let image = kernel::exec::read_image(&*file)?;
+    spawn_user(&image, argv)
 }
 
-/// initramfs のプログラム `path` を実行し、終了ステータスを返す。
+/// プログラム `path` を実行し、終了ステータスを返す。
 pub fn run_program(path: &str, argv: &[&[u8]]) -> Result<i32, Errno> {
     Ok(wait(spawn_program(path, argv)?))
 }
 
-/// initramfs のファイルの中身。
-pub fn read_file(path: &str) -> Result<&'static [u8], Errno> {
+/// ファイルの中身(initramfs ならメモリをそのまま、それ以外は読んで返す)。
+pub fn read_file(path: &str) -> Result<alloc::borrow::Cow<'static, [u8]>, Errno> {
     let file = vfs().0.lookup(path)?;
-    let bytes = file.contents().ok_or(Errno::EACCES)?;
-    // SAFETY: initramfs の中身は 'static な埋め込みデータ
-    Ok(unsafe { core::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) })
+    kernel::exec::read_image(&*file)
 }
