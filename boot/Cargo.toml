@@ -10,6 +10,7 @@ hal = { path = "../hal" }
 kernel = { path = "../kernel" }
 arch-aarch64 = { path = "../arch/aarch64" }
 userland = { path = "../user" }
+spin = { version = "0.9", default-features = false, features = ["once"] }
 
 [lib]
 test = false

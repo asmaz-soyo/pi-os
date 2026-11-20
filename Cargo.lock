@@ -24,6 +24,7 @@ dependencies = [
  "arch-aarch64",
  "hal",
  "kernel",
+ "spin",
  "userland",
 ]
 

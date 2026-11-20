@@ -4,10 +4,14 @@
 //! マルチタスクはフェーズ2で、ここにスケジューラを足す。
 
 use crate::exec::Loaded;
+use crate::fs::vfs::{FdTable, File, O_RDWR, OpenFile, Vfs};
 use crate::mm::user::UserMemory;
 use crate::sync::SpinLock;
-use alloc::boxed::Box;
-use hal::console::Console;
+use alloc::string::String;
+use alloc::sync::Arc;
+
+/// mmap で場所を選ぶときに使い始めるアドレス
+pub const MMAP_BASE: u64 = 0x0000_4000_0000_0000;
 
 pub struct Process {
     pub mem: UserMemory,
@@ -15,17 +19,29 @@ pub struct Process {
     pub entry: Loaded,
     /// ヒープ(brk)の今の終わり
     pub brk: u64,
-    /// 標準出力・標準エラー出力の行き先(VFS ができたら fd の表に置き換える)
-    pub stdout: Box<dyn Console + Send>,
+    /// 次に mmap で使うアドレス
+    pub mmap_next: u64,
+    pub fds: FdTable,
+    pub cwd: String,
+    pub vfs: Arc<Vfs>,
 }
 
 impl Process {
-    pub fn new(mem: UserMemory, entry: Loaded, stdout: Box<dyn Console + Send>) -> Self {
+    /// `stdio` を fd 0, 1, 2(標準入力・出力・エラー出力)にしたプロセスを作る。
+    pub fn new(mem: UserMemory, entry: Loaded, vfs: Arc<Vfs>, stdio: Arc<dyn File>) -> Self {
+        let mut fds = FdTable::new();
+        for _ in 0..3 {
+            fds.insert(OpenFile::new(stdio.clone(), O_RDWR))
+                .expect("empty fd table");
+        }
         Self {
             mem,
             entry,
             brk: entry.brk,
-            stdout,
+            mmap_next: MMAP_BASE,
+            fds,
+            cwd: String::from("/"),
+            vfs,
         }
     }
 }

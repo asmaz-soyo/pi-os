@@ -5,6 +5,7 @@
 //! - [`run_user`]:プログラムを読み込み、EL0 で動かし、終了ステータスを返す
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use arch_aarch64::context::{self, KernelContext};
 use arch_aarch64::esr::{Esr, ExceptionClass};
 use arch_aarch64::mmu::{LinearTableMemory, PageTable, phys_to_virt};
@@ -13,6 +14,9 @@ use core::cell::UnsafeCell;
 use hal::addr::{PAGE_SIZE, PhysAddr, VirtAddr};
 use hal::mmu::{AddressSpace, MapError, MapFlags, PhysMemory};
 use kernel::Errno;
+use kernel::fs::devfs::{ConsoleFile, Devfs};
+use kernel::fs::initramfs::Initramfs;
+use kernel::fs::vfs::{File, Vfs};
 use kernel::mm::user::UserMemory;
 use kernel::process::{CURRENT, Process};
 use kernel::syscall::Action;
@@ -161,7 +165,8 @@ pub fn run_user(image: &[u8], argv: &[&[u8]]) -> Result<i32, Errno> {
     );
     let loaded = kernel::exec::load(&mut mem, image, argv, &[], random)?;
     mem.activate();
-    *CURRENT.lock() = Some(Process::new(mem, loaded, Box::new(kernel::console::Global)));
+    let (vfs, console) = vfs();
+    *CURRENT.lock() = Some(Process::new(mem, loaded, vfs, console));
 
     // EL0t(SPSR.M = 0)、割り込みは許可した状態で入口から始める
     let frame = TrapFrame {
@@ -177,8 +182,22 @@ pub fn run_user(image: &[u8], argv: &[&[u8]]) -> Result<i32, Errno> {
     Ok(status)
 }
 
+/// ルートに initramfs、`/dev` に devfs をマウントした VFS(最初の呼び出しで作る)。
+fn vfs() -> (Arc<Vfs>, Arc<dyn File>) {
+    static VFS: spin::Once<(Arc<Vfs>, Arc<ConsoleFile>)> = spin::Once::new();
+    let (vfs, console) = VFS.call_once(|| {
+        let root = Initramfs::new(userland::INITRAMFS).expect("initramfs is a valid tar");
+        let console = Arc::new(ConsoleFile::new(Box::new(kernel::console::Global)));
+        let mut vfs = Vfs::new(Arc::new(root));
+        vfs.mount("/dev", Arc::new(Devfs::new(console.clone())));
+        (Arc::new(vfs), console)
+    });
+    (vfs.clone(), console.clone())
+}
+
 /// initramfs のプログラム `path` を実行する。
 pub fn run_program(path: &str, argv: &[&[u8]]) -> Result<i32, Errno> {
-    let image = kernel::fs::tar::find(userland::INITRAMFS, path).ok_or(Errno::ENOENT)?;
+    let file = vfs().0.lookup(path)?;
+    let image = file.contents().ok_or(Errno::EACCES)?;
     run_user(image, argv)
 }
