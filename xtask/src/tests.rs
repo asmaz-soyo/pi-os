@@ -4,14 +4,53 @@ fn displays(plan: &[Step]) -> Vec<String> {
     plan.iter().map(Step::to_string).collect()
 }
 
-const HOST_TEST: &str = "cargo test --workspace --exclude arch-aarch64 --exclude bsp-qemu-virt";
-const QEMU_VIRT_TEST: &str = "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUNNER='timeout 60 \
-    qemu-system-aarch64 -M virt -cpu cortex-a53 -m 128M -nographic -semihosting -kernel' \
-    cargo test -p bsp-qemu-virt --target aarch64-unknown-none";
-const QEMU_VIRT_BUILD: &str = "cargo build -p bsp-qemu-virt --target aarch64-unknown-none";
-const QEMU_VIRT_SNAPSHOT: &str = "snapshot tests/snapshots/qemu-virt.txt <= timeout 30 \
-    qemu-system-aarch64 -M virt -cpu cortex-a53 -m 128M -nographic -semihosting \
-    -kernel target/aarch64-unknown-none/debug/bsp-qemu-virt";
+fn build(krate: &str) -> String {
+    format!("cargo build -p {krate} --target aarch64-unknown-none")
+}
+
+fn clippy(krate: &str) -> String {
+    format!("cargo clippy -p {krate} --target aarch64-unknown-none -- -D warnings")
+}
+
+const ALL_TARGET: [&str; 7] = [
+    "hal",
+    "kernel",
+    "pl011",
+    "arch-aarch64",
+    "ktest",
+    "bsp-qemu-virt",
+    "bsp-raspi3",
+];
+const EXCLUDES: &str =
+    "--exclude arch-aarch64 --exclude ktest --exclude bsp-qemu-virt --exclude bsp-raspi3";
+const VIRT_ARGS: &str = "-M virt -cpu cortex-a53 -m 128M -nographic -semihosting";
+const RASPI3_ARGS: &str = "-M raspi3b -nographic -semihosting";
+const KERNEL8_IMG: &str = "llvm-objcopy -O binary target/aarch64-unknown-none/debug/bsp-raspi3 \
+    target/aarch64-unknown-none/debug/kernel8.img";
+
+fn host_test() -> String {
+    format!("cargo test --workspace {EXCLUDES}")
+}
+
+fn qemu_test(krate: &str, args: &str) -> String {
+    format!(
+        "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUNNER='timeout 60 qemu-system-aarch64 {args} -kernel' \
+         cargo test -p {krate} --target aarch64-unknown-none"
+    )
+}
+
+fn snapshot(bsp: &str, krate: &str, args: &str) -> String {
+    format!(
+        "snapshot tests/snapshots/{bsp}.txt <= timeout 30 qemu-system-aarch64 {args} \
+         -kernel target/aarch64-unknown-none/debug/{krate}"
+    )
+}
+
+fn all_builds() -> Vec<String> {
+    let mut v: Vec<String> = ALL_TARGET.iter().map(|k| build(k)).collect();
+    v.push(KERNEL8_IMG.to_string());
+    v
+}
 
 // ---- parse ----
 
@@ -48,6 +87,18 @@ fn parses_snapshot_test() {
 }
 
 #[test]
+fn parses_raspi3_bsp() {
+    assert_eq!(
+        parse(&["run", "--bsp", "raspi3"]),
+        Ok(Task::Run(Bsp::Raspi3))
+    );
+    assert_eq!(
+        parse(&["test", "--bsp", "raspi3"]),
+        Ok(Task::Test(TestKind::Qemu(Bsp::Raspi3)))
+    );
+}
+
+#[test]
 fn rejects_unknown_bsp() {
     assert!(parse(&["test", "--bsp", "pc"]).is_err());
     assert!(parse(&["test", "--bsp"]).is_err());
@@ -63,81 +114,73 @@ fn rejects_missing_unknown_or_extra_arguments() {
 // ---- plan ----
 
 #[test]
-fn build_plan_builds_target_crates_for_aarch64() {
-    assert_eq!(
-        displays(&plan(Task::Build)),
-        [
-            "cargo build -p hal --target aarch64-unknown-none",
-            "cargo build -p kernel --target aarch64-unknown-none",
-            "cargo build -p pl011 --target aarch64-unknown-none",
-            "cargo build -p arch-aarch64 --target aarch64-unknown-none",
-            QEMU_VIRT_BUILD,
-        ]
-    );
+fn build_plan_builds_target_crates_and_raspi3_image() {
+    assert_eq!(displays(&plan(Task::Build)), all_builds());
 }
 
 #[test]
 fn host_test_plan_skips_target_only_crates() {
-    assert_eq!(displays(&plan(Task::Test(TestKind::Host))), [HOST_TEST]);
+    assert_eq!(displays(&plan(Task::Test(TestKind::Host))), [host_test()]);
 }
 
 #[test]
 fn qemu_test_plan_uses_qemu_as_cargo_runner() {
     assert_eq!(
         displays(&plan(Task::Test(TestKind::Qemu(Bsp::QemuVirt)))),
-        [QEMU_VIRT_TEST]
+        [qemu_test("bsp-qemu-virt", VIRT_ARGS)]
+    );
+    assert_eq!(
+        displays(&plan(Task::Test(TestKind::Qemu(Bsp::Raspi3)))),
+        [qemu_test("bsp-raspi3", RASPI3_ARGS)]
     );
 }
 
 #[test]
 fn qemu_runner_ends_with_kernel_flag_so_cargo_appends_the_elf() {
-    assert!(Bsp::QemuVirt.qemu_runner().ends_with(" -kernel"));
+    for bsp in Bsp::ALL {
+        assert!(bsp.qemu_runner().ends_with(" -kernel"));
+    }
 }
 
 #[test]
-fn snapshot_plan_builds_then_compares_uart_output() {
+fn snapshot_plan_builds_then_compares_uart_output_for_each_bsp() {
     assert_eq!(
         displays(&plan(Task::Test(TestKind::Snapshot))),
-        [QEMU_VIRT_BUILD, QEMU_VIRT_SNAPSHOT]
+        [
+            build("bsp-qemu-virt"),
+            snapshot("qemu-virt", "bsp-qemu-virt", VIRT_ARGS),
+            build("bsp-raspi3"),
+            snapshot("raspi3", "bsp-raspi3", RASPI3_ARGS),
+        ]
     );
 }
 
 #[test]
 fn run_plan_builds_then_boots_interactively() {
     assert_eq!(
-        displays(&plan(Task::Run(Bsp::QemuVirt))),
+        displays(&plan(Task::Run(Bsp::Raspi3))),
         [
-            QEMU_VIRT_BUILD,
-            "qemu-system-aarch64 -M virt -cpu cortex-a53 -m 128M -nographic -semihosting \
-             -kernel target/aarch64-unknown-none/debug/bsp-qemu-virt",
+            build("bsp-raspi3"),
+            format!(
+                "qemu-system-aarch64 {RASPI3_ARGS} -kernel target/aarch64-unknown-none/debug/bsp-raspi3"
+            ),
         ]
     );
 }
 
 #[test]
 fn ci_plan_runs_checks_then_all_test_layers_then_builds() {
-    assert_eq!(
-        displays(&plan(Task::Ci)),
-        [
-            "cargo fmt --all --check",
-            "cargo clippy --workspace --exclude arch-aarch64 --exclude bsp-qemu-virt \
-             --all-targets --all-features -- -D warnings",
-            "cargo clippy -p hal --target aarch64-unknown-none -- -D warnings",
-            "cargo clippy -p kernel --target aarch64-unknown-none -- -D warnings",
-            "cargo clippy -p pl011 --target aarch64-unknown-none -- -D warnings",
-            "cargo clippy -p arch-aarch64 --target aarch64-unknown-none -- -D warnings",
-            "cargo clippy -p bsp-qemu-virt --target aarch64-unknown-none -- -D warnings",
-            HOST_TEST,
-            QEMU_VIRT_TEST,
-            QEMU_VIRT_BUILD,
-            QEMU_VIRT_SNAPSHOT,
-            "cargo build -p hal --target aarch64-unknown-none",
-            "cargo build -p kernel --target aarch64-unknown-none",
-            "cargo build -p pl011 --target aarch64-unknown-none",
-            "cargo build -p arch-aarch64 --target aarch64-unknown-none",
-            QEMU_VIRT_BUILD,
-        ]
-    );
+    let mut want = vec![
+        "cargo fmt --all --check".to_string(),
+        format!("cargo clippy --workspace {EXCLUDES} --all-targets --all-features -- -D warnings"),
+    ];
+    want.extend(ALL_TARGET.iter().map(|k| clippy(k)));
+    want.push(host_test());
+    want.push(qemu_test("bsp-qemu-virt", VIRT_ARGS));
+    want.push(qemu_test("bsp-raspi3", RASPI3_ARGS));
+    want.extend(displays(&plan(Task::Test(TestKind::Snapshot))));
+    want.extend(all_builds());
+    assert_eq!(displays(&plan(Task::Ci)), want);
 }
 
 // ---- snapshot comparison ----

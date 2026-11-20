@@ -11,6 +11,9 @@ arch-aarch64 = { path = "../../arch/aarch64" }
 kernel = { path = "../../kernel" }
 pl011 = { path = "../../drivers/pl011" }
 
+[dev-dependencies]
+ktest = { path = "../../ktest" }
+
 [[bin]]
 name = "bsp-qemu-virt"
 test = true

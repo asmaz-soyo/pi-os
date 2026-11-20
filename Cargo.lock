@@ -16,6 +16,18 @@ dependencies = [
  "arch-aarch64",
  "hal",
  "kernel",
+ "ktest",
+ "pl011",
+]
+
+[[package]]
+name = "bsp-raspi3"
+version = "0.1.0"
+dependencies = [
+ "arch-aarch64",
+ "hal",
+ "kernel",
+ "ktest",
  "pl011",
 ]
 
@@ -29,6 +41,14 @@ version = "0.1.0"
 dependencies = [
  "hal",
  "spin",
+]
+
+[[package]]
+name = "ktest"
+version = "0.1.0"
+dependencies = [
+ "arch-aarch64",
+ "hal",
 ]
 
 [[package]]

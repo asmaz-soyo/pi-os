@@ -71,6 +71,8 @@ fn command(cmd: &Cmd) -> Command {
     // `cargo xtask` から呼ばれたときと同じ cargo を使う(CARGO は cargo が設定する)
     let program = match cmd.program.as_str() {
         "cargo" => std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()),
+        // rustup の llvm-tools コンポーネントに入っているものを使う
+        "llvm-objcopy" => llvm_tool("llvm-objcopy"),
         other => other.to_string(),
     };
     let mut command = Command::new(program);
@@ -79,4 +81,24 @@ fn command(cmd: &Cmd) -> Command {
         .envs(cmd.env.iter().map(|(k, v)| (k, v)))
         .current_dir(root());
     command
+}
+
+/// rustup の `llvm-tools` コンポーネントの道具のパス(`<sysroot>/lib/rustlib/<host>/bin/`)。
+fn llvm_tool(name: &str) -> String {
+    let rustc = |arg: &str| {
+        Command::new("rustc")
+            .arg(arg)
+            .current_dir(root())
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    let sysroot = rustc("--print=sysroot").unwrap_or_default();
+    let host = rustc("-vV")
+        .and_then(|v| {
+            v.lines()
+                .find_map(|l| l.strip_prefix("host: ").map(str::to_string))
+        })
+        .unwrap_or_default();
+    format!("{sysroot}/lib/rustlib/{host}/bin/{name}")
 }

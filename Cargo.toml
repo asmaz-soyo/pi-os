@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["hal", "kernel", "drivers/pl011", "xtask", "arch/aarch64", "bsp/qemu-virt"]
+members = ["hal", "kernel", "drivers/pl011", "xtask", "arch/aarch64", "ktest", "bsp/qemu-virt", "bsp/raspi3"]
 default-members = ["hal", "kernel", "drivers/pl011", "xtask"]
 
 [workspace.package]

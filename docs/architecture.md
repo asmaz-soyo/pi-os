@@ -36,4 +36,6 @@ flowchart TB
 | `pl011`(`drivers/pl011`) | ○ | ○ |
 | `xtask` | ○ | × |
 | `arch-aarch64` | × | ○ |
-| `bsp-qemu-virt` | × | ○(QEMU で起動するイメージ) |
+| `ktest` | × | ○(カーネル内テストの枠組み) |
+| `bsp-qemu-virt` | × | ○(QEMU `-M virt` で起動するイメージ) |
+| `bsp-raspi3` | × | ○(QEMU `-M raspi3b` と実機のイメージ、`kernel8.img`) |

@@ -4,11 +4,8 @@
 #![no_std]
 #![no_main]
 #![feature(custom_test_frameworks)]
-#![test_runner(crate::ktest::runner)]
+#![test_runner(ktest::runner)]
 #![reexport_test_harness_main = "test_main"]
-
-#[cfg(test)]
-mod ktest;
 
 use hal::mmio::MmioRegion;
 use kernel::sync::SpinLock;
@@ -42,20 +39,12 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 #[cfg(test)]
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    ktest::panic(info)
+}
+
+#[cfg(test)]
 mod tests {
-    use arch_aarch64::semihosting::SemihostingConsole;
-    use core::fmt::Write;
-    use hal::console::{Console, Writer};
-
-    #[test_case]
-    fn arithmetic_works_in_kernel() {
-        assert_eq!(1 + 1, 2);
-    }
-
-    #[test_case]
-    fn semihosting_console_accepts_bytes_and_format() {
-        let mut con = SemihostingConsole;
-        con.write_bytes(b"");
-        write!(Writer(&mut con), "").unwrap();
-    }
+    ktest::common_tests!();
 }

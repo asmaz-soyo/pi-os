@@ -9,13 +9,21 @@ use std::fmt;
 pub const TARGET: &str = "aarch64-unknown-none";
 
 /// `TARGET` 向けにビルド・検査するクレート。クレートが増えたらここに足す。
-pub const TARGET_CRATES: &[&str] = &["hal", "kernel", "pl011", "arch-aarch64", "bsp-qemu-virt"];
+pub const TARGET_CRATES: &[&str] = &[
+    "hal",
+    "kernel",
+    "pl011",
+    "arch-aarch64",
+    "ktest",
+    "bsp-qemu-virt",
+    "bsp-raspi3",
+];
 
 /// ホストではビルドできない(`TARGET` 専用の)クレート。ホストのテストと clippy から外す。
-pub const TARGET_ONLY_CRATES: &[&str] = &["arch-aarch64", "bsp-qemu-virt"];
+pub const TARGET_ONLY_CRATES: &[&str] = &["arch-aarch64", "ktest", "bsp-qemu-virt", "bsp-raspi3"];
 
 pub const USAGE: &str = "usage: cargo xtask <build | run [--bsp <bsp>] | \
-                         test [--bsp <bsp> | --snapshot] | ci>\n  bsp: qemu-virt";
+                         test [--bsp <bsp> | --snapshot] | ci>\n  bsp: qemu-virt, raspi3";
 
 /// xtask のサブコマンド。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,11 +48,14 @@ pub enum TestKind {
 /// ボード(BSP)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bsp {
+    /// QEMU `-M virt`(開発用)
     QemuVirt,
+    /// Raspberry Pi 3B(QEMU `-M raspi3b` と実機で共通)
+    Raspi3,
 }
 
 impl Bsp {
-    pub const ALL: &[Bsp] = &[Bsp::QemuVirt];
+    pub const ALL: &[Bsp] = &[Bsp::QemuVirt, Bsp::Raspi3];
 
     fn parse(name: &str) -> Result<Self, String> {
         Self::ALL
@@ -57,6 +68,7 @@ impl Bsp {
     pub fn name(self) -> &'static str {
         match self {
             Self::QemuVirt => "qemu-virt",
+            Self::Raspi3 => "raspi3",
         }
     }
 
@@ -64,6 +76,7 @@ impl Bsp {
     pub fn crate_name(self) -> &'static str {
         match self {
             Self::QemuVirt => "bsp-qemu-virt",
+            Self::Raspi3 => "bsp-raspi3",
         }
     }
 
@@ -85,6 +98,8 @@ impl Bsp {
                 "-nographic",
                 "-semihosting",
             ],
+            // raspi3b は RAM 1GB 固定。-nographic で UART0(PL011)が標準入出力につながる
+            Self::Raspi3 => &["-M", "raspi3b", "-nographic", "-semihosting"],
         }
     }
 
@@ -268,10 +283,18 @@ fn snapshot_tests() -> Vec<Step> {
 }
 
 fn target_builds() -> Vec<Step> {
-    TARGET_CRATES
+    let mut steps: Vec<Step> = TARGET_CRATES
         .iter()
         .map(|krate| Step::Run(Cmd::cargo(&["build", "-p", krate, "--target", TARGET])))
-        .collect()
+        .collect();
+    // 実機の Pi 3B のファームウェアは ELF を読めないので、生のバイナリ kernel8.img を作る
+    let elf = Bsp::Raspi3.kernel_elf();
+    let img = format!("target/{TARGET}/debug/kernel8.img");
+    steps.push(Step::Run(Cmd::new(
+        "llvm-objcopy",
+        &["-O", "binary", &elf, &img],
+    )));
+    steps
 }
 
 /// QEMU のシリアル出力を比較しやすい形にそろえる(`\r` を消し、末尾の空行を1つの改行にまとめる)。
