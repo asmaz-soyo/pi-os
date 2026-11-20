@@ -242,7 +242,7 @@ CIは「ローカルでも同じコマンドが動く」ことを前提にし、
 - [x] `CLAUDE.md` に作業ルールを書く(TDDの手順、1ステップ=1コミット、完了の定義、各ステップで解説してから進むこと)
 - [x] Cargoワークスペースと `rust-toolchain.toml`(nightly、`aarch64-unknown-none`)
 - [x] `hal` クレートに `Console` トレイトと、テスト用のモックを作る(最初のTDD)
-- [ ] `xtask` に `build` / `run` / `test` / `ci` を用意する
+- [x] `xtask` に `build` / `run` / `test` / `ci` を用意する(`run` の中身は M1)
 - [ ] QEMUの結合テストを動かす仕組み(終了コードで成否を返す)
 - [ ] GitHub Actionsのワークフロー(`cargo xtask ci` を呼ぶだけ)
 - [ ] `docs/` の雛形、ADRのテンプレート、最初のADR(「Linux互換ABIを採用」「ポート&アダプター構造」)

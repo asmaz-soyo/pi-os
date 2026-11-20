@@ -1,0 +1,3 @@
+[alias]
+# `cargo xtask <task>` でプロジェクト用のタスクを呼ぶ
+xtask = "run --quiet --package xtask --"
