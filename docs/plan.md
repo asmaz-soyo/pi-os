@@ -245,7 +245,7 @@ CIは「ローカルでも同じコマンドが動く」ことを前提にし、
 - [x] `xtask` に `build` / `run` / `test` / `ci` を用意する(`run` の中身は M1)
 - [x] QEMUの結合テストを動かす仕組み(終了コードで成否を返す)
 - [x] GitHub Actionsのワークフロー(`cargo xtask ci` を呼ぶだけ)
-- [ ] `docs/` の雛形、ADRのテンプレート、最初のADR(「Linux互換ABIを採用」「ポート&アダプター構造」)
+- [x] `docs/` の雛形、ADRのテンプレート、最初のADR(「Linux互換ABIを採用」「ポート&アダプター構造」)
 - [ ] M0完了後、M1(起動とUART)の最初のテストとして「UART出力のスナップショットで「Hello」を期待する」を書く
 
 **参考資料**:RustでのAArch64ベアメタルは rust-raspberrypi-OS-tutorials、Pi 3Bのペリフェラルは「BCM2837 ARM Peripherals」、QEMUのボード仕様は [QEMUのRaspberry Piボードの説明](https://qemu.readthedocs.io/en/master/system/arm/raspi.html)。
