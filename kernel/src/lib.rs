@@ -5,8 +5,13 @@
 extern crate std;
 
 pub mod console;
+pub mod errno;
+pub mod irq;
 pub mod panic;
 pub mod sync;
+pub mod time;
+
+pub use errno::Errno;
 
 use core::fmt::Write;
 use hal::console::{Console, Writer};
@@ -22,6 +27,11 @@ pub fn print_banner(out: &mut impl Console, board: &str) {
 /// 出力は [`console::set_console`] で登録された先に出る。
 pub fn kmain(board: &str) {
     print_banner(&mut console::Global, board);
+    let hz = time::CLOCK.hz();
+    if hz > 0 {
+        time::wait_ticks(10);
+        println!("timer: 10 ticks at {hz} Hz");
+    }
 }
 
 #[cfg(test)]

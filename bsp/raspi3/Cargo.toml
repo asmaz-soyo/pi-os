@@ -10,6 +10,7 @@ hal = { path = "../../hal" }
 arch-aarch64 = { path = "../../arch/aarch64" }
 kernel = { path = "../../kernel" }
 pl011 = { path = "../../drivers/pl011" }
+bcm2836-local-intc = { path = "../../drivers/bcm2836-local-intc" }
 
 [features]
 # 起動後にわざとパニックする(パニックの報告のスナップショットテスト用)

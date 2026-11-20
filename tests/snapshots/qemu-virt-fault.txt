@@ -1,5 +1,6 @@
 Pi-OS booting on qemu-virt
 Hello from Pi-OS
+timer: 10 ticks at 100 Hz
 
 !!! KERNEL PANIC !!!
 panicked at arch/aarch64/src/exception.rs:{..}

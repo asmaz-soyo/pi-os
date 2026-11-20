@@ -81,6 +81,14 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn timer_interrupts_advance_the_tick_count() {
+            let start = kernel::time::CLOCK.ticks();
+            kernel::time::wait_ticks(3);
+            assert!(kernel::time::CLOCK.ticks() >= start + 3);
+            assert_eq!(kernel::irq::IRQS.unhandled(), 0);
+        }
+
+        #[test_case]
         fn fp_simd_is_usable() {
             let x = core::hint::black_box(1.5f64);
             assert_eq!(x * 2.0, 3.0);

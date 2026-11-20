@@ -43,3 +43,15 @@ pub fn halt() -> ! {
         unsafe { asm!("wfe", options(nomem, nostack)) };
     }
 }
+
+/// IRQ を受け付ける(PSTATE.I を 0 にする)。
+pub fn enable_irq() {
+    // SAFETY: 割り込みマスクの変更。ベクタとハンドラは登録済みであること
+    unsafe { asm!("msr daifclr, #2", options(nomem, nostack)) };
+}
+
+/// IRQ を禁止する(PSTATE.I を 1 にする)。
+pub fn disable_irq() {
+    // SAFETY: 割り込みマスクの変更
+    unsafe { asm!("msr daifset, #2", options(nomem, nostack)) };
+}

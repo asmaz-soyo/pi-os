@@ -7,6 +7,9 @@
 #![test_runner(ktest::runner)]
 #![reexport_test_harness_main = "test_main"]
 
+use arch_aarch64::timer::GenericTimer;
+use bcm2836_local_intc::LocalIntc;
+use hal::irq::IrqController;
 use hal::mmio::MmioRegion;
 use kernel::sync::SpinLock;
 use pl011::Pl011;
@@ -20,6 +23,50 @@ const UART_CLOCK_HZ: u32 = 48_000_000;
 static UART: SpinLock<Pl011<MmioRegion>> =
     SpinLock::new(Pl011::new(unsafe { MmioRegion::new(UART_BASE) }));
 
+/// BCM2836 のローカルペリフェラル(コアごとの割り込みの振り分け)
+const LOCAL_INTC_BASE: usize = 0x4000_0000;
+/// EL1 物理タイマの割り込み(CORE0_IRQ_SOURCE のビット 1)
+const TIMER_IRQ: u32 = bcm2836_local_intc::CNTPNSIRQ;
+const TIMER_HZ: u64 = 100;
+
+// SAFETY: LOCAL_INTC_BASE は BCM2836 のローカルペリフェラル。この static 以外から触らない
+static INTC: SpinLock<LocalIntc<MmioRegion>> =
+    SpinLock::new(LocalIntc::new(unsafe { MmioRegion::new(LOCAL_INTC_BASE) }));
+const INTC_INIT: fn(&mut LocalIntc<MmioRegion>) = |_| {};
+
+/// 例外の受け口。IRQ は割り込みコントローラから番号を読んでカーネルの表で振り分ける。
+struct Exceptions;
+
+impl arch_aarch64::exception::Handler for Exceptions {
+    fn synchronous(&self, frame: &mut arch_aarch64::trap::TrapFrame) {
+        arch_aarch64::exception::unhandled(arch_aarch64::exception::KIND_SYNC_CURRENT_EL, frame)
+    }
+
+    fn irq(&self, _frame: &mut arch_aarch64::trap::TrapFrame) {
+        kernel::irq::IRQS.dispatch(&mut *INTC.lock());
+    }
+}
+
+static EXCEPTIONS: Exceptions = Exceptions;
+
+fn timer_tick() {
+    kernel::time::CLOCK.tick(&mut GenericTimer);
+}
+
+/// 割り込みコントローラとタイマを準備し、IRQ を受け付け始める。
+fn start_timer() {
+    arch_aarch64::exception::set_handler(Some(&EXCEPTIONS));
+    let mut intc = INTC.lock();
+    INTC_INIT(&mut intc);
+    kernel::irq::IRQS
+        .register(TIMER_IRQ, timer_tick)
+        .expect("timer irq number is valid");
+    intc.enable(TIMER_IRQ);
+    drop(intc);
+    kernel::time::CLOCK.start(&mut GenericTimer, TIMER_HZ);
+    arch_aarch64::cpu::enable_irq();
+}
+
 /// `arch_aarch64::boot` の `_start` から呼ばれる。`dtb` はデバイスツリーのアドレス。
 #[unsafe(no_mangle)]
 #[cfg_attr(feature = "panic-demo", allow(unreachable_code))]
@@ -27,6 +74,7 @@ extern "C" fn kernel_main(_dtb: usize) -> ! {
     arch_aarch64::exception::init();
     UART.lock().init(UART_CLOCK_HZ, 115_200);
     kernel::console::set_console(&UART);
+    start_timer();
 
     #[cfg(test)]
     test_main();

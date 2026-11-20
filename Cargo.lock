@@ -11,10 +11,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bcm2836-local-intc"
+version = "0.1.0"
+dependencies = [
+ "hal",
+]
+
+[[package]]
 name = "bsp-qemu-virt"
 version = "0.1.0"
 dependencies = [
  "arch-aarch64",
+ "gicv2",
  "hal",
  "kernel",
  "ktest",
@@ -26,10 +34,18 @@ name = "bsp-raspi3"
 version = "0.1.0"
 dependencies = [
  "arch-aarch64",
+ "bcm2836-local-intc",
  "hal",
  "kernel",
  "ktest",
  "pl011",
+]
+
+[[package]]
+name = "gicv2"
+version = "0.1.0"
+dependencies = [
+ "hal",
 ]
 
 [[package]]

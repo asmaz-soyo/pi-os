@@ -4,7 +4,9 @@
 extern crate std;
 
 pub mod console;
+pub mod irq;
 pub mod mmio;
+pub mod timer;
 
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;

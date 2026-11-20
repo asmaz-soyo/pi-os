@@ -62,13 +62,22 @@ extern "C" fn arch_exception_entry(kind: u64, frame: &mut TrapFrame) {
     match (kind % 4, handler) {
         (0, Some(handler)) => handler.synchronous(frame),
         (1, Some(handler)) => handler.irq(frame),
-        _ => panic!(
-            "unhandled {} exception from {}\n{frame}",
-            KIND_NAMES[(kind % 4) as usize],
-            ORIGIN_NAMES[(kind / 4) as usize % 4]
-        ),
+        _ => unhandled(kind, frame),
     }
 }
+
+/// 処理できない例外。全レジスタを表示してパニックする。
+/// ハンドラの `synchronous` で扱わない種類の例外にも使う(`kind` は同期例外なら 4)。
+pub fn unhandled(kind: u64, frame: &TrapFrame) -> ! {
+    panic!(
+        "unhandled {} exception from {}\n{frame}",
+        KIND_NAMES[(kind % 4) as usize],
+        ORIGIN_NAMES[(kind / 4) as usize % 4]
+    )
+}
+
+/// カーネル実行中の同期例外を表す `kind`(`unhandled` に渡す)。
+pub const KIND_SYNC_CURRENT_EL: u64 = 4;
 
 // TrapFrame::SIZE = 288。並びは trap.rs の TrapFrame と同じ(ホストのテストで確かめている)。
 core::arch::global_asm!(

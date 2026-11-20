@@ -18,3 +18,5 @@ pub mod cpu;
 pub mod exception;
 #[cfg(target_os = "none")]
 pub mod semihosting;
+#[cfg(target_os = "none")]
+pub mod timer;
