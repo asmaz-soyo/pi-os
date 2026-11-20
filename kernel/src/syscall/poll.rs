@@ -1,7 +1,6 @@
 //! 複数の fd の準備ができるのを待つシステムコール(pselect6、ppoll)。
 //!
-//! 今は「準備ができたか」を繰り返し確かめて待つ(ビジーウェイト)。
-//! スケジューラができたら、待っている間は別のタスクを動かす形に変える。
+//! 「準備ができたか」を繰り返し確かめ、その合間にほかのタスクへ譲る。
 
 use crate::Errno;
 use crate::process::Process;
@@ -98,7 +97,7 @@ pub fn pselect6(
             write_set(p, ex, &vec![0; words])?;
             return Ok(count);
         }
-        core::hint::spin_loop();
+        crate::sched::relax();
     }
 }
 
@@ -138,6 +137,6 @@ pub fn ppoll(p: &mut Process, fds: u64, nfds: u64, ts: u64) -> Result<u64, Errno
             p.mem.copy_to_user(VirtAddr(fds), &raw)?;
             return Ok(count);
         }
-        core::hint::spin_loop();
+        crate::sched::relax();
     }
 }

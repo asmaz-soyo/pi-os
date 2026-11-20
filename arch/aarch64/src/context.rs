@@ -32,7 +32,17 @@ unsafe extern "C" {
     fn arch_enter_user(ctx: *mut KernelContext, frame: *const TrapFrame) -> u64;
     fn arch_resume_kernel(ctx: *const KernelContext, value: u64) -> !;
     fn arch_switch_context(from: *mut u64, to: *const u64);
+    fn arch_enter_user_frame(frame: *const TrapFrame) -> !;
     fn arch_thread_start();
+}
+
+/// 今のスタックの上で `frame` の状態から EL0 に入る(戻らない)。
+///
+/// # Safety
+/// `frame` は EL0 のプログラムを指し、ユーザーのアドレス空間が有効になっていること。
+pub unsafe fn enter_user_noreturn(frame: &TrapFrame) -> ! {
+    // SAFETY: 呼び出し元が保証する
+    unsafe { arch_enter_user_frame(frame) }
 }
 
 /// スケジューラ用の文脈の並び(`kernel::sched::SavedContext::regs` の中身)。
@@ -123,6 +133,21 @@ arch_resume_kernel:
     mov     sp, x2
     mov     x0, x1
     ret                             // arch_enter_user の呼び出し元へ
+
+    .global arch_enter_user_frame
+arch_enter_user_frame:
+    // x0 = frame。保存はしない(タスクのスタックの上で EL0 に入り、戻らない)
+    msr     daifset, #2
+    mov     x1, x0
+    sub     sp, sp, #288
+    mov     x2, #0
+2:
+    ldr     x3, [x1, x2]
+    str     x3, [sp, x2]
+    add     x2, x2, #8
+    cmp     x2, #288
+    b.lo    2b
+    b       exception_return
 
     .global arch_switch_context
 arch_switch_context:

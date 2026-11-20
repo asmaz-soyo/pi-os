@@ -6,11 +6,10 @@
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use arch_aarch64::context::{self, KernelContext};
+use arch_aarch64::context;
 use arch_aarch64::esr::{Esr, ExceptionClass};
 use arch_aarch64::mmu::{LinearTableMemory, PageTable, phys_to_virt};
 use arch_aarch64::trap::TrapFrame;
-use core::cell::UnsafeCell;
 use hal::addr::{PAGE_SIZE, PhysAddr, VirtAddr};
 use hal::mmu::{AddressSpace, MapError, MapFlags, PhysMemory};
 use kernel::Errno;
@@ -18,7 +17,7 @@ use kernel::fs::devfs::{ConsoleFile, Devfs};
 use kernel::fs::initramfs::Initramfs;
 use kernel::fs::vfs::{File, Vfs};
 use kernel::mm::user::UserMemory;
-use kernel::process::{CURRENT, Process};
+use kernel::process::{PROCESSES, Process};
 use kernel::syscall::Action;
 
 /// カーネルのフレーム割り当て器(物理メモリ)。
@@ -50,6 +49,21 @@ fn table_frame() -> Option<PhysAddr> {
 fn tables() -> LinearTableMemory<fn() -> Option<PhysAddr>> {
     // SAFETY: フレームは RAM から取るので、線形マップで見える
     unsafe { LinearTableMemory::new(table_frame as fn() -> Option<PhysAddr>) }
+}
+
+/// タスクごとのユーザー空間のテーブル(TTBR0 に入れるもの)
+static USER_TABLES: kernel::sync::SpinLock<
+    alloc::collections::BTreeMap<kernel::sched::Tid, PhysAddr>,
+> = kernel::sync::SpinLock::new(alloc::collections::BTreeMap::new());
+
+/// タスクを切り替える直前に呼ばれる。次のタスクのユーザー空間を TTBR0 に入れる。
+pub(crate) fn switch_address_space(next: kernel::sched::Tid) {
+    let root = USER_TABLES.lock().get(&next).copied();
+    let root = root.or(*EMPTY_USER_TABLE.lock());
+    if let Some(root) = root {
+        // SAFETY: 下位アドレスはユーザー空間専用で、カーネルは使っていない
+        unsafe { arch_aarch64::cpu::set_user_table(root) };
+    }
 }
 
 /// プロセスがないときに TTBR0 に入れておく空のテーブル(`init_memory` で作る)。
@@ -90,6 +104,10 @@ impl AddressSpace for UserSpace {
     }
 
     fn activate(&mut self) {
+        // このタスクに切り替わるたびに、このテーブルを TTBR0 に入れる(switch_address_space)
+        USER_TABLES
+            .lock()
+            .insert(kernel::sched::current(), self.table.root());
         // SAFETY: 下位アドレスはユーザー空間専用で、カーネルは使っていない
         unsafe { arch_aarch64::cpu::set_user_table(self.table.root()) };
     }
@@ -98,6 +116,8 @@ impl AddressSpace for UserSpace {
 impl Drop for UserSpace {
     fn drop(&mut self) {
         // 使用中のテーブルを解放する前に、空のテーブルに切り替える
+        let root = self.table.root();
+        USER_TABLES.lock().retain(|_, r| *r != root);
         if let Some(empty) = *EMPTY_USER_TABLE.lock() {
             // SAFETY: 空のテーブルは何もマップしていない
             unsafe { arch_aarch64::cpu::set_user_table(empty) };
@@ -108,31 +128,26 @@ impl Drop for UserSpace {
     }
 }
 
-/// `run_user` が保存するカーネルの文脈。1つのコアで1つのプロセスだけを動かすので1つでよい。
-struct ContextCell(UnsafeCell<KernelContext>);
-// SAFETY: フェーズ1ではコア 0 だけが使う
-unsafe impl Sync for ContextCell {}
-static KERNEL_CONTEXT: ContextCell = ContextCell(UnsafeCell::new(KernelContext::new()));
-
 /// ユーザーのフォールトで終わったときの終了ステータス(128 + SIGSEGV)
 pub const STATUS_SEGV: i32 = 128 + 11;
 
-/// プロセスを終えて `run_user` に戻る。
+/// 今のプロセスを終える(ゾンビにしてタスクを終える)。
 fn finish(status: i32) -> ! {
-    // SAFETY: run_user が enter_user で保存した文脈に戻る
-    unsafe { context::resume(KERNEL_CONTEXT.0.get(), status as u64) }
+    PROCESSES.exit(kernel::sched::current(), status);
+    kernel::sched::exit_current()
 }
 
 /// EL0 から来た同期例外(システムコールとフォールト)。
 pub(crate) fn user_synchronous(frame: &mut TrapFrame) {
     match ExceptionClass::from_esr(frame.esr) {
         ExceptionClass::Svc64 => {
+            let pid = kernel::sched::current();
             let x = &frame.x;
-            let action = {
-                let mut current = CURRENT.lock();
-                let process = current.as_mut().expect("a user process is running");
-                kernel::syscall::dispatch(process, x[8], [x[0], x[1], x[2], x[3], x[4], x[5]])
-            };
+            // システムコールの間は、プロセスを表から取り出して使う(待っている間も表を使えるように)
+            let mut process = PROCESSES.take(pid).expect("a user process is running");
+            let action =
+                kernel::syscall::dispatch(&mut process, x[8], [x[0], x[1], x[2], x[3], x[4], x[5]]);
+            PROCESSES.put_back(pid, process);
             match action {
                 Action::Return(value) => frame.x[0] = value,
                 Action::Exit(status) => finish(status),
@@ -150,8 +165,26 @@ pub(crate) fn user_synchronous(frame: &mut TrapFrame) {
     }
 }
 
-/// プログラム `image` を `argv` で実行し、終了ステータスを返す。
-pub fn run_user(image: &[u8], argv: &[&[u8]]) -> Result<i32, Errno> {
+/// EL0 に戻る直前(`before_return_to_user`)の、プロセスに関する処理。
+pub(crate) fn before_return_to_user() {
+    let pid = kernel::sched::current();
+    // 保留中のシグナル(今は「強制終了」だけ)
+    if let Some(Some(sig)) = PROCESSES.with(pid, |p| p.pending_kill.take()) {
+        finish(128 + sig);
+    }
+}
+
+/// 新しいプロセスのタスクの入口。アドレス空間を有効にして EL0 に入る。
+fn user_task_entry(arg: usize) {
+    // SAFETY: spawn_user が Box::into_raw で渡したもの
+    let frame = unsafe { Box::from_raw(arg as *mut TrapFrame) };
+    PROCESSES.with(kernel::sched::current(), |p| p.mem.activate());
+    // SAFETY: アドレス空間は有効にした。このタスクのスタックで EL0 に入り、戻らない
+    unsafe { context::enter_user_noreturn(&frame) }
+}
+
+/// プログラム `image` を `argv` で新しいプロセスとして動かし始める。
+pub fn spawn_user(image: &[u8], argv: &[&[u8]]) -> Result<kernel::process::Pid, Errno> {
     let space = Box::new(UserSpace::new()?);
     let mut mem = UserMemory::new(space, &KERNEL_PHYS);
     let seed = arch_aarch64::cpu::counter();
@@ -164,22 +197,46 @@ pub fn run_user(image: &[u8], argv: &[&[u8]]) -> Result<i32, Errno> {
             .to_le_bytes(),
     );
     let loaded = kernel::exec::load(&mut mem, image, argv, &[], random)?;
-    mem.activate();
     let (vfs, console) = vfs();
-    *CURRENT.lock() = Some(Process::new(mem, loaded, vfs, console));
+    let process = Process::new(mem, loaded, vfs, console);
 
     // EL0t(SPSR.M = 0)、割り込みは許可した状態で入口から始める
-    let frame = TrapFrame {
+    let frame = Box::new(TrapFrame {
         elr: loaded.entry,
         sp_el0: loaded.sp,
         spsr: 0,
         ..TrapFrame::default()
+    });
+    let arg = Box::into_raw(frame) as usize;
+    let Some(pid) = kernel::sched::spawn(user_task_entry, arg) else {
+        // SAFETY: 渡せなかったので取り戻して捨てる
+        drop(unsafe { Box::from_raw(arg as *mut TrapFrame) });
+        return Err(Errno::ENOMEM);
     };
-    // SAFETY: アドレス空間は有効にした。KERNEL_CONTEXT は static
-    let status = unsafe { context::enter_user(KERNEL_CONTEXT.0.get(), &frame) } as i32;
-    arch_aarch64::cpu::enable_irq();
-    drop(CURRENT.lock().take());
-    Ok(status)
+    // 新しいタスクは、このタスクが譲るまで動かないので、ここで表に入れてよい
+    PROCESSES.insert(pid, process);
+    Ok(pid)
+}
+
+/// プロセスが終わるのを待ち、終了ステータスを返す。
+pub fn wait(pid: kernel::process::Pid) -> i32 {
+    loop {
+        if let Some(status) = PROCESSES.try_wait(pid) {
+            return status;
+        }
+        kernel::sched::yield_now();
+    }
+}
+
+/// プロセスを強制終了する(次にユーザーに戻るときに、終了ステータス 128 + sig で終わる)。
+pub fn kill(pid: kernel::process::Pid, sig: i32) {
+    PROCESSES.with(pid, |p| p.pending_kill = Some(sig));
+}
+
+/// プログラム `image` を `argv` で実行し、終了ステータスを返す。
+pub fn run_user(image: &[u8], argv: &[&[u8]]) -> Result<i32, Errno> {
+    let pid = spawn_user(image, argv)?;
+    Ok(wait(pid))
 }
 
 /// ルートに initramfs、`/dev` に devfs をマウントした VFS(最初の呼び出しで作る)。
@@ -195,13 +252,18 @@ fn vfs() -> (Arc<Vfs>, Arc<dyn File>) {
     (vfs.clone(), console.clone())
 }
 
-/// initramfs のプログラム `path` を実行する。
-pub fn run_program(path: &str, argv: &[&[u8]]) -> Result<i32, Errno> {
+/// initramfs のプログラム `path` を新しいプロセスとして動かし始める。
+pub fn spawn_program(path: &str, argv: &[&[u8]]) -> Result<kernel::process::Pid, Errno> {
     let file = vfs().0.lookup(path)?;
     // init は root として動く(ADR-0005)。root でも実行ビットのないファイルは実行できない
     kernel::cred::Credentials::root().check(&file.stat(), kernel::cred::Access::EXEC)?;
     let image = file.contents().ok_or(Errno::EACCES)?;
-    run_user(image, argv)
+    spawn_user(image, argv)
+}
+
+/// initramfs のプログラム `path` を実行し、終了ステータスを返す。
+pub fn run_program(path: &str, argv: &[&[u8]]) -> Result<i32, Errno> {
+    Ok(wait(spawn_program(path, argv)?))
 }
 
 /// initramfs のファイルの中身。

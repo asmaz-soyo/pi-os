@@ -82,6 +82,8 @@ pub struct Platform {
     /// 割り込みを禁止し、前の状態を返す / 戻す
     pub irq_save: fn() -> bool,
     pub irq_restore: fn(bool),
+    /// 次のタスクに切り替える直前に呼ばれる(ユーザー空間の切り替えなど)
+    pub before_switch: fn(next: Tid),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,7 +203,7 @@ fn schedule(new_state: State) {
                 next_task.state = State::Running;
                 let to: *const SavedContext = &next_task.ctx;
                 s.current = next;
-                Some((from, to))
+                Some((from, to, next))
             }
             None => {
                 assert!(runnable, "no task to run");
@@ -209,7 +211,8 @@ fn schedule(new_state: State) {
             }
         }
     };
-    if let Some((from, to)) = switch {
+    if let Some((from, to, next)) = switch {
+        (p.before_switch)(next);
         // SAFETY: タスクは Box に入っているので、ロックを離しても文脈の場所は動かない
         unsafe { (p.switch)(from, to) };
     }
@@ -221,10 +224,31 @@ pub fn yield_now() {
     schedule(State::Running);
 }
 
+/// 何かを待っている間に呼ぶ:スケジューラが動いていれば譲り、なければその場で少し待つ。
+pub fn relax() {
+    if PLATFORM.get().is_some() && SCHED.lock().is_some() {
+        yield_now();
+    } else {
+        core::hint::spin_loop();
+    }
+}
+
 /// 今のタスクを終える。
 pub fn exit_current() -> ! {
     schedule(State::Dead);
     unreachable!("a dead task was scheduled again");
+}
+
+static RESCHED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// 切り替えが必要という印を付ける(タイマ割り込みから)。
+pub fn request_resched() {
+    RESCHED.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// 印を見て消す。
+pub fn take_resched() -> bool {
+    RESCHED.swap(false, core::sync::atomic::Ordering::Relaxed)
 }
 
 /// 動いているタスクの数(テストとデバッグ用)。

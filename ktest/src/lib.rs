@@ -206,6 +206,19 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn spinning_user_programs_are_preempted_by_the_timer() {
+            // 終わらないプログラムを 2 つ動かしても、このタスク(カーネル)が動き続け、
+            // ほかのプログラムも最後まで動く
+            let a = boot::spawn_program("/bin/spin", &[b"spin"]).unwrap();
+            let b = boot::spawn_program("/bin/spin", &[b"spin"]).unwrap();
+            assert_eq!(boot::run_program("/bin/exit42", &[b"exit42"]), Ok(42));
+            boot::kill(a, 9);
+            boot::kill(b, 9);
+            assert_eq!(boot::wait(a), 128 + 9);
+            assert_eq!(boot::wait(b), 128 + 9);
+        }
+
+        #[test_case]
         fn fp_simd_is_usable() {
             let x = core::hint::black_box(1.5f64);
             assert_eq!(x * 2.0, 3.0);

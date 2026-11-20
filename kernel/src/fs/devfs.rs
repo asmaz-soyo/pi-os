@@ -51,15 +51,15 @@ impl File for ConsoleFile {
 
     /// 1 行(raw モードなら届いた分)が読めるまで待つ。
     ///
-    /// 今は UART を見続けて待つ(ビジーウェイト)。スケジューラができたら、
-    /// UART の受信割り込みで起こしてもらう形に変える。
+    /// 待つ間はほかのタスクに譲る(UART を繰り返し確かめる)。
+    /// UART の受信割り込みで起こしてもらう形にするのは、後で。
     fn read(&self, _offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
         loop {
             self.poll_input();
             if let Some(n) = self.tty.lock().read(buf) {
                 return Ok(n);
             }
-            core::hint::spin_loop();
+            crate::sched::relax();
         }
     }
 

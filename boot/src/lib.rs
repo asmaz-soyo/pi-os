@@ -8,7 +8,7 @@ extern crate alloc;
 
 mod user;
 
-pub use user::{STATUS_SEGV, run_program, run_user};
+pub use user::{STATUS_SEGV, kill, run_program, run_user, spawn_program, spawn_user, wait};
 pub use userland;
 
 use arch_aarch64::exception::{self, Handler};
@@ -163,6 +163,7 @@ fn init_scheduler() {
         free_stack: free_kernel_stack,
         irq_save: arch_aarch64::cpu::irq_save,
         irq_restore: arch_aarch64::cpu::irq_restore,
+        before_switch: user::switch_address_space,
     });
 }
 
@@ -179,6 +180,7 @@ impl<B: Board> Handler for Exceptions<B> {
     }
 
     fn before_return_to_user(&self, _frame: &mut TrapFrame) {
+        user::before_return_to_user();
         kernel::process::before_return_to_user();
     }
 
@@ -189,6 +191,8 @@ impl<B: Board> Handler for Exceptions<B> {
 
 fn timer_tick() {
     kernel::time::CLOCK.tick(&mut GenericTimer);
+    // ほかに動けるタスクがあれば、ユーザーに戻るときに切り替える(プリエンプション)
+    kernel::sched::request_resched();
 }
 
 fn start_timer<B: Board>() {
