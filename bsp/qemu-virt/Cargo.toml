@@ -11,6 +11,10 @@ arch-aarch64 = { path = "../../arch/aarch64" }
 kernel = { path = "../../kernel" }
 pl011 = { path = "../../drivers/pl011" }
 
+[features]
+# 起動後にわざとパニックする(パニックの報告のスナップショットテスト用)
+panic-demo = []
+
 [dev-dependencies]
 ktest = { path = "../../ktest" }
 

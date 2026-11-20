@@ -77,3 +77,14 @@ _start:
     b       .Lpark
 "#
 );
+
+unsafe extern "C" {
+    static __stack_bottom: u8;
+    static __stack_top: u8;
+}
+
+/// ブート用スタックのアドレス範囲(リンカスクリプトで確保した 64KiB)。
+pub fn stack_range() -> core::ops::Range<usize> {
+    // アドレスを取るだけなので unsafe は要らない(中身は読まない)
+    (&raw const __stack_bottom) as usize..(&raw const __stack_top) as usize
+}

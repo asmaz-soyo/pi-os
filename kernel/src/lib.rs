@@ -5,6 +5,7 @@
 extern crate std;
 
 pub mod console;
+pub mod panic;
 pub mod sync;
 
 use core::fmt::Write;

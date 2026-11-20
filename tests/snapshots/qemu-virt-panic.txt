@@ -1,0 +1,13 @@
+Pi-OS booting on qemu-virt
+Hello from Pi-OS
+
+!!! KERNEL PANIC !!!
+panicked at bsp/qemu-virt/src/main.rs:{..}
+panic demo
+registers:
+  CurrentEL = 1  SP = 0x{..}  FP = 0x{..}  LR = 0x{..}
+backtrace:
+  #0 0x{..}
+  #1 0x{..}
+...
+end of backtrace

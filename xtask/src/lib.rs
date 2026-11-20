@@ -197,15 +197,24 @@ impl fmt::Display for Cmd {
 pub enum Step {
     /// コマンドを実行し、失敗したら止める
     Run(Cmd),
-    /// コマンドの標準出力を `expected`(ルートからの相対パス)の内容と比べる
-    Snapshot { expected: String, cmd: Cmd },
+    /// コマンドの標準出力を `expected`(ルートからの相対パス)の内容と比べ、
+    /// 終了コードが `exit_code` であることを確かめる
+    Snapshot {
+        expected: String,
+        exit_code: i32,
+        cmd: Cmd,
+    },
 }
 
 impl fmt::Display for Step {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Run(cmd) => write!(f, "{cmd}"),
-            Self::Snapshot { expected, cmd } => write!(f, "snapshot {expected} <= {cmd}"),
+            Self::Snapshot {
+                expected,
+                exit_code,
+                cmd,
+            } => write!(f, "snapshot {expected} (exit {exit_code}) <= {cmd}"),
         }
     }
 }
@@ -267,16 +276,27 @@ fn kernel_build(bsp: Bsp) -> Cmd {
     Cmd::cargo(&["build", "-p", bsp.crate_name(), "--target", TARGET])
 }
 
+/// 各 BSP で「通常の起動」と「パニックの報告」の UART 出力を確かめる。
+///
+/// パニックの報告は、`panic-demo` feature を付けてビルドすると起動後にわざとパニックする。
 fn snapshot_tests() -> Vec<Step> {
     Bsp::ALL
         .iter()
         .flat_map(|&bsp| {
+            let snapshot = |suffix: &str, exit_code| Step::Snapshot {
+                expected: format!("tests/snapshots/{}{suffix}.txt", bsp.name()),
+                exit_code,
+                cmd: bsp.qemu(&bsp.kernel_elf()).with_timeout(30),
+            };
+            let mut panic_demo = kernel_build(bsp);
+            panic_demo
+                .args
+                .extend(["--features".into(), "panic-demo".into()]);
             [
                 Step::Run(kernel_build(bsp)),
-                Step::Snapshot {
-                    expected: format!("tests/snapshots/{}.txt", bsp.name()),
-                    cmd: bsp.qemu(&bsp.kernel_elf()).with_timeout(30),
-                },
+                snapshot("", 0),
+                Step::Run(panic_demo),
+                snapshot("-panic", 1),
             ]
         })
         .collect()
@@ -308,29 +328,60 @@ pub fn normalize_output(raw: &str) -> String {
     }
 }
 
-/// 期待する出力と実際の出力を比べ、違えば最初に食い違った行を示す。
+/// 期待する出力(パターン)と実際の出力を比べる。
+///
+/// パターンでは次が使える(アドレスのようにビルドごとに変わる値のため):
+/// - 行の中の `{..}`:任意の文字列
+/// - `...` だけの行:任意の行数(0 行も含む)
 pub fn compare_snapshot(expected: &str, actual: &str) -> Result<(), String> {
     let expected = normalize_output(expected);
     let actual = normalize_output(actual);
-    if expected == actual {
+    let patterns: Vec<&str> = expected.lines().collect();
+    let lines: Vec<&str> = actual.lines().collect();
+    if lines_match(&patterns, &lines) {
         return Ok(());
     }
-    let mut exp_lines = expected.lines();
-    let mut act_lines = actual.lines();
-    let mut line = 1;
-    loop {
-        match (exp_lines.next(), act_lines.next()) {
-            (Some(e), Some(a)) if e == a => line += 1,
-            (e, a) => {
-                return Err(format!(
-                    "snapshot mismatch at line {line}\n  expected: {}\n  actual:   {}\n\
-                     --- full output ---\n{actual}",
-                    e.unwrap_or("<end of output>"),
-                    a.unwrap_or("<end of output>"),
-                ));
-            }
+    // 最初に食い違った行を探す(`...` より前の部分で)
+    let line = patterns
+        .iter()
+        .take_while(|&&p| p != "...")
+        .zip(lines.iter().map(Some).chain(std::iter::repeat(None)))
+        .position(|(p, l)| !l.is_some_and(|l| line_matches(p, l)))
+        .unwrap_or(patterns.iter().take_while(|&&p| p != "...").count());
+    Err(format!(
+        "snapshot mismatch at line {}\n  expected: {}\n  actual:   {}\n--- full output ---\n{actual}",
+        line + 1,
+        patterns.get(line).unwrap_or(&"<end of pattern>"),
+        lines.get(line).unwrap_or(&"<end of output>"),
+    ))
+}
+
+fn lines_match(patterns: &[&str], lines: &[&str]) -> bool {
+    match patterns.split_first() {
+        None => lines.is_empty(),
+        Some((&"...", rest)) => (0..=lines.len()).any(|skip| lines_match(rest, &lines[skip..])),
+        Some((pattern, rest)) => {
+            !lines.is_empty() && line_matches(pattern, lines[0]) && lines_match(rest, &lines[1..])
         }
     }
+}
+
+fn line_matches(pattern: &str, line: &str) -> bool {
+    let parts: Vec<&str> = pattern.split("{..}").collect();
+    let (first, last) = (parts[0], parts[parts.len() - 1]);
+    if parts.len() == 1 {
+        return pattern == line;
+    }
+    let Some(mut rest) = line.strip_prefix(first) else {
+        return false;
+    };
+    for middle in &parts[1..parts.len() - 1] {
+        match rest.find(middle) {
+            Some(i) => rest = &rest[i + middle.len()..],
+            None => return false,
+        }
+    }
+    rest.ends_with(last)
 }
 
 #[cfg(test)]

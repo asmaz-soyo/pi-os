@@ -37,20 +37,25 @@ fn execute(step: &Step) -> Result<(), String> {
                 Err(format!("`{cmd}` failed ({status})"))
             }
         }
-        Step::Snapshot { expected, cmd } => snapshot(expected, cmd),
+        Step::Snapshot {
+            expected,
+            exit_code,
+            cmd,
+        } => snapshot(expected, *exit_code, cmd),
     }
 }
 
-/// `cmd` の標準出力を `expected` と比べる。`UPDATE_SNAPSHOTS=1` なら期待値を書き換える。
-fn snapshot(expected: &str, cmd: &Cmd) -> Result<(), String> {
+/// `cmd` の標準出力を `expected` と比べる。`UPDATE_SNAPSHOTS=1` なら期待値を書き換える
+/// (ワイルドカードは消えるので、書き換えたあとに手で戻すこと)。
+fn snapshot(expected: &str, exit_code: i32, cmd: &Cmd) -> Result<(), String> {
     let output = command(cmd)
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("failed to start `{cmd}`: {e}"))?;
     let actual = String::from_utf8_lossy(&output.stdout);
-    if !output.status.success() {
+    if output.status.code() != Some(exit_code) {
         return Err(format!(
-            "`{cmd}` failed ({})\n--- output ---\n{actual}",
+            "`{cmd}` exited with {} (expected exit {exit_code})\n--- output ---\n{actual}",
             output.status
         ));
     }

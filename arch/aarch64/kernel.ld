@@ -24,6 +24,7 @@ SECTIONS
 
     /* 起動用のスタック 64KiB(下に向かって伸びる) */
     . = ALIGN(16);
+    __stack_bottom = .;
     . += 0x10000;
     __stack_top = .;
 

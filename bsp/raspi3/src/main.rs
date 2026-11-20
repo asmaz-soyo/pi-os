@@ -30,12 +30,24 @@ extern "C" fn kernel_main(_dtb: usize) -> ! {
     test_main();
 
     kernel::kmain("raspi3");
+    #[cfg(feature = "panic-demo")]
+    panic!("panic demo");
+    #[cfg(not(feature = "panic-demo"))]
     arch_aarch64::semihosting::exit(0)
 }
 
 #[cfg(not(test))]
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    let r = arch_aarch64::cpu::snapshot();
+    let regs = kernel::panic::Registers {
+        current_el: r.current_el,
+        sp: r.sp,
+        fp: r.fp,
+        lr: r.lr,
+    };
+    kernel::panic::report(info, &regs, arch_aarch64::boot::stack_range());
+    // QEMU なら終了コード 1 で終わる。実機ではここで止まる
     arch_aarch64::semihosting::exit(1)
 }
 

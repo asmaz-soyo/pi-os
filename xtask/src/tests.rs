@@ -39,11 +39,15 @@ fn qemu_test(krate: &str, args: &str) -> String {
     )
 }
 
-fn snapshot(bsp: &str, krate: &str, args: &str) -> String {
+fn snapshot(name: &str, exit: i32, krate: &str, args: &str) -> String {
     format!(
-        "snapshot tests/snapshots/{bsp}.txt <= timeout 30 qemu-system-aarch64 {args} \
-         -kernel target/aarch64-unknown-none/debug/{krate}"
+        "snapshot tests/snapshots/{name}.txt (exit {exit}) <= timeout 30 qemu-system-aarch64 \
+         {args} -kernel target/aarch64-unknown-none/debug/{krate}"
     )
+}
+
+fn build_panic_demo(krate: &str) -> String {
+    format!("cargo build -p {krate} --target aarch64-unknown-none --features panic-demo")
 }
 
 fn all_builds() -> Vec<String> {
@@ -143,14 +147,18 @@ fn qemu_runner_ends_with_kernel_flag_so_cargo_appends_the_elf() {
 }
 
 #[test]
-fn snapshot_plan_builds_then_compares_uart_output_for_each_bsp() {
+fn snapshot_plan_checks_boot_and_panic_output_for_each_bsp() {
     assert_eq!(
         displays(&plan(Task::Test(TestKind::Snapshot))),
         [
             build("bsp-qemu-virt"),
-            snapshot("qemu-virt", "bsp-qemu-virt", VIRT_ARGS),
+            snapshot("qemu-virt", 0, "bsp-qemu-virt", VIRT_ARGS),
+            build_panic_demo("bsp-qemu-virt"),
+            snapshot("qemu-virt-panic", 1, "bsp-qemu-virt", VIRT_ARGS),
             build("bsp-raspi3"),
-            snapshot("raspi3", "bsp-raspi3", RASPI3_ARGS),
+            snapshot("raspi3", 0, "bsp-raspi3", RASPI3_ARGS),
+            build_panic_demo("bsp-raspi3"),
+            snapshot("raspi3-panic", 1, "bsp-raspi3", RASPI3_ARGS),
         ]
     );
 }
@@ -205,4 +213,24 @@ fn compare_reports_first_differing_line() {
 #[test]
 fn compare_reports_missing_output() {
     assert!(compare_snapshot("Hello\n", "").is_err());
+}
+
+#[test]
+fn wildcard_matches_any_text_within_a_line() {
+    assert!(compare_snapshot("SP = {..}  FP = {..}\n", "SP = 0x10  FP = 0x20\n").is_ok());
+    assert!(compare_snapshot("SP = {..}\n", "FP = 0x10\n").is_err());
+}
+
+#[test]
+fn ellipsis_line_matches_any_number_of_lines() {
+    let expected = "backtrace:\n...\nend\n";
+    assert!(compare_snapshot(expected, "backtrace:\nend\n").is_ok());
+    assert!(compare_snapshot(expected, "backtrace:\n#0\n#1\nend\n").is_ok());
+    assert!(compare_snapshot(expected, "backtrace:\n#0\n").is_err());
+}
+
+#[test]
+fn literal_braces_without_dots_must_match_exactly() {
+    assert!(compare_snapshot("a{b}\n", "a{b}\n").is_ok());
+    assert!(compare_snapshot("a{b}\n", "axb\n").is_err());
 }

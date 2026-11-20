@@ -9,11 +9,24 @@ use hal::console::Console;
 /// 複数のコアから共有できる出力先。`spin::Mutex<C>` に実装してある。
 pub trait SharedConsole: Sync {
     fn write_bytes(&self, buf: &[u8]);
+
+    /// ロックを強制的に外す。
+    ///
+    /// # Safety
+    /// パニックの報告のように、ロックを持っていた処理が二度と続きを実行しないときだけ使う。
+    unsafe fn force_unlock(&self);
 }
 
 impl<C: Console + Send> SharedConsole for spin::Mutex<C> {
     fn write_bytes(&self, buf: &[u8]) {
         self.lock().write_bytes(buf);
+    }
+
+    unsafe fn force_unlock(&self) {
+        if self.is_locked() {
+            // SAFETY: 呼び出し元が保証する
+            unsafe { spin::Mutex::force_unlock(self) };
+        }
     }
 }
 
@@ -41,6 +54,17 @@ impl Console for Global {
         if let Some(console) = CONSOLE.get() {
             console.write_bytes(buf);
         }
+    }
+}
+
+/// 出力先のロックを強制的に外す(パニックの報告の直前に使う)。
+///
+/// # Safety
+/// [`SharedConsole::force_unlock`] と同じ。
+pub unsafe fn break_lock() {
+    if let Some(console) = CONSOLE.get() {
+        // SAFETY: 呼び出し元が保証する
+        unsafe { console.force_unlock() };
     }
 }
 
