@@ -1,0 +1,2 @@
+Pi-OS booting on qemu-virt
+Hello from Pi-OS

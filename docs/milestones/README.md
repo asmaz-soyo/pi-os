@@ -2,8 +2,8 @@
 
 | マイルストーン | 状態 | タグ |
 | --- | --- | --- |
-| [M0 開発基盤](m0-foundation.md) | 進行中 | `m0-foundation` |
-| M1 起動とUART | 未着手 | `m1-uart` |
+| [M0 開発基盤](m0-foundation.md) | 完了 | `m0-foundation` |
+| M1 起動とUART | 進行中 | `m1-uart` |
 | M2 例外と割り込み | 未着手 | `m2-irq` |
 | M3 メモリ管理 | 未着手 | `m3-mm` |
 | M4 ユーザープロセス | 未着手 | `m4-user` |
