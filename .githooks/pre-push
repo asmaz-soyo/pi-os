@@ -1,0 +1,4 @@
+#!/bin/sh
+# push の前に CI と同じ検査を走らせる。有効にするには:
+#   git config core.hooksPath .githooks
+exec cargo xtask ci
