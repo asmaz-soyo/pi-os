@@ -38,6 +38,7 @@ fn execute(step: &Step) -> Result<(), String> {
             }
         }
         Step::GenerateDocs { path, check } => generate_docs(path, *check),
+        Step::MakeDisk { path } => make_disk(path),
         Step::Snapshot {
             expected,
             exit_code,
@@ -178,4 +179,22 @@ fn generate_docs(path: &str, check: bool) -> Result<(), String> {
     }
     std::fs::create_dir_all(full.parent().unwrap()).map_err(|e| e.to_string())?;
     std::fs::write(&full, want).map_err(|e| e.to_string())
+}
+
+/// QEMU virt に渡すテスト用のディスクイメージ(1MiB)を作る。
+///
+/// セクタ 0 は MBR(パーティション 1 つ、種類 0x83)、セクタ 1 は目印の文字列。
+fn make_disk(path: &str) -> Result<(), String> {
+    let mut disk = vec![0u8; 1024 * 1024];
+    let entry = &mut disk[446..462];
+    entry[4] = 0x83;
+    entry[8..12].copy_from_slice(&16u32.to_le_bytes());
+    entry[12..16].copy_from_slice(&2032u32.to_le_bytes());
+    disk[510] = 0x55;
+    disk[511] = 0xaa;
+    let mark = b"Pi-OS test disk\n";
+    disk[512..512 + mark.len()].copy_from_slice(mark);
+    let full = root().join(path);
+    std::fs::create_dir_all(full.parent().unwrap()).map_err(|e| e.to_string())?;
+    std::fs::write(&full, disk).map_err(|e| e.to_string())
 }

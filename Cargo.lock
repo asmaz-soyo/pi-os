@@ -26,6 +26,7 @@ dependencies = [
  "kernel",
  "spin",
  "userland",
+ "virtio-blk",
 ]
 
 [[package]]

@@ -26,7 +26,14 @@ const ALL_TARGET: [&str; 10] = [
 ];
 const EXCLUDES: &str = "--exclude userland --exclude boot --exclude ktest \
                         --exclude bsp-qemu-virt --exclude bsp-raspi3";
-const VIRT_ARGS: &str = "-M virt -cpu cortex-a53 -m 128M -nic none -nographic -semihosting";
+const VIRT_ARGS: &str = "-M virt -cpu cortex-a53 -m 128M -nic none -nographic -semihosting \
+    -global virtio-mmio.force-legacy=false -drive file=target/virt-disk.img,if=none,format=raw,id=hd0 \
+    -device virtio-blk-device,drive=hd0";
+/// cargo の runner は bsp/qemu-virt から QEMU を起動するので、ディスクの場所が変わる
+const VIRT_RUNNER_ARGS: &str = "-M virt -cpu cortex-a53 -m 128M -nic none -nographic -semihosting \
+    -global virtio-mmio.force-legacy=false \
+    -drive file=../../target/virt-disk.img,if=none,format=raw,id=hd0 -device virtio-blk-device,drive=hd0";
+const MAKE_DISK: &str = "make disk target/virt-disk.img";
 const RASPI3_ARGS: &str = "-M raspi3b -nographic -semihosting";
 /// 実機用のビルド(セミホスティングなし、別の target ディレクトリ)
 const HW_BUILD: &str = "cargo build -p bsp-raspi3 --target aarch64-unknown-none \
@@ -156,7 +163,10 @@ fn host_test_plan_skips_target_only_crates() {
 fn qemu_test_plan_uses_qemu_as_cargo_runner() {
     assert_eq!(
         displays(&plan(Task::Test(TestKind::Qemu(Bsp::QemuVirt)))),
-        [qemu_test("bsp-qemu-virt", VIRT_ARGS)]
+        [
+            MAKE_DISK.to_string(),
+            qemu_test("bsp-qemu-virt", VIRT_RUNNER_ARGS)
+        ]
     );
     assert_eq!(
         displays(&plan(Task::Test(TestKind::Qemu(Bsp::Raspi3)))),
@@ -176,6 +186,7 @@ fn snapshot_plan_checks_boot_panic_and_fault_output_for_each_bsp() {
     assert_eq!(
         displays(&plan(Task::Test(TestKind::Snapshot))),
         [
+            MAKE_DISK.to_string(),
             build("bsp-qemu-virt"),
             snapshot("qemu-virt", 0, "bsp-qemu-virt", VIRT_ARGS),
             build_demo("bsp-qemu-virt", "panic"),
@@ -225,7 +236,8 @@ fn ci_plan_runs_checks_then_all_test_layers_then_builds() {
     ];
     want.extend(ALL_TARGET.iter().map(|k| clippy(k)));
     want.push(host_test());
-    want.push(qemu_test("bsp-qemu-virt", VIRT_ARGS));
+    want.push(MAKE_DISK.to_string());
+    want.push(qemu_test("bsp-qemu-virt", VIRT_RUNNER_ARGS));
     want.push(qemu_test("bsp-raspi3", RASPI3_ARGS));
     want.extend(displays(&plan(Task::Test(TestKind::Snapshot))));
     want.extend(all_builds());

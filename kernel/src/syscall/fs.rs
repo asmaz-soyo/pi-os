@@ -464,3 +464,20 @@ pub fn faccessat(p: &mut Process, dirfd: u64, path: u64, mode: u64) -> Result<u6
     real.check(&st, want)?;
     Ok(0)
 }
+
+/// pread64(fd, buf, count, offset):位置を指定して読む(ファイルの位置は動かさない)
+pub fn pread64(p: &mut Process, fd: u64, buf: u64, count: u64, offset: u64) -> Result<u64, Errno> {
+    let f = readable(p, fd)?;
+    let mut chunk = vec![0u8; CHUNK.min(count as usize)];
+    let n = f.file.read(offset, &mut chunk)?;
+    p.mem.copy_to_user(VirtAddr(buf), &chunk[..n])?;
+    Ok(n as u64)
+}
+
+/// pwrite64(fd, buf, count, offset):位置を指定して書く(ファイルの位置は動かさない)
+pub fn pwrite64(p: &mut Process, fd: u64, buf: u64, count: u64, offset: u64) -> Result<u64, Errno> {
+    let f = writable(p, fd)?;
+    let mut chunk = vec![0u8; CHUNK.min(count as usize)];
+    p.mem.copy_from_user(VirtAddr(buf), &mut chunk)?;
+    Ok(f.file.write(offset, &chunk)? as u64)
+}

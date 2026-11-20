@@ -37,6 +37,8 @@ pub mod nr {
     pub const WRITE: u64 = 64;
     pub const READV: u64 = 65;
     pub const WRITEV: u64 = 66;
+    pub const PREAD64: u64 = 67;
+    pub const PWRITE64: u64 = 68;
     pub const PSELECT6: u64 = 72;
     pub const PPOLL: u64 = 73;
     pub const READLINKAT: u64 = 78;
@@ -189,6 +191,8 @@ table! {
     nr::WRITE, "write", 3 => |p, a| result(fs::write(p, a[0], a[1], a[2]));
     nr::READV, "readv", 3 => |p, a| result(fs::readv(p, a[0], a[1], a[2]));
     nr::WRITEV, "writev", 3 => |p, a| result(fs::writev(p, a[0], a[1], a[2]));
+    nr::PREAD64, "pread64", 4 => |p, a| result(fs::pread64(p, a[0], a[1], a[2], a[3]));
+    nr::PWRITE64, "pwrite64", 4 => |p, a| result(fs::pwrite64(p, a[0], a[1], a[2], a[3]));
     nr::PSELECT6, "pselect6", 6 => |p, a| result(poll::pselect6(p, a[0], a[1], a[2], a[3], a[4]));
     nr::PPOLL, "ppoll", 5 => |p, a| result(poll::ppoll(p, a[0], a[1], a[2]));
     nr::READLINKAT, "readlinkat", 4 => |p, a| result(fs::readlinkat(p, a[0], a[1]));

@@ -29,15 +29,27 @@ static INTC: SpinLock<GicV2<MmioRegion>> = SpinLock::new(GicV2::new(
     unsafe { MmioRegion::new(device_va(GICC_PHYS)) },
 ));
 
+const VIRTIO_SLOTS: [usize; 32] = {
+    let mut slots = [0; 32];
+    let mut i = 0;
+    while i < 32 {
+        slots[i] = 0x0a00_0000 + i * 0x200;
+        i += 1;
+    }
+    slots
+};
+
 struct Board;
 
 impl boot::Board for Board {
     const NAME: &'static str = "qemu-virt";
     /// `-m 128M` の RAM
     const RAM: Range<u64> = 0x4000_0000..0x4800_0000;
-    /// GIC(0x0800_0000〜)と PL011(0x0900_0000)を含む範囲
+    /// GIC(0x0800_0000〜)、PL011(0x0900_0000)、virtio-mmio(0x0a00_0000〜)を含む範囲
     #[allow(clippy::single_range_in_vec_init)] // 範囲の一覧(たまたま1つ)
-    const DEVICES: &'static [Range<u64>] = &[0x0800_0000..0x0a00_0000];
+    const DEVICES: &'static [Range<u64>] = &[0x0800_0000..0x0a00_4000];
+    /// virtio-mmio の枠 32 個(hw/arm/virt.c の VIRT_MMIO、0x200 ずつ)
+    const VIRTIO_MMIO: &'static [usize] = &VIRTIO_SLOTS;
     /// EL1 物理タイマ(PPI 14 = INTID 30)
     const TIMER_IRQ: u32 = 30;
 
@@ -87,4 +99,9 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 #[cfg(test)]
 mod tests {
     ktest::common_tests!();
+
+    #[test_case]
+    fn virtio_disk_is_readable_and_writable_through_dev_vda() {
+        assert_eq!(boot::run_program("/bin/diskread", &[b"diskread"]), Ok(0));
+    }
 }

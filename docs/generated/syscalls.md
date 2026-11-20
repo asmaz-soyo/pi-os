@@ -26,6 +26,8 @@
 | 64 | `write` | 3 |
 | 65 | `readv` | 3 |
 | 66 | `writev` | 3 |
+| 67 | `pread64` | 4 |
+| 68 | `pwrite64` | 4 |
 | 72 | `pselect6` | 6 |
 | 73 | `ppoll` | 5 |
 | 78 | `readlinkat` | 4 |
@@ -62,4 +64,4 @@
 | 260 | `wait4` | 4 |
 | 278 | `getrandom` | 3 |
 
-合計 56 個
+合計 58 個

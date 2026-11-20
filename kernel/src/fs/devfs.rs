@@ -143,7 +143,12 @@ impl FileSystem for Devfs {
             "/" => Ok(Arc::new(DevDir)),
             "/console" | "/tty" => Ok(self.console.clone()),
             "/null" => Ok(Arc::new(NullFile)),
-            _ => Err(Errno::ENOENT),
+            other => {
+                // 登録されたブロックデバイス(/dev/vda など)
+                let disk =
+                    crate::block::find(other.trim_start_matches('/')).ok_or(Errno::ENOENT)?;
+                Ok(Arc::new(crate::block::BlockFile::new(disk)))
+            }
         }
     }
 
@@ -151,13 +156,21 @@ impl FileSystem for Devfs {
         if path != "/" {
             return Err(Errno::ENOTDIR);
         }
-        Ok(["console", "null", "tty"]
+        let mut entries: Vec<DirEntry> = ["console", "null", "tty"]
             .iter()
             .map(|name| DirEntry {
                 name: alloc::string::String::from(*name),
                 kind: FileKind::CharDevice,
                 ino: 0x1_0001,
             })
-            .collect())
+            .collect();
+        for name in crate::block::names() {
+            entries.push(DirEntry {
+                name,
+                kind: FileKind::Regular,
+                ino: 0x5_0000,
+            });
+        }
+        Ok(entries)
     }
 }

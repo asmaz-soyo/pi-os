@@ -36,6 +36,8 @@ pub trait Board: 'static {
     const TIMER_IRQ: u32;
     /// タイマ割り込みの頻度
     const TIMER_HZ: u64 = 100;
+    /// virtio-mmio の枠の物理アドレス(ないボードは空)
+    const VIRTIO_MMIO: &'static [usize] = &[];
 
     type Console: Console + Send;
     type Intc: IrqController + Send;
@@ -62,6 +64,7 @@ pub fn init<B: Board>() {
     // 4. UART と割り込みコントローラ。ここから println! が使える
     B::init_devices();
     kernel::console::set_console(B::console());
+    probe_virtio::<B>();
     // 5. スケジューラ(ここまでの起動処理がタスク 0 になる)
     init_scheduler();
     // 6. タイマ割り込み
@@ -165,6 +168,31 @@ fn init_scheduler() {
         irq_restore: arch_aarch64::cpu::irq_restore,
         before_switch: user::switch_address_space,
     });
+}
+
+/// virtio-mmio の枠を調べ、virtio-blk が見つかったら `vda`、`vdb`、… として登録する。
+fn probe_virtio<B: Board>() {
+    let mut next = b'a';
+    for &pa in B::VIRTIO_MMIO {
+        let Ok(dma) = kernel::mm::alloc_frame() else {
+            return;
+        };
+        // SAFETY: pa は virtio-mmio の枠で、デバイスの範囲としてマップ済み
+        let regs = unsafe { hal::mmio::MmioRegion::new(device_va(pa)) };
+        let dma_va = phys_to_virt(dma).0 as *mut u8;
+        // SAFETY: dma は割り当てたばかりのフレームで、このドライバだけが使う
+        match unsafe { virtio_blk::VirtioBlk::new(regs, dma_va, dma.0) } {
+            Some(dev) => {
+                let name = alloc::format!("vd{}", next as char);
+                kernel::println!("virtio-blk: /dev/{name}, {} sectors", dev.capacity());
+                kernel::block::register(&name, kernel::block::shared(alloc::boxed::Box::new(dev)));
+                next += 1;
+            }
+            None => {
+                let _ = kernel::mm::release_frame(dma);
+            }
+        }
+    }
 }
 
 /// 例外の受け口。IRQ は割り込みコントローラから番号を読み、カーネルの表で振り分ける。

@@ -98,10 +98,11 @@ impl Bsp {
         format!("target/{TARGET}/debug/{}", self.crate_name())
     }
 
-    /// QEMU の引数(`-kernel` の手前まで)。
-    fn qemu_args(self) -> &'static [&'static str] {
-        match self {
-            Self::QemuVirt => &[
+    /// QEMU の引数(`-kernel` の手前まで)。`root` はワークスペースのルートへの相対パス
+    /// (virt のディスクイメージの場所に使う)。
+    fn qemu_args(self, root: &str) -> Vec<String> {
+        let mut args: Vec<String> = match self {
+            Self::QemuVirt => [
                 "-M",
                 "virt",
                 "-cpu",
@@ -113,16 +114,32 @@ impl Bsp {
                 "none",
                 "-nographic",
                 "-semihosting",
-            ],
+            ]
+            .map(String::from)
+            .to_vec(),
             // raspi3b は RAM 1GB 固定。-nographic で UART0(PL011)が標準入出力につながる
-            Self::Raspi3 => &["-M", "raspi3b", "-nographic", "-semihosting"],
+            Self::Raspi3 => ["-M", "raspi3b", "-nographic", "-semihosting"]
+                .map(String::from)
+                .to_vec(),
+        };
+        if self == Self::QemuVirt {
+            // virtio-blk のディスク(virtio-mmio の新しい形 version 2 を使う)
+            args.extend([
+                "-global".to_string(),
+                "virtio-mmio.force-legacy=false".to_string(),
+                "-drive".to_string(),
+                format!("file={root}{VIRT_DISK},if=none,format=raw,id=hd0"),
+                "-device".to_string(),
+                "virtio-blk-device,drive=hd0".to_string(),
+            ]);
         }
+        args
     }
 
-    /// `kernel` を起動する QEMU のコマンド。
+    /// `kernel` を起動する QEMU のコマンド(ワークスペースのルートで動かす)。
     fn qemu(self, kernel: &str) -> Cmd {
-        let mut args: Vec<&str> = self.qemu_args().to_vec();
-        args.extend(["-kernel", kernel]);
+        let mut args = self.qemu_args("");
+        args.extend(["-kernel".to_string(), kernel.to_string()]);
         Cmd::new("qemu-system-aarch64", &args)
     }
 
@@ -130,13 +147,27 @@ impl Bsp {
     ///
     /// cargo はこの後ろにテストの ELF のパスを付け足して実行するので、`-kernel` で終える。
     /// テストが終了しないままになったときのために `timeout` で包む。
+    /// cargo はテストを BSP のクレートのディレクトリで動かすので、ルートは `../../`。
     pub fn qemu_runner(self) -> String {
         format!(
             "timeout 60 qemu-system-aarch64 {} -kernel",
-            self.qemu_args().join(" ")
+            self.qemu_args("../../").join(" ")
         )
     }
+
+    /// QEMU で動かす前に要る手順(virt のディスクイメージを作る)
+    fn prepare(self) -> Vec<Step> {
+        match self {
+            Self::QemuVirt => vec![Step::MakeDisk {
+                path: VIRT_DISK.to_string(),
+            }],
+            Self::Raspi3 => vec![],
+        }
+    }
 }
+
+/// QEMU virt に渡すディスクイメージ(ワークスペースのルートからの相対パス)
+pub const VIRT_DISK: &str = "target/virt-disk.img";
 
 /// コマンドライン引数(プログラム名を除く)をタスクに変換する。
 pub fn parse(args: &[&str]) -> Result<Task, String> {
@@ -227,6 +258,8 @@ pub enum Step {
     Run(Cmd),
     /// 自動生成のドキュメント `path` を作る(`check` なら差分がないことだけ確かめる)
     GenerateDocs { path: String, check: bool },
+    /// QEMU に渡すディスクイメージを作る
+    MakeDisk { path: String },
     /// コマンドの標準出力を `expected`(ルートからの相対パス)の内容と比べ、
     /// 終了コードが `exit_code` であることを確かめる
     Snapshot {
@@ -243,6 +276,7 @@ impl fmt::Display for Step {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Run(cmd) => write!(f, "{cmd}"),
+            Self::MakeDisk { path } => write!(f, "make disk {path}"),
             Self::GenerateDocs { path, check } => {
                 write!(f, "generate {path}{}", if *check { " (check)" } else { "" })
             }
@@ -270,11 +304,14 @@ pub fn plan(task: Task) -> Vec<Step> {
                     .args
                     .extend(["--features".into(), "trace-syscalls".into()]);
             }
-            vec![Step::Run(build), Step::Run(bsp.qemu(&bsp.kernel_elf()))]
+            let mut steps = vec![Step::Run(build)];
+            steps.extend(bsp.prepare());
+            steps.push(Step::Run(bsp.qemu(&bsp.kernel_elf())));
+            steps
         }
         Task::Docs { check } => vec![docs_step(check)],
         Task::Test(TestKind::Host) => vec![Step::Run(host_tests())],
-        Task::Test(TestKind::Qemu(bsp)) => vec![Step::Run(qemu_tests(bsp))],
+        Task::Test(TestKind::Qemu(bsp)) => qemu_test_steps(bsp),
         Task::Test(TestKind::Snapshot) => snapshot_tests(),
         Task::Ci => {
             let mut steps = vec![
@@ -293,7 +330,7 @@ pub fn plan(task: Task) -> Vec<Step> {
                 ]))
             }));
             steps.push(Step::Run(host_tests()));
-            steps.extend(Bsp::ALL.iter().map(|&bsp| Step::Run(qemu_tests(bsp))));
+            steps.extend(Bsp::ALL.iter().flat_map(|&bsp| qemu_test_steps(bsp)));
             steps.extend(snapshot_tests());
             steps.extend(target_builds());
             steps
@@ -337,6 +374,12 @@ fn host_tests() -> Cmd {
     let mut args = vec!["test".to_string(), "--workspace".to_string()];
     args.extend(exclude_target_only());
     Cmd::cargo(&args)
+}
+
+fn qemu_test_steps(bsp: Bsp) -> Vec<Step> {
+    let mut steps = bsp.prepare();
+    steps.push(Step::Run(qemu_tests(bsp)));
+    steps
 }
 
 fn qemu_tests(bsp: Bsp) -> Cmd {
@@ -384,7 +427,8 @@ fn snapshot_tests() -> Vec<Step> {
                 script: shell_script(),
                 cmd: bsp.qemu(&bsp.kernel_elf()).with_timeout(30),
             };
-            let mut steps = vec![Step::Run(kernel_build(bsp)), snapshot("", 0)];
+            let mut steps = bsp.prepare();
+            steps.extend([Step::Run(kernel_build(bsp)), snapshot("", 0)]);
             for demo in DEMOS {
                 let mut build = kernel_build(bsp);
                 build

@@ -214,3 +214,20 @@ fn dup3_places_a_copy_at_the_given_number() {
     assert_eq!(call(&mut p, nr::READ, [7, SCRATCH, 7, 0, 0, 0]), 7);
     assert_eq!(call(&mut p, nr::DUP, [fd, 0, 0, 0, 0, 0]), 4);
 }
+
+#[test]
+fn pread_and_pwrite_use_their_own_offset() {
+    let (mut p, _) = process();
+    let fd = open(&mut p, b"/tmp/f", O_CREAT | O_RDWR);
+    put(&mut p, SCRATCH, b"0123456789");
+    assert_eq!(call(&mut p, nr::WRITE, [fd, SCRATCH, 10, 0, 0, 0]), 10);
+    put(&mut p, SCRATCH, b"AB");
+    assert_eq!(call(&mut p, nr::PWRITE64, [fd, SCRATCH, 2, 3, 0, 0]), 2);
+    assert_eq!(
+        call(&mut p, nr::PREAD64, [fd, SCRATCH + 0x100, 4, 2, 0, 0]),
+        4
+    );
+    assert_eq!(get(&mut p, SCRATCH + 0x100, 4), b"2AB5");
+    // ファイルの位置は動かない(書いたあとの 10 のまま)
+    assert_eq!(call(&mut p, nr::LSEEK, [fd, 0, 1, 0, 0, 0]), 10);
+}
