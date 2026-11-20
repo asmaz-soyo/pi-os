@@ -57,6 +57,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fatimg"
+version = "0.1.0"
+
+[[package]]
 name = "gicv2"
 version = "0.1.0"
 dependencies = [
@@ -71,6 +75,7 @@ version = "0.1.0"
 name = "kernel"
 version = "0.1.0"
 dependencies = [
+ "fatimg",
  "hal",
  "spin",
 ]
@@ -118,5 +123,6 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "fatimg",
  "kernel",
 ]

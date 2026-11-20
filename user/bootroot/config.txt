@@ -1,0 +1,4 @@
+# Pi-OS の起動パーティション(/boot)。実機ではここに kernel8.img と Pi のファームウェアを置く
+arm_64bit=1
+kernel=kernel8.img
+enable_uart=1

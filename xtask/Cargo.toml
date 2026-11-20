@@ -8,3 +8,5 @@ publish = false
 [dependencies]
 # システムコール表から docs/generated/syscalls.md を作るため
 kernel = { path = "../kernel" }
+# ディスクイメージの FAT32 パーティション(/boot)を作るため
+fatimg = { path = "../tools/fatimg" }

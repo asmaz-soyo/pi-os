@@ -299,8 +299,10 @@ fn vfs() -> (Arc<Vfs>, Arc<dyn File>) {
     (vfs.clone(), console.clone())
 }
 
-/// `/dev/vda` に MBR と Linux のパーティション(0x83)があれば、ext2 として `/mnt` にマウントする。
+/// `/dev/vda` の MBR を読み、FAT32 のパーティションを `/boot` に、Linux のパーティション(ext2)を
+/// `/mnt` にマウントする(SD カードの「p1 = FAT32、p2 = ext2」と同じ形)。
 fn mount_disk(vfs: &mut Vfs) {
+    use kernel::block::mbr;
     let Some(disk) = kernel::block::find("vda") else {
         return;
     };
@@ -308,22 +310,30 @@ fn mount_disk(vfs: &mut Vfs) {
     if disk.lock().read_block(0, &mut sector).is_err() {
         return;
     }
-    let Some(parts) = kernel::block::mbr::parse(&sector) else {
+    let Some(parts) = mbr::parse(&sector) else {
         return;
     };
-    let Some(part) = parts
-        .iter()
-        .find(|p| p.kind == kernel::block::mbr::KIND_LINUX)
-    else {
-        return;
-    };
-    let dev = kernel::block::PartitionDevice::new(disk, part.start as u64, part.count as u64);
-    match kernel::fs::ext2::Ext2::new(kernel::block::shared(Box::new(dev))) {
-        Ok(fs) => {
-            vfs.mount("/mnt", Arc::new(fs));
-            kernel::println!("ext2: /dev/vda1 mounted on /mnt");
+    for (i, part) in parts.iter().enumerate() {
+        let dev =
+            kernel::block::PartitionDevice::new(disk.clone(), part.start as u64, part.count as u64);
+        let dev = kernel::block::shared(Box::new(dev));
+        let n = i + 1;
+        let mounted: Result<(&str, &str, Arc<dyn kernel::fs::vfs::FileSystem>), Errno> =
+            match part.kind {
+                mbr::KIND_FAT32_LBA => kernel::fs::fat32::Fat32::new(dev)
+                    .map(|fs| ("fat32", "/boot", Arc::new(fs) as _)),
+                mbr::KIND_LINUX => {
+                    kernel::fs::ext2::Ext2::new(dev).map(|fs| ("ext2", "/mnt", Arc::new(fs) as _))
+                }
+                _ => continue,
+            };
+        match mounted {
+            Ok((kind, at, fs)) => {
+                vfs.mount(at, fs);
+                kernel::println!("{kind}: /dev/vda{n} mounted on {at}");
+            }
+            Err(e) => kernel::println!("cannot mount /dev/vda{n}: {e:?}"),
         }
-        Err(e) => kernel::println!("ext2: cannot mount /dev/vda1: {e:?}"),
     }
 }
 

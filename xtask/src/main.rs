@@ -186,18 +186,39 @@ fn generate_docs(path: &str, check: bool) -> Result<(), String> {
 /// セクタ 0 は MBR、セクタ 1 は目印の文字列、LBA 2048 から ext2 のパーティション
 /// (`user/diskroot/` の中身を `mke2fs -d` で入れる)。
 fn make_disk(path: &str) -> Result<(), String> {
-    const PART_START: usize = 2048;
-    const PART_SECTORS: usize = 6144;
-    let mut disk = vec![0u8; (PART_START + PART_SECTORS) * 512];
-    let entry = &mut disk[446..462];
-    entry[4] = 0x83;
-    entry[8..12].copy_from_slice(&(PART_START as u32).to_le_bytes());
-    entry[12..16].copy_from_slice(&(PART_SECTORS as u32).to_le_bytes());
+    // SD カードと同じ形:p1 = FAT32(/boot)、p2 = ext2
+    const BOOT_START: usize = 2048;
+    const BOOT_MIB: usize = 34; // FAT32 にはクラスタが 65525 個以上いる(1 クラスタ 512 バイトで約 33MiB)
+    const BOOT_SECTORS: usize = BOOT_MIB * 2048;
+    const EXT2_START: usize = BOOT_START + BOOT_SECTORS;
+    const EXT2_SECTORS: usize = 6144;
+    let mut disk = vec![0u8; (EXT2_START + EXT2_SECTORS) * 512];
+    let parts = [
+        (0x0c, BOOT_START, BOOT_SECTORS),
+        (0x83, EXT2_START, EXT2_SECTORS),
+    ];
+    for (i, (kind, start, count)) in parts.iter().enumerate() {
+        let entry = &mut disk[446 + i * 16..462 + i * 16];
+        entry[4] = *kind;
+        entry[8..12].copy_from_slice(&(*start as u32).to_le_bytes());
+        entry[12..16].copy_from_slice(&(*count as u32).to_le_bytes());
+    }
     disk[510] = 0x55;
     disk[511] = 0xaa;
     let mark = b"Pi-OS test disk\n";
     disk[512..512 + mark.len()].copy_from_slice(mark);
 
+    // p1:user/bootroot の中身を FAT32 に
+    let mut files = Vec::new();
+    collect_files(&root().join("user/bootroot"), "", &mut files)?;
+    let refs: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(p, d)| (p.as_str(), d.as_slice()))
+        .collect();
+    let fat = fatimg::build(BOOT_MIB as u32, "PIOSBOOT", &refs);
+    disk[BOOT_START * 512..BOOT_START * 512 + fat.len()].copy_from_slice(&fat);
+
+    // p2:user/diskroot の中身を ext2 に
     let full = root().join(path);
     std::fs::create_dir_all(full.parent().unwrap()).map_err(|e| e.to_string())?;
     let ext2 = full.with_extension("ext2");
@@ -207,13 +228,35 @@ fn make_disk(path: &str) -> Result<(), String> {
         .args(["-q", "-F", "-t", "ext2", "-b", "1024", "-I", "128", "-d"])
         .arg(root().join("user/diskroot"))
         .arg(&ext2)
-        .arg((PART_SECTORS / 2).to_string())
+        .arg((EXT2_SECTORS / 2).to_string())
         .status()
         .map_err(|e| format!("mke2fs (e2fsprogs) is needed: {e}"))?;
     if !status.success() {
         return Err("mke2fs failed".to_string());
     }
     let fs = std::fs::read(&ext2).map_err(|e| e.to_string())?;
-    disk[PART_START * 512..PART_START * 512 + fs.len()].copy_from_slice(&fs);
+    disk[EXT2_START * 512..EXT2_START * 512 + fs.len()].copy_from_slice(&fs);
     std::fs::write(&full, disk).map_err(|e| e.to_string())
+}
+
+/// ディレクトリの中のファイルを (相対パス, 中身) で集める
+fn collect_files(
+    dir: &std::path::Path,
+    prefix: &str,
+    out: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .filter_map(Result::ok)
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        let name = format!("{prefix}{}", e.file_name().to_string_lossy());
+        if e.path().is_dir() {
+            collect_files(&e.path(), &format!("{name}/"), out)?;
+        } else {
+            out.push((name, std::fs::read(e.path()).map_err(|e| e.to_string())?));
+        }
+    }
+    Ok(())
 }
