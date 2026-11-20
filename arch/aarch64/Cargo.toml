@@ -5,9 +5,11 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[dependencies]
+hal = { path = "../../hal" }
+
 # アセンブリを使う部分(カーネルのビルド)だけが使う依存
 [target.'cfg(target_os = "none")'.dependencies]
-hal = { path = "../../hal" }
 spin = { version = "0.9", default-features = false, features = ["spin_mutex"] }
 
 [lib]
