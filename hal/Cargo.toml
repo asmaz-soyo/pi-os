@@ -1,0 +1,9 @@
+[package]
+name = "hal"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[features]
+# テスト用のモック実装を他のクレートに公開する
+mock = []
