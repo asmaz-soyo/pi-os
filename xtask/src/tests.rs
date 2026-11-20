@@ -68,6 +68,8 @@ fn build_plan_builds_target_crates_for_aarch64() {
         displays(&plan(Task::Build)),
         [
             "cargo build -p hal --target aarch64-unknown-none",
+            "cargo build -p kernel --target aarch64-unknown-none",
+            "cargo build -p pl011 --target aarch64-unknown-none",
             "cargo build -p arch-aarch64 --target aarch64-unknown-none",
             QEMU_VIRT_BUILD,
         ]
@@ -121,6 +123,8 @@ fn ci_plan_runs_checks_then_all_test_layers_then_builds() {
             "cargo clippy --workspace --exclude arch-aarch64 --exclude bsp-qemu-virt \
              --all-targets --all-features -- -D warnings",
             "cargo clippy -p hal --target aarch64-unknown-none -- -D warnings",
+            "cargo clippy -p kernel --target aarch64-unknown-none -- -D warnings",
+            "cargo clippy -p pl011 --target aarch64-unknown-none -- -D warnings",
             "cargo clippy -p arch-aarch64 --target aarch64-unknown-none -- -D warnings",
             "cargo clippy -p bsp-qemu-virt --target aarch64-unknown-none -- -D warnings",
             HOST_TEST,
@@ -128,6 +132,8 @@ fn ci_plan_runs_checks_then_all_test_layers_then_builds() {
             QEMU_VIRT_BUILD,
             QEMU_VIRT_SNAPSHOT,
             "cargo build -p hal --target aarch64-unknown-none",
+            "cargo build -p kernel --target aarch64-unknown-none",
+            "cargo build -p pl011 --target aarch64-unknown-none",
             "cargo build -p arch-aarch64 --target aarch64-unknown-none",
             QEMU_VIRT_BUILD,
         ]

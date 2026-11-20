@@ -22,7 +22,8 @@ flowchart TB
 
 | ポート(`hal`) | 役割 | 実装 |
 | --- | --- | --- |
-| `console::Console` | バイト列の出力 | `MockConsole`(テスト)、`SemihostingConsole`(QEMU のテスト) |
+| `console::Console` | バイト列の出力 | `Pl011`、`MockConsole`(テスト)、`SemihostingConsole`(QEMU のテスト) |
+| `mmio::Mmio` | レジスタの読み書き(ドライバが使う) | `MmioRegion`(実機)、`FakeMmio`(テスト) |
 
 ポートやクレートを足したら、この表と図を更新する。
 
@@ -31,6 +32,8 @@ flowchart TB
 | クレート | ホスト(`cargo test`) | `aarch64-unknown-none` |
 | --- | --- | --- |
 | `hal` | ○ | ○ |
+| `kernel` | ○ | ○ |
+| `pl011`(`drivers/pl011`) | ○ | ○ |
 | `xtask` | ○ | × |
 | `arch-aarch64` | × | ○ |
 | `bsp-qemu-virt` | × | ○(QEMU で起動するイメージ) |

@@ -9,7 +9,7 @@ use std::fmt;
 pub const TARGET: &str = "aarch64-unknown-none";
 
 /// `TARGET` 向けにビルド・検査するクレート。クレートが増えたらここに足す。
-pub const TARGET_CRATES: &[&str] = &["hal", "arch-aarch64", "bsp-qemu-virt"];
+pub const TARGET_CRATES: &[&str] = &["hal", "kernel", "pl011", "arch-aarch64", "bsp-qemu-virt"];
 
 /// ホストではビルドできない(`TARGET` 専用の)クレート。ホストのテストと clippy から外す。
 pub const TARGET_ONLY_CRATES: &[&str] = &["arch-aarch64", "bsp-qemu-virt"];

@@ -1,6 +1,6 @@
 //! QEMU `-M virt` 用のカーネルイメージ。
 //!
-//! 今はカーネル内テスト(QEMU の結合テスト)を動かす入れ物。通常起動は M1 で作る。
+//! BSP は「どのドライバをどのアドレスで使うか」の配線だけを持つ。
 #![no_std]
 #![no_main]
 #![feature(custom_test_frameworks)]
@@ -10,12 +10,28 @@
 #[cfg(test)]
 mod ktest;
 
+use hal::mmio::MmioRegion;
+use kernel::sync::SpinLock;
+use pl011::Pl011;
+
+/// `virt` の PL011 のアドレスとクロック(QEMU の `hw/arm/virt.c` より)
+const UART_BASE: usize = 0x0900_0000;
+const UART_CLOCK_HZ: u32 = 24_000_000;
+
+// SAFETY: UART_BASE は virt の PL011。この static 以外から同じ領域を触らない
+static UART: SpinLock<Pl011<MmioRegion>> =
+    SpinLock::new(Pl011::new(unsafe { MmioRegion::new(UART_BASE) }));
+
 /// `arch_aarch64::boot` の `_start` から呼ばれる。`dtb` はデバイスツリーのアドレス。
 #[unsafe(no_mangle)]
 extern "C" fn kernel_main(_dtb: usize) -> ! {
+    UART.lock().init(UART_CLOCK_HZ, 115_200);
+    kernel::console::set_console(&UART);
+
     #[cfg(test)]
     test_main();
 
+    kernel::kmain("qemu-virt");
     arch_aarch64::semihosting::exit(0)
 }
 

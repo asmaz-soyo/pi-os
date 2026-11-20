@@ -15,11 +15,34 @@ version = "0.1.0"
 dependencies = [
  "arch-aarch64",
  "hal",
+ "kernel",
+ "pl011",
 ]
 
 [[package]]
 name = "hal"
 version = "0.1.0"
+
+[[package]]
+name = "kernel"
+version = "0.1.0"
+dependencies = [
+ "hal",
+ "spin",
+]
+
+[[package]]
+name = "pl011"
+version = "0.1.0"
+dependencies = [
+ "hal",
+]
+
+[[package]]
+name = "spin"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 
 [[package]]
 name = "xtask"

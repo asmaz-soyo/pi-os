@@ -8,6 +8,8 @@ publish = false
 [dependencies]
 hal = { path = "../../hal" }
 arch-aarch64 = { path = "../../arch/aarch64" }
+kernel = { path = "../../kernel" }
+pl011 = { path = "../../drivers/pl011" }
 
 [[bin]]
 name = "bsp-qemu-virt"
