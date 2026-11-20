@@ -115,6 +115,16 @@ impl PartialEq for Action {
 const TRACKED: usize = 512;
 static UNIMPLEMENTED: [AtomicU32; TRACKED] = [const { AtomicU32::new(0) }; TRACKED];
 
+/// 呼ばれたのに未実装だったシステムコール:(番号, 回数)
+pub fn unimplemented_list() -> alloc::vec::Vec<(u64, u32)> {
+    UNIMPLEMENTED
+        .iter()
+        .enumerate()
+        .map(|(nr, c)| (nr as u64, c.load(Ordering::Relaxed)))
+        .filter(|&(_, c)| c > 0)
+        .collect()
+}
+
 pub fn unimplemented_count(nr: u64) -> u32 {
     UNIMPLEMENTED
         .get(nr as usize)

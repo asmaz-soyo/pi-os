@@ -355,6 +355,7 @@ fn kernel_build(bsp: Bsp) -> Cmd {
 pub const SHELL_SCRIPT: &[(&str, &str)] = &[
     ("$ ", "hello\r"),
     ("$ ", "ls /\r"),
+    ("$ ", "cat /proc/version\r"),
     ("$ ", "qjs\r"),
     ("qjs > ", "1+2\r"),
     ("qjs > ", "\x04"),

@@ -257,6 +257,11 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn procfs_shows_the_process_and_memory() {
+            assert_eq!(boot::run_program("/bin/procread", &[b"procread"]), Ok(0));
+        }
+
+        #[test_case]
         fn fp_simd_is_usable() {
             let x = core::hint::black_box(1.5f64);
             assert_eq!(x * 2.0, 3.0);

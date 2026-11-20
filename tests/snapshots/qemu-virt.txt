@@ -16,7 +16,10 @@ bin
 dev
 etc
 hello.js
+proc
 tmp
+pi-os:/$ cat /proc/version
+Pi-OS version 0.1.0 (aarch64)
 pi-os:/$ qjs
 QuickJS - Type "\h" for help
 qjs > {..}

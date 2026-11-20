@@ -237,6 +237,9 @@ pub fn spawn_user(image: &[u8], argv: &[&[u8]]) -> Result<kernel::process::Pid, 
     let (vfs, console) = vfs();
     let mut process = Process::new(mem, loaded, vfs, console);
     process.new_space = new_user_space;
+    let name = argv.first().map_or(&b""[..], |a| a);
+    let name = name.rsplit(|&c| c == b'/').next().unwrap_or(name);
+    process.name = alloc::string::String::from_utf8_lossy(name).into_owned();
 
     // EL0t(SPSR.M = 0)、割り込みは許可した状態で入口から始める
     let frame = Box::new(TrapFrame {
@@ -278,7 +281,7 @@ pub fn run_user(image: &[u8], argv: &[&[u8]]) -> Result<i32, Errno> {
     Ok(wait(pid))
 }
 
-/// ルートに initramfs、`/dev` に devfs、`/tmp` に tmpfs をマウントした VFS(最初の呼び出しで作る)。
+/// ルートに initramfs、`/dev` に devfs、`/tmp` に tmpfs、`/proc` に procfs をマウントした VFS。
 fn vfs() -> (Arc<Vfs>, Arc<dyn File>) {
     static VFS: spin::Once<(Arc<Vfs>, Arc<ConsoleFile>)> = spin::Once::new();
     let (vfs, console) = VFS.call_once(|| {
@@ -287,6 +290,7 @@ fn vfs() -> (Arc<Vfs>, Arc<dyn File>) {
         let mut vfs = Vfs::new(Arc::new(root));
         vfs.mount("/dev", Arc::new(Devfs::new(console.clone())));
         vfs.mount("/tmp", Arc::new(kernel::fs::tmpfs::Tmpfs::new()));
+        vfs.mount("/proc", Arc::new(kernel::fs::procfs::Procfs::new()));
         (Arc::new(vfs), console)
     });
     (vfs.clone(), console.clone())

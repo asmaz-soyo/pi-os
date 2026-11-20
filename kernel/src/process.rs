@@ -51,6 +51,8 @@ fn no_space() -> Result<alloc::boxed::Box<dyn hal::mmu::AddressSpace>, crate::Er
 
 pub struct Process {
     pub pid: Pid,
+    /// プログラムの名前(/proc/<pid>/status の Name)
+    pub name: String,
     /// 親のプロセス(カーネルが直接動かしたものは 0)
     pub ppid: Pid,
     pub new_space: SpaceFactory,
@@ -80,6 +82,7 @@ impl Process {
         }
         Self {
             pid: 0,
+            name: String::new(),
             ppid: 0,
             new_space: no_space,
             mem,
@@ -100,6 +103,7 @@ impl Process {
         let mem = self.mem.fork(space)?;
         Ok(Process {
             pid: 0,
+            name: self.name.clone(),
             ppid: self.pid,
             new_space: self.new_space,
             mem,
@@ -121,6 +125,8 @@ pub type Pid = crate::sched::Tid;
 /// プロセスの表。動いているプロセスと、終わって終了ステータスだけが残ったもの(ゾンビ)を持つ。
 pub struct ProcessTable {
     live: SpinLock<BTreeMap<Pid, Process>>,
+    /// 動いているプロセスの (親, 名前)。システムコールで取り出されている間も引ける(/proc 用)
+    info: SpinLock<BTreeMap<Pid, (Pid, String)>>,
     /// 終わったプロセス:番号 → (親の番号, 終わり方)
     zombies: SpinLock<BTreeMap<Pid, (Pid, ExitStatus)>>,
 }
@@ -129,12 +135,34 @@ impl ProcessTable {
     pub const fn new() -> Self {
         Self {
             live: SpinLock::new(BTreeMap::new()),
+            info: SpinLock::new(BTreeMap::new()),
             zombies: SpinLock::new(BTreeMap::new()),
         }
     }
 
     pub fn insert(&self, pid: Pid, p: Process) {
+        self.add_info(pid, p.ppid, &p.name);
         self.live.lock().insert(pid, p);
+    }
+
+    pub fn add_info(&self, pid: Pid, ppid: Pid, name: &str) {
+        self.info.lock().insert(pid, (ppid, String::from(name)));
+    }
+
+    /// 名前を変える(execve のとき)
+    pub fn rename(&self, pid: Pid, name: &str) {
+        if let Some(entry) = self.info.lock().get_mut(&pid) {
+            entry.1 = String::from(name);
+        }
+    }
+
+    /// 動いているプロセスの一覧:(番号, 親, 名前)
+    pub fn infos(&self) -> alloc::vec::Vec<(Pid, Pid, String)> {
+        self.info
+            .lock()
+            .iter()
+            .map(|(pid, (ppid, name))| (*pid, *ppid, name.clone()))
+            .collect()
     }
 
     pub fn contains(&self, pid: Pid) -> bool {
@@ -158,6 +186,7 @@ impl ProcessTable {
 
     /// プロセスを終える。メモリはここで返し、終わり方だけを残す。
     pub fn exit(&self, pid: Pid, status: ExitStatus) {
+        self.info.lock().remove(&pid);
         let process = self.live.lock().remove(&pid);
         let ppid = process.as_ref().map_or(0, |p| p.ppid);
         drop(process);
