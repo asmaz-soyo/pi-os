@@ -17,7 +17,7 @@ use kernel::fs::devfs::{ConsoleFile, Devfs};
 use kernel::fs::initramfs::Initramfs;
 use kernel::fs::vfs::{File, Vfs};
 use kernel::mm::user::UserMemory;
-use kernel::process::{PROCESSES, Process};
+use kernel::process::{ExitStatus, PROCESSES, Process};
 use kernel::syscall::Action;
 
 /// カーネルのフレーム割り当て器(物理メモリ)。
@@ -128,13 +128,34 @@ impl Drop for UserSpace {
     }
 }
 
+const SIGSEGV: i32 = 11;
 /// ユーザーのフォールトで終わったときの終了ステータス(128 + SIGSEGV)
-pub const STATUS_SEGV: i32 = 128 + 11;
+pub const STATUS_SEGV: i32 = 128 + SIGSEGV;
 
 /// 今のプロセスを終える(ゾンビにしてタスクを終える)。
-fn finish(status: i32) -> ! {
+fn finish(status: ExitStatus) -> ! {
     PROCESSES.exit(kernel::sched::current(), status);
     kernel::sched::exit_current()
+}
+
+/// fork と execve で使う、新しいユーザー空間を作る関数。
+fn new_user_space() -> Result<Box<dyn AddressSpace>, Errno> {
+    Ok(Box::new(UserSpace::new()?))
+}
+
+/// 子プロセスを、親のトラップフレームの写し(x0 = 0)から動かし始める。
+fn start_child(mut child: Process, frame: &TrapFrame) -> Result<u64, Errno> {
+    let mut child_frame = Box::new(frame.clone());
+    child_frame.x[0] = 0; // 子には 0 を返す
+    let arg = Box::into_raw(child_frame) as usize;
+    let Some(pid) = kernel::sched::spawn(user_task_entry, arg) else {
+        // SAFETY: 渡せなかったので取り戻して捨てる
+        drop(unsafe { Box::from_raw(arg as *mut TrapFrame) });
+        return Err(Errno::EAGAIN);
+    };
+    child.pid = pid;
+    PROCESSES.insert(pid, child);
+    Ok(pid as u64)
 }
 
 /// EL0 から来た同期例外(システムコールとフォールト)。
@@ -150,7 +171,23 @@ pub(crate) fn user_synchronous(frame: &mut TrapFrame) {
             PROCESSES.put_back(pid, process);
             match action {
                 Action::Return(value) => frame.x[0] = value,
-                Action::Exit(status) => finish(status),
+                Action::Exit(status) => finish(ExitStatus::Code(status)),
+                Action::Fork(child) => {
+                    frame.x[0] = match start_child(*child, frame) {
+                        Ok(pid) => pid,
+                        Err(e) => e.as_syscall_return(),
+                    }
+                }
+                Action::Exec { entry, sp } => {
+                    // 新しいプログラムの入口から、レジスタを空にして始める
+                    PROCESSES.with(pid, |p| p.mem.activate());
+                    *frame = TrapFrame {
+                        elr: entry,
+                        sp_el0: sp,
+                        spsr: 0,
+                        ..TrapFrame::default()
+                    };
+                }
             }
         }
         _ => {
@@ -160,7 +197,7 @@ pub(crate) fn user_synchronous(frame: &mut TrapFrame) {
                 frame.elr,
                 frame.far
             );
-            finish(STATUS_SEGV)
+            finish(ExitStatus::Signal(SIGSEGV))
         }
     }
 }
@@ -170,7 +207,7 @@ pub(crate) fn before_return_to_user() {
     let pid = kernel::sched::current();
     // 保留中のシグナル(今は「強制終了」だけ)
     if let Some(Some(sig)) = PROCESSES.with(pid, |p| p.pending_kill.take()) {
-        finish(128 + sig);
+        finish(ExitStatus::Signal(sig));
     }
 }
 
@@ -198,7 +235,8 @@ pub fn spawn_user(image: &[u8], argv: &[&[u8]]) -> Result<kernel::process::Pid, 
     );
     let loaded = kernel::exec::load(&mut mem, image, argv, &[], random)?;
     let (vfs, console) = vfs();
-    let process = Process::new(mem, loaded, vfs, console);
+    let mut process = Process::new(mem, loaded, vfs, console);
+    process.new_space = new_user_space;
 
     // EL0t(SPSR.M = 0)、割り込みは許可した状態で入口から始める
     let frame = Box::new(TrapFrame {
@@ -214,15 +252,16 @@ pub fn spawn_user(image: &[u8], argv: &[&[u8]]) -> Result<kernel::process::Pid, 
         return Err(Errno::ENOMEM);
     };
     // 新しいタスクは、このタスクが譲るまで動かないので、ここで表に入れてよい
+    process.pid = pid;
     PROCESSES.insert(pid, process);
     Ok(pid)
 }
 
-/// プロセスが終わるのを待ち、終了ステータスを返す。
+/// プロセスが終わるのを待ち、終了ステータス(シグナルなら 128 + 番号)を返す。
 pub fn wait(pid: kernel::process::Pid) -> i32 {
     loop {
         if let Some(status) = PROCESSES.try_wait(pid) {
-            return status;
+            return status.shell_code();
         }
         kernel::sched::yield_now();
     }

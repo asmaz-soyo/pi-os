@@ -9,6 +9,7 @@ pub enum Errno {
     ESRCH = 3,
     EINTR = 4,
     EIO = 5,
+    E2BIG = 7,
     ENOEXEC = 8,
     EBADF = 9,
     ECHILD = 10,
@@ -27,6 +28,7 @@ pub enum Errno {
     ERANGE = 34,
     ENAMETOOLONG = 36,
     ENOSYS = 38,
+    ELOOP = 40,
 }
 
 impl Errno {
@@ -44,6 +46,7 @@ pub fn name(errno: i32) -> Option<&'static str> {
         3 => "ESRCH",
         4 => "EINTR",
         5 => "EIO",
+        7 => "E2BIG",
         8 => "ENOEXEC",
         9 => "EBADF",
         10 => "ECHILD",
@@ -62,6 +65,7 @@ pub fn name(errno: i32) -> Option<&'static str> {
         34 => "ERANGE",
         36 => "ENAMETOOLONG",
         38 => "ENOSYS",
+        40 => "ELOOP",
         _ => return None,
     })
 }

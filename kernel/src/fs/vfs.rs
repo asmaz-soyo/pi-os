@@ -103,7 +103,8 @@ impl OpenFile {
     }
 }
 
-/// ファイル記述子の表。
+/// ファイル記述子の表。複製すると(fork)、開いたファイルは共有される。
+#[derive(Clone)]
 pub struct FdTable {
     fds: Vec<Option<Arc<OpenFile>>>,
 }

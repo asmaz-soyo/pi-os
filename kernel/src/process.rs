@@ -15,7 +15,45 @@ use alloc::sync::Arc;
 /// mmap で場所を選ぶときに使い始めるアドレス
 pub const MMAP_BASE: u64 = 0x0000_4000_0000_0000;
 
+/// プロセスの終わり方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitStatus {
+    /// exit(n) で終わった
+    Code(i32),
+    /// シグナルで終わった(フォールト、強制終了)
+    Signal(i32),
+}
+
+impl ExitStatus {
+    /// wait4 が返す値(Linux と同じ形:終了コードは 8 ビット左、シグナルは下位 7 ビット)
+    pub fn wait_status(self) -> u32 {
+        match self {
+            Self::Code(n) => ((n as u32) & 0xff) << 8,
+            Self::Signal(s) => (s as u32) & 0x7f,
+        }
+    }
+
+    /// シェルが `$?` に入れる値(シグナルなら 128 + 番号)
+    pub fn shell_code(self) -> i32 {
+        match self {
+            Self::Code(n) => n,
+            Self::Signal(s) => 128 + s,
+        }
+    }
+}
+
+/// 新しいユーザー空間を作る関数(BSP が用意する。fork と execve で使う)
+pub type SpaceFactory = fn() -> Result<alloc::boxed::Box<dyn hal::mmu::AddressSpace>, crate::Errno>;
+
+fn no_space() -> Result<alloc::boxed::Box<dyn hal::mmu::AddressSpace>, crate::Errno> {
+    Err(crate::Errno::ENOMEM)
+}
+
 pub struct Process {
+    pub pid: Pid,
+    /// 親のプロセス(カーネルが直接動かしたものは 0)
+    pub ppid: Pid,
+    pub new_space: SpaceFactory,
     pub mem: UserMemory,
     /// プログラムの入口と初期スタック
     pub entry: Loaded,
@@ -41,6 +79,9 @@ impl Process {
                 .expect("empty fd table");
         }
         Self {
+            pid: 0,
+            ppid: 0,
+            new_space: no_space,
             mem,
             entry,
             brk: entry.brk,
@@ -52,6 +93,26 @@ impl Process {
             pending_kill: None,
         }
     }
+
+    /// 自分の複製を作る(fork)。メモリは写し、開いたファイルは共有する。
+    pub fn fork(&mut self) -> Result<Process, crate::Errno> {
+        let space = (self.new_space)()?;
+        let mem = self.mem.fork(space)?;
+        Ok(Process {
+            pid: 0,
+            ppid: self.pid,
+            new_space: self.new_space,
+            mem,
+            entry: self.entry,
+            brk: self.brk,
+            mmap_next: self.mmap_next,
+            fds: self.fds.clone(),
+            cwd: self.cwd.clone(),
+            vfs: self.vfs.clone(),
+            cred: self.cred.clone(),
+            pending_kill: None,
+        })
+    }
 }
 
 /// プロセスの番号(タスクの番号と同じ)
@@ -60,7 +121,8 @@ pub type Pid = crate::sched::Tid;
 /// プロセスの表。動いているプロセスと、終わって終了ステータスだけが残ったもの(ゾンビ)を持つ。
 pub struct ProcessTable {
     live: SpinLock<BTreeMap<Pid, Process>>,
-    zombies: SpinLock<BTreeMap<Pid, i32>>,
+    /// 終わったプロセス:番号 → (親の番号, 終わり方)
+    zombies: SpinLock<BTreeMap<Pid, (Pid, ExitStatus)>>,
 }
 
 impl ProcessTable {
@@ -94,16 +156,55 @@ impl ProcessTable {
         self.live.lock().get_mut(&pid).map(f)
     }
 
-    /// プロセスを終える。メモリはここで返し、終了ステータスだけを残す。
-    pub fn exit(&self, pid: Pid, status: i32) {
+    /// プロセスを終える。メモリはここで返し、終わり方だけを残す。
+    pub fn exit(&self, pid: Pid, status: ExitStatus) {
         let process = self.live.lock().remove(&pid);
+        let ppid = process.as_ref().map_or(0, |p| p.ppid);
         drop(process);
-        self.zombies.lock().insert(pid, status);
+        self.add_zombie(pid, ppid, status);
     }
 
-    /// 終わっていれば終了ステータスを返し、ゾンビを片付ける。
-    pub fn try_wait(&self, pid: Pid) -> Option<i32> {
-        self.zombies.lock().remove(&pid)
+    pub fn add_zombie(&self, pid: Pid, ppid: Pid, status: ExitStatus) {
+        self.zombies.lock().insert(pid, (ppid, status));
+    }
+
+    /// 終わっていれば終わり方を返し、ゾンビを片付ける。
+    pub fn try_wait(&self, pid: Pid) -> Option<ExitStatus> {
+        self.zombies.lock().remove(&pid).map(|(_, s)| s)
+    }
+
+    /// `ppid` の子(`pid` が Some ならその子だけ)のうち、終わったものを1つ片付けて返す。
+    /// まだ終わっていなければ `Ok(None)`、当てはまる子がいなければ `ECHILD`。
+    pub fn wait_child(
+        &self,
+        ppid: Pid,
+        pid: Option<Pid>,
+    ) -> Result<Option<(Pid, ExitStatus)>, crate::Errno> {
+        let matches = |child: Pid| pid.is_none_or(|p| p == child);
+        {
+            let mut zombies = self.zombies.lock();
+            let found = zombies
+                .iter()
+                .find(|(child, (parent, _))| *parent == ppid && matches(**child))
+                .map(|(child, _)| *child);
+            if let Some(child) = found {
+                let (_, status) = zombies.remove(&child).expect("found above");
+                return Ok(Some((child, status)));
+            }
+        }
+        let alive = self
+            .live
+            .lock()
+            .iter()
+            .any(|(child, p)| p.ppid == ppid && matches(*child));
+        // 子がシステムコールの途中で表の外にいることがあるので、番号を指定されたときは
+        // スケジューラのタスクとして生きているかでも確かめる
+        let alive = alive || pid.is_some_and(crate::sched::is_alive);
+        if alive {
+            Ok(None)
+        } else {
+            Err(crate::Errno::ECHILD)
+        }
     }
 }
 
@@ -149,9 +250,9 @@ mod tests {
         let (p, _) = process();
         table.insert(5, p);
         assert_eq!(table.try_wait(5), None, "still running");
-        table.exit(5, 42);
+        table.exit(5, ExitStatus::Code(42));
         assert!(!table.contains(5), "memory is released at exit");
-        assert_eq!(table.try_wait(5), Some(42));
+        assert_eq!(table.try_wait(5), Some(ExitStatus::Code(42)));
         assert_eq!(table.try_wait(5), None, "collected only once");
     }
 

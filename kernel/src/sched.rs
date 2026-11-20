@@ -251,6 +251,14 @@ pub fn take_resched() -> bool {
     RESCHED.swap(false, core::sync::atomic::Ordering::Relaxed)
 }
 
+/// タスクが生きているか(終わっていないか)。
+pub fn is_alive(tid: Tid) -> bool {
+    SCHED
+        .lock()
+        .as_ref()
+        .is_some_and(|s| s.tasks.get(&tid).is_some_and(|t| t.state != State::Dead))
+}
+
 /// 動いているタスクの数(テストとデバッグ用)。
 pub fn task_count() -> usize {
     SCHED.lock().as_ref().map_or(0, |s| {

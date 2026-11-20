@@ -28,6 +28,7 @@
 | 135 | `rt_sigprocmask` | 4 |
 | 160 | `uname` | 1 |
 | 172 | `getpid` | 0 |
+| 173 | `getppid` | 0 |
 | 174 | `getuid` | 0 |
 | 175 | `geteuid` | 0 |
 | 176 | `getgid` | 0 |
@@ -36,9 +37,12 @@
 | 214 | `brk` | 1 |
 | 215 | `munmap` | 2 |
 | 216 | `mremap` | 5 |
+| 220 | `clone` | 5 |
+| 221 | `execve` | 3 |
 | 222 | `mmap` | 6 |
 | 226 | `mprotect` | 3 |
 | 233 | `madvise` | 3 |
+| 260 | `wait4` | 4 |
 | 278 | `getrandom` | 3 |
 
-合計 35 個
+合計 39 個

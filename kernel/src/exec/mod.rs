@@ -142,7 +142,7 @@ fn build_stack(
 }
 
 #[cfg(test)]
-mod test_elf;
+pub(crate) mod test_elf;
 
 #[cfg(test)]
 mod tests {

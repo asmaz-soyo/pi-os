@@ -78,3 +78,11 @@ pub fn getrandom(p: &mut Process, buf: u64, len: u64) -> Result<u64, Errno> {
     p.mem.copy_to_user(VirtAddr(buf), &b)?;
     Ok(len as u64)
 }
+
+/// カーネルの中で使う乱数(execve の AT_RANDOM など)。
+pub fn fill_random(buf: &mut [u8]) {
+    for chunk in buf.chunks_mut(8) {
+        let r = next_random().to_le_bytes();
+        chunk.copy_from_slice(&r[..chunk.len()]);
+    }
+}

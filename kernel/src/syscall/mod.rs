@@ -42,13 +42,17 @@ pub mod nr {
     pub const GETEUID: u64 = 175;
     pub const GETGID: u64 = 176;
     pub const GETEGID: u64 = 177;
+    pub const GETPPID: u64 = 173;
     pub const GETTID: u64 = 178;
     pub const BRK: u64 = 214;
     pub const MUNMAP: u64 = 215;
     pub const MREMAP: u64 = 216;
+    pub const CLONE: u64 = 220;
+    pub const EXECVE: u64 = 221;
     pub const MMAP: u64 = 222;
     pub const MPROTECT: u64 = 226;
     pub const MADVISE: u64 = 233;
+    pub const WAIT4: u64 = 260;
     pub const GETRANDOM: u64 = 278;
 }
 
@@ -56,12 +60,37 @@ pub mod nr {
 pub const TIOCGWINSZ: u64 = 0x5413;
 
 /// システムコールのあとにすること。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     /// x0 にこの値を入れてユーザーに戻る
     Return(u64),
     /// プロセスを終了する(終了ステータス)
     Exit(i32),
+    /// 子プロセスを動かし始める(fork)。親には子の番号、子には 0 を返す
+    Fork(alloc::boxed::Box<Process>),
+    /// 新しいプログラムの入口から始める(execve)。ユーザー空間は差し替え済み
+    Exec { entry: u64, sp: u64 },
+}
+
+impl core::fmt::Debug for Action {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Return(v) => write!(f, "Return({v:#x})"),
+            Self::Exit(s) => write!(f, "Exit({s})"),
+            Self::Fork(_) => write!(f, "Fork(..)"),
+            Self::Exec { entry, sp } => write!(f, "Exec {{ entry: {entry:#x}, sp: {sp:#x} }}"),
+        }
+    }
+}
+
+impl PartialEq for Action {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Return(a), Self::Return(b)) => a == b,
+            (Self::Exit(a), Self::Exit(b)) => a == b,
+            (Self::Exec { entry: a, sp: b }, Self::Exec { entry: c, sp: d }) => a == c && b == d,
+            _ => false,
+        }
+    }
 }
 
 /// 番号ごとの「未実装で呼ばれた回数」
@@ -137,6 +166,7 @@ table! {
     nr::UNAME, "uname", 1 => |p, a| result(misc::uname(p, a[0]));
     nr::GETPID, "getpid", 0 => |p, a| Action::Return(1);
     // 資格情報(ADR-0005)
+    nr::GETPPID, "getppid", 0 => |p, a| Action::Return(p.ppid as u64);
     nr::GETUID, "getuid", 0 => |p, a| Action::Return(p.cred.uid as u64);
     nr::GETEUID, "geteuid", 0 => |p, a| Action::Return(p.cred.euid as u64);
     nr::GETGID, "getgid", 0 => |p, a| Action::Return(p.cred.gid as u64);
@@ -146,10 +176,13 @@ table! {
     nr::MUNMAP, "munmap", 2 => |p, a| result(mm::munmap(p, a[0], a[1]));
     // 断ると、libc は「新しく確保してコピー」に切り替える
     nr::MREMAP, "mremap", 5 => |p, a| Action::Return(crate::Errno::ENOMEM.as_syscall_return());
+    nr::CLONE, "clone", 5 => |p, a| proc::clone(p, a[0]);
+    nr::EXECVE, "execve", 3 => |p, a| proc::execve(p, a[0], a[1], a[2]);
     nr::MMAP, "mmap", 6 => |p, a| result(mm::mmap(p, a[0], a[1], a[2], a[3], a[4], a[5]));
     nr::MPROTECT, "mprotect", 3 => |p, a| result(mm::mprotect(p, a[0], a[1], a[2]));
     // 助言は無視してよい
     nr::MADVISE, "madvise", 3 => |p, a| Action::Return(0);
+    nr::WAIT4, "wait4", 4 => |p, a| result(proc::wait4(p, a[0] as i64, a[1], a[2]));
     nr::GETRANDOM, "getrandom", 3 => |p, a| result(misc::getrandom(p, a[0], a[1]));
 }
 
@@ -193,9 +226,11 @@ pub fn dispatch(p: &mut Process, nr: u64, a: [u64; 6]) -> Action {
     };
     let action = (syscall.handler)(p, a);
     if TRACE.load(Ordering::Relaxed) {
-        match action {
-            Action::Return(ret) => crate::println!("{}", trace_line(syscall, &a, ret)),
+        match &action {
+            &Action::Return(ret) => crate::println!("{}", trace_line(syscall, &a, ret)),
             Action::Exit(status) => crate::println!("[trace] {}({status}) = ?", syscall.name),
+            Action::Fork(_) => crate::println!("[trace] {}(…) = (child)", syscall.name),
+            Action::Exec { .. } => crate::println!("[trace] {}(…) = (new program)", syscall.name),
         }
     }
     action
@@ -203,6 +238,8 @@ pub fn dispatch(p: &mut Process, nr: u64, a: [u64; 6]) -> Action {
 
 #[cfg(test)]
 mod tests_mm;
+#[cfg(test)]
+mod tests_proc;
 #[cfg(test)]
 mod tests_tty;
 
@@ -261,6 +298,10 @@ pub(crate) mod tests {
             .as_nanos() as u64
     }
 
+    fn fake_space() -> Result<Box<dyn hal::mmu::AddressSpace>, crate::Errno> {
+        Ok(Box::new(crate::mm::user::tests::FakeSpace::default()))
+    }
+
     pub fn process() -> (Process, Capture) {
         crate::time::set_counter(host_counter, 1_000_000_000);
         let (mut mem, _) = memory();
@@ -274,6 +315,19 @@ pub(crate) mod tests {
         ]);
         crate::fs::tar::tests::set_mode(&mut tar, "etc/motd", 0o644);
         crate::fs::tar::tests::set_mode(&mut tar, "etc/secret", 0o600);
+        // execve のテスト用:小さな ELF と、それを使うシバンのスクリプト
+        let tiny = crate::exec::test_elf::build(
+            crate::exec::elf::EM_AARCH64,
+            &[(crate::exec::elf::PT_LOAD, 5, 0x40_0000, b"CODE", 4)],
+        );
+        let extra = build(&[
+            ("bin/tiny", b'0', &tiny),
+            ("bin/script", b'0', b"#!/bin/tiny -x\n"),
+        ]);
+        tar.truncate(tar.len() - 1024); // 終わりの印を外して足す
+        tar.extend_from_slice(&extra);
+        crate::fs::tar::tests::set_mode(&mut tar, "bin/tiny", 0o755);
+        crate::fs::tar::tests::set_mode(&mut tar, "bin/script", 0o755);
         let root = Initramfs::new(Box::leak(tar.into_boxed_slice())).unwrap();
         let console = Arc::new(ConsoleFile::new(Box::new(out.clone())));
         let mut vfs = Vfs::new(Arc::new(root));
@@ -283,7 +337,9 @@ pub(crate) mod tests {
             sp: SCRATCH + 0x1000,
             brk: 0x50_0000,
         };
-        (Process::new(mem, loaded, Arc::new(vfs), console), out)
+        let mut p = Process::new(mem, loaded, Arc::new(vfs), console);
+        p.new_space = fake_space;
+        (p, out)
     }
 
     pub(crate) fn put(p: &mut Process, va: u64, bytes: &[u8]) {
@@ -299,7 +355,7 @@ pub(crate) mod tests {
     pub(crate) fn call(p: &mut Process, nr: u64, a: [u64; 6]) -> u64 {
         match dispatch(p, nr, a) {
             Action::Return(v) => v,
-            Action::Exit(s) => panic!("unexpected exit {s}"),
+            other => panic!("unexpected {other:?}"),
         }
     }
 

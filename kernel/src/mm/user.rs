@@ -90,6 +90,36 @@ impl UserMemory {
         Ok(())
     }
 
+    pub fn phys(&self) -> &'static dyn PhysMemory {
+        self.phys
+    }
+
+    /// 同じ中身・同じ権限のユーザー空間を `space` に作る(fork 用。今はすべてのページをすぐに写す。
+    /// コピーオンライトは後で)。
+    pub fn fork(&mut self, space: Box<dyn AddressSpace>) -> Result<UserMemory, Errno> {
+        let mut child = UserMemory::new(space, self.phys);
+        let pages: Vec<u64> = self.pages.iter().copied().collect();
+        for page in pages {
+            let va = VirtAddr(page);
+            let (src, flags) = self.space.translate(va).ok_or(Errno::EFAULT)?;
+            let dst = self.phys.alloc_frame().ok_or(Errno::ENOMEM)?;
+            // SAFETY: どちらもこのカーネルが持つ 4KiB のフレーム
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    self.phys.frame_ptr(src),
+                    self.phys.frame_ptr(dst),
+                    PAGE_SIZE as usize,
+                );
+            }
+            if child.space.map_page(va, dst, flags).is_err() {
+                self.phys.release_frame(dst);
+                return Err(Errno::ENOMEM);
+            }
+            child.pages.insert(page);
+        }
+        Ok(child)
+    }
+
     pub fn is_mapped(&self, va: VirtAddr) -> bool {
         self.pages.contains(&va.align_down().0)
     }
