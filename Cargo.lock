@@ -3,6 +3,21 @@
 version = 4
 
 [[package]]
+name = "arch-aarch64"
+version = "0.1.0"
+dependencies = [
+ "hal",
+]
+
+[[package]]
+name = "bsp-qemu-virt"
+version = "0.1.0"
+dependencies = [
+ "arch-aarch64",
+ "hal",
+]
+
+[[package]]
 name = "hal"
 version = "0.1.0"
 

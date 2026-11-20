@@ -243,7 +243,7 @@ CIは「ローカルでも同じコマンドが動く」ことを前提にし、
 - [x] Cargoワークスペースと `rust-toolchain.toml`(nightly、`aarch64-unknown-none`)
 - [x] `hal` クレートに `Console` トレイトと、テスト用のモックを作る(最初のTDD)
 - [x] `xtask` に `build` / `run` / `test` / `ci` を用意する(`run` の中身は M1)
-- [ ] QEMUの結合テストを動かす仕組み(終了コードで成否を返す)
+- [x] QEMUの結合テストを動かす仕組み(終了コードで成否を返す)
 - [ ] GitHub Actionsのワークフロー(`cargo xtask ci` を呼ぶだけ)
 - [ ] `docs/` の雛形、ADRのテンプレート、最初のADR(「Linux互換ABIを採用」「ポート&アダプター構造」)
 - [ ] M0完了後、M1(起動とUART)の最初のテストとして「UART出力のスナップショットで「Hello」を期待する」を書く

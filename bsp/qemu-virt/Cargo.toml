@@ -1,0 +1,15 @@
+[package]
+name = "bsp-qemu-virt"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+hal = { path = "../../hal" }
+arch-aarch64 = { path = "../../arch/aarch64" }
+
+[[bin]]
+name = "bsp-qemu-virt"
+test = true
+bench = false

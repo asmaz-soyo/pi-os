@@ -32,6 +32,7 @@ fn execute(cmd: &Cmd) -> Result<(), String> {
         .expect("xtask lives directly under the workspace root");
     let status = Command::new(&program)
         .args(&cmd.args)
+        .envs(cmd.env.iter().map(|(k, v)| (k, v)))
         .current_dir(root)
         .status()
         .map_err(|e| format!("failed to start `{cmd}`: {e}"))?;
