@@ -17,7 +17,8 @@
 | 権限の入れ物(ADR-0005) | 完了 | — |
 | 実機用イメージの終わり方 | 完了 | — |
 | UART 入力、TTY、JS の REPL | 完了 | `p2-repl` |
-| スケジューラ、fork、シェル、シバン(BusyBox は未:ソースのダウンロード許可待ち) | 完了 | `p2-shell` |
+| スケジューラ、fork、シェル、シバン | 完了 | `p2-shell` |
+| BusyBox(ash とコマンド)、パイプ | 完了 | `p2-busybox` |
 | tmpfs、timerfd、epoll、サービスマネージャ(C 製。Rust 版はツールチェーンの追加待ち) | 完了 | `p2-services` |
 | GPIO 割り込みの fd、リアルタイム優先度、ジッタ計測 | 完了 | `p2-realtime` |
 | ブロック層(virtio-blk、MBR)、ext2 の読み書き、procfs | 完了 | `p2-ext2` |

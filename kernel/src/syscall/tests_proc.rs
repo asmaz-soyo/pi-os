@@ -222,3 +222,20 @@ fn execve_runs_programs_that_are_not_in_memory() {
     assert_eq!(entry, 0x40_1000);
     assert_eq!(p.name, "tiny");
 }
+
+#[test]
+fn prctl_set_name_renames_the_process() {
+    const PR_SET_NAME: u64 = 15;
+    let (mut p, _) = process();
+    put(&mut p, SCRATCH, b"worker\0");
+    assert_eq!(
+        call(&mut p, nr::PRCTL, [PR_SET_NAME, SCRATCH, 0, 0, 0, 0]),
+        0
+    );
+    assert_eq!(p.name, "worker");
+    // ほかの操作はまだない
+    assert_eq!(
+        call(&mut p, nr::PRCTL, [9999, 0, 0, 0, 0, 0]),
+        err(Errno::EINVAL)
+    );
+}

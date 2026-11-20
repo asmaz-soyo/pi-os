@@ -22,6 +22,7 @@ pub mod nr {
     pub const EPOLL_PWAIT: u64 = 22;
     pub const DUP: u64 = 23;
     pub const DUP3: u64 = 24;
+    pub const PIPE2: u64 = 59;
     pub const FCNTL: u64 = 25;
     pub const IOCTL: u64 = 29;
     pub const MKDIRAT: u64 = 34;
@@ -60,6 +61,7 @@ pub mod nr {
     pub const RT_SIGACTION: u64 = 134;
     pub const RT_SIGPROCMASK: u64 = 135;
     pub const UNAME: u64 = 160;
+    pub const PRCTL: u64 = 167;
     pub const GETPID: u64 = 172;
     pub const GETUID: u64 = 174;
     pub const GETEUID: u64 = 175;
@@ -188,6 +190,7 @@ table! {
     nr::CHDIR, "chdir", 1 => |p, a| result(fs::chdir(p, a[0]));
     nr::OPENAT, "openat", 4 => |p, a| result(fs::openat(p, a[0], a[1], a[2], a[3]));
     nr::CLOSE, "close", 1 => |p, a| result(p.fds.close(a[0]).map(|_| 0));
+    nr::PIPE2, "pipe2", 2 => |p, a| result(fs::pipe2(p, a[0], a[1]));
     nr::GETDENTS64, "getdents64", 3 => |p, a| result(fs::getdents64(p, a[0], a[1], a[2]));
     nr::LSEEK, "lseek", 3 => |p, a| result(fs::lseek(p, a[0], a[1] as i64, a[2]));
     nr::READ, "read", 3 => |p, a| result(fs::read(p, a[0], a[1], a[2]));
@@ -227,6 +230,7 @@ table! {
     nr::RT_SIGACTION, "rt_sigaction", 4 => |p, a| Action::Return(0);
     nr::RT_SIGPROCMASK, "rt_sigprocmask", 4 => |p, a| Action::Return(0);
     nr::UNAME, "uname", 1 => |p, a| result(misc::uname(p, a[0]));
+    nr::PRCTL, "prctl", 5 => |p, a| result(misc::prctl(p, a[0], a[1]));
     nr::GETPID, "getpid", 0 => |p, a| Action::Return(1);
     // 資格情報(ADR-0005)
     nr::GETPPID, "getppid", 0 => |p, a| Action::Return(p.ppid as u64);
@@ -301,6 +305,8 @@ pub fn dispatch(p: &mut Process, nr: u64, a: [u64; 6]) -> Action {
 
 #[cfg(test)]
 mod tests_mm;
+#[cfg(test)]
+mod tests_pipe;
 #[cfg(test)]
 mod tests_proc;
 #[cfg(test)]

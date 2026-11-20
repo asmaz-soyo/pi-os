@@ -89,6 +89,21 @@ pub fn sched_getscheduler(p: &mut Process, pid: u64) -> Result<u64, Errno> {
     })
 }
 
+/// prctl(option, arg2, ...):今は PR_SET_NAME(プロセスの名前を変える。/proc の Name に出る)だけ。
+pub fn prctl(p: &mut Process, option: u64, arg: u64) -> Result<u64, Errno> {
+    const PR_SET_NAME: u64 = 15;
+    match option {
+        PR_SET_NAME => {
+            // 名前は最大 16 バイト(終わりの 0 を含む)
+            let raw = p.mem.read_cstr(VirtAddr(arg), 64)?;
+            p.name = alloc::string::String::from_utf8_lossy(&raw[..raw.len().min(15)]).into_owned();
+            crate::process::PROCESSES.rename(p.pid, &p.name);
+            Ok(0)
+        }
+        _ => Err(Errno::EINVAL),
+    }
+}
+
 /// uname(buf):`struct utsname`(65 バイトの文字列 × 6)
 pub fn uname(p: &mut Process, buf: u64) -> Result<u64, Errno> {
     let fields: [&[u8]; 6] = [b"Pi-OS", b"pi", b"0.1.0", b"#1 Pi-OS", b"aarch64", b""];

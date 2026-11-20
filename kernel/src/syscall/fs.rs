@@ -145,6 +145,7 @@ pub fn getdents64(p: &mut Process, fd: u64, buf: u64, count: u64) -> Result<u64,
             FileKind::Directory => 4,
             FileKind::Regular => 8,
             FileKind::CharDevice => 2,
+            FileKind::Fifo => 1,
         };
         out.extend_from_slice(&e.ino.to_le_bytes());
         out.extend_from_slice(&((index + 1) as u64).to_le_bytes());
@@ -298,6 +299,7 @@ fn stat_bytes(st: &Stat) -> [u8; 128] {
         FileKind::Regular => 0o100000,
         FileKind::Directory => 0o040000,
         FileKind::CharDevice => 0o020000,
+        FileKind::Fifo => 0o010000,
     };
     b[8..16].copy_from_slice(&st.ino.to_le_bytes()); // st_ino
     b[16..20].copy_from_slice(&(kind | st.mode).to_le_bytes()); // st_mode
@@ -398,6 +400,40 @@ pub fn chdir(p: &mut Process, path: u64) -> Result<u64, Errno> {
 }
 
 const O_CLOEXEC: u64 = 0o2000000;
+
+/// pipe2(fds, flags):パイプを作り、読む側と書く側の fd を `int fds[2]` に書く。
+pub fn pipe2(p: &mut Process, fds: u64, flags: u64) -> Result<u64, Errno> {
+    const O_NONBLOCK: u64 = 0o4000;
+    if flags & !(O_CLOEXEC | O_NONBLOCK) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let (reader, writer) = crate::fs::pipe::new();
+    let r = p
+        .fds
+        .insert(OpenFile::new(reader, crate::fs::vfs::O_RDONLY))?;
+    let w = match p
+        .fds
+        .insert(OpenFile::new(writer, crate::fs::vfs::O_WRONLY))
+    {
+        Ok(w) => w,
+        Err(e) => {
+            let _ = p.fds.close(r as u64);
+            return Err(e);
+        }
+    };
+    let mut b = [0u8; 8];
+    b[..4].copy_from_slice(&(r as i32).to_le_bytes());
+    b[4..].copy_from_slice(&(w as i32).to_le_bytes());
+    if let Err(e) = p.mem.copy_to_user(VirtAddr(fds), &b) {
+        let _ = p.fds.close(r as u64);
+        let _ = p.fds.close(w as u64);
+        return Err(e);
+    }
+    let cloexec = flags & O_CLOEXEC != 0;
+    p.fds.set_cloexec(r as u64, cloexec)?;
+    p.fds.set_cloexec(w as u64, cloexec)?;
+    Ok(0)
+}
 const FD_CLOEXEC: u64 = 1;
 
 /// dup(fd)

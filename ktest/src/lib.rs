@@ -250,6 +250,22 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn busybox_applets_run() {
+            let argv: [&[u8]; 3] = [b"busybox", b"echo", b"hello from busybox"];
+            assert_eq!(boot::run_program("/bin/busybox", &argv), Ok(0));
+            // ash で複数のコマンドと算術
+            let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", b"x=$((6*7)); test $x = 42 && ls /etc"];
+            assert_eq!(boot::run_program("/bin/busybox", &argv), Ok(0));
+        }
+
+        #[test_case]
+        fn busybox_shell_pipes_and_command_substitution_work() {
+            let script = b"n=$(seq 1 100 | grep 7 | wc -l); echo \"lines with 7: $n\"; test $n -eq 19";
+            let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
+            assert_eq!(boot::run_program("/bin/busybox", &argv), Ok(0));
+        }
+
+        #[test_case]
         fn a_realtime_task_wakes_on_time_despite_a_busy_task() {
             // 5ms 周期で起き、遅れの最大が 1ms 以内(低い優先度のタスクが CPU を回していても)
             let argv: [&[u8]; 3] = [b"jitter", b"rt", b"1000"];

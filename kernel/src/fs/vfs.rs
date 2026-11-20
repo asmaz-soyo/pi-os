@@ -28,6 +28,8 @@ pub enum FileKind {
     Regular,
     Directory,
     CharDevice,
+    /// パイプ
+    Fifo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

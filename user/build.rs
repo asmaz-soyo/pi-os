@@ -27,6 +27,8 @@ fn main() {
     }
     let qjs = build_quickjs(&root.join("third_party/quickjs"), &out);
     files.push(("bin/qjs".to_string(), std::fs::read(qjs).unwrap()));
+    let busybox = build_busybox(&root.join("third_party/busybox"), &out);
+    files.push(("bin/busybox".to_string(), std::fs::read(busybox).unwrap()));
     collect(&root.join("rootfs"), "", &mut files);
     std::fs::write(out.join("initramfs.tar"), tar(&files)).unwrap();
 }
@@ -120,6 +122,44 @@ fn build_quickjs(src: &Path, out: &Path) -> PathBuf {
     cmd.arg("-lm");
     run(cmd, "building qjs for aarch64-linux-musl");
     qjs
+}
+
+/// BusyBox を、tarball を展開して `pios.config`(機能を絞った設定)でビルドする。
+fn build_busybox(dir: &Path, out: &Path) -> PathBuf {
+    const VERSION: &str = "busybox-1.38.0";
+    let src = out.join(VERSION);
+    let bin = src.join("busybox_unstripped");
+    if !src.join("Makefile").exists() {
+        let mut cmd = Command::new("tar");
+        cmd.arg("-xjf")
+            .arg(dir.join(format!("{VERSION}.tar.bz2")))
+            .arg("-C")
+            .arg(out);
+        run(cmd, "extracting BusyBox");
+    }
+    let config = std::fs::read(dir.join("pios.config")).unwrap();
+    if std::fs::read(src.join(".config")).ok().as_deref() != Some(&config[..]) {
+        std::fs::write(src.join(".config"), &config).unwrap();
+        let _ = std::fs::remove_file(&bin);
+    }
+    if !bin.exists() {
+        let zig = std::env::var("ZIG").unwrap_or_else(|_| "zig".to_string());
+        let jobs = std::env::var("NUM_JOBS").unwrap_or_else(|_| "4".to_string());
+        let mut cmd = Command::new("make");
+        cmd.current_dir(&src)
+            .env("ZIG_LOCAL_CACHE_DIR", out.join("zig-cache"))
+            .env("ZIG_GLOBAL_CACHE_DIR", out.join("zig-global-cache"))
+            .arg(format!("-j{jobs}"))
+            .arg(format!("CC={zig} cc -target aarch64-linux-musl -s"))
+            .arg("HOSTCC=cc")
+            .arg(format!("AR={zig} ar"))
+            // strip は CC の -s で済ませる(make の strip の段は busybox_unstripped を作った後)
+            .arg("STRIP=true")
+            .arg("busybox_unstripped")
+            .stdout(std::process::Stdio::null());
+        run(cmd, "building BusyBox");
+    }
+    bin
 }
 
 /// `src`(.S か .c)を `bin` にビルドする。それ以外の拡張子なら false。

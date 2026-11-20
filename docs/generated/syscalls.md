@@ -20,6 +20,7 @@
 | 49 | `chdir` | 1 |
 | 56 | `openat` | 4 |
 | 57 | `close` | 1 |
+| 59 | `pipe2` | 2 |
 | 61 | `getdents64` | 3 |
 | 62 | `lseek` | 3 |
 | 63 | `read` | 3 |
@@ -49,6 +50,7 @@
 | 134 | `rt_sigaction` | 4 |
 | 135 | `rt_sigprocmask` | 4 |
 | 160 | `uname` | 1 |
+| 167 | `prctl` | 5 |
 | 172 | `getpid` | 0 |
 | 173 | `getppid` | 0 |
 | 174 | `getuid` | 0 |
@@ -67,4 +69,4 @@
 | 260 | `wait4` | 4 |
 | 278 | `getrandom` | 3 |
 
-合計 61 個
+合計 63 個
