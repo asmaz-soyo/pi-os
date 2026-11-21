@@ -172,9 +172,17 @@ fn new_context(
 /// 書き込みをしばらくまとめつつ、急に電源が切れても失うのは最後の数秒分だけにする
 fn flusher(_: usize) {
     const SEC: u64 = 1_000_000_000;
+    let mut tick = 0u64;
     loop {
         kernel::sched::sleep_until(kernel::time::now_ns() + SEC);
-        if let Err(e) = kernel::block::flush_older_all(5 * SEC) {
+        tick += 1;
+        // 5 秒ごとに、ジャーナルにコミットしただけのものを本来の場所に書く(チェックポイント)
+        let checkpoint = if tick % 5 == 0 {
+            user::sync_filesystems()
+        } else {
+            Ok(())
+        };
+        if let Err(e) = checkpoint.and_then(|_| kernel::block::flush_older_all(5 * SEC)) {
             kernel::println!("flusher: {e:?}");
         }
     }
@@ -298,7 +306,7 @@ pub fn panic(info: &core::panic::PanicInfo) -> ! {
 /// 実機にはその仕組みがないので、メッセージを出して止まる。
 /// ディスクに書いていないものを書いてから、終了する(パニックではない、ふつうの終わり方)。
 pub fn shutdown(code: u32) -> ! {
-    if let Err(e) = kernel::block::sync_all() {
+    if let Err(e) = user::sync_filesystems().and_then(|_| kernel::block::sync_all()) {
         kernel::println!("sync failed: {e:?}");
     }
     exit(code)

@@ -305,6 +305,11 @@ pub trait FileSystem: Send + Sync {
     /// `path` はこのファイルシステムの中の絶対パス(`/` で始まる)
     fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno>;
 
+    /// まだ本来の場所に書いていないもの(ジャーナルにコミットしただけのもの)を書く
+    fn sync(&self) -> Result<(), Errno> {
+        Ok(())
+    }
+
     /// 見つけた名前を VFS の dentry キャッシュに覚えてよいか。名前が VFS を通らずに変わる
     /// ファイルシステム(/proc のプロセス、/dev のデバイス)は false
     fn cacheable(&self) -> bool {
@@ -396,6 +401,14 @@ impl Vfs {
         self.mounts
             .sort_by_key(|(p, _)| core::cmp::Reverse(p.len()));
         self.dentries.lock().clear();
+    }
+
+    /// マウントしているすべてのファイルシステムを sync する
+    pub fn sync(&self) -> Result<(), Errno> {
+        for (_, fs) in &self.mounts {
+            fs.sync()?;
+        }
+        Ok(())
     }
 
     /// `path` と、その下のすべての名前をキャッシュから消す

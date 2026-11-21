@@ -369,6 +369,12 @@ fn disk_filesystems() -> alloc::vec::Vec<(alloc::string::String, &'static str, A
     out
 }
 
+/// マウントしているファイルシステムの、まだ本来の場所に書いていないもの(ジャーナルに
+/// コミットしただけのもの)を書く
+pub fn sync_filesystems() -> Result<(), Errno> {
+    vfs().0.sync()
+}
+
 /// プログラム `path` を新しいプロセスとして動かし始める。
 pub fn spawn_program(path: &str, argv: &[&[u8]]) -> Result<kernel::process::Pid, Errno> {
     let file = vfs().0.lookup(path)?;

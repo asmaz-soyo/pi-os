@@ -42,6 +42,20 @@ struct Inner {
     journal_ino: u32,
     /// 進行中のトランザクション:ブロック番号 → 新しい中身。操作の間の書き込みはここに貯める
     tx: crate::sync::SpinLock<Option<alloc::collections::BTreeMap<u64, Vec<u8>>>>,
+    /// ジャーナルの今の様子(ジャーナルがあるときだけ)
+    journal_state: crate::sync::SpinLock<Option<JournalState>>,
+}
+
+/// コミットしたが、まだ本来の場所に書いていない(チェックポイントしていない)ものの管理
+struct JournalState {
+    /// 次のトランザクションの番号
+    next_seq: u32,
+    /// ログの次の空きブロック
+    head: u32,
+    /// まだチェックポイントしていない最初のトランザクションの位置(0 ならジャーナルは空)
+    tail: u32,
+    /// コミット済みの最新の中身:ブロック番号 → 中身(読むときはディスクより先にここを見る)
+    committed: alloc::collections::BTreeMap<u64, Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -92,20 +106,28 @@ fn le32(b: &[u8], off: usize) -> u32 {
 
 impl Inner {
     /// ディスクのバイト位置 `offset` から `buf` を読む
-    /// 読む。トランザクションの途中なら、まだディスクに書いていない新しい中身を優先する
+    /// 読む。まだディスクに書いていない新しい中身(進行中のトランザクション、コミットしたが
+    /// チェックポイントしていないもの)があれば、そちらを優先する
     fn read_bytes(&self, offset: u64, buf: &mut [u8]) -> Result<(), Errno> {
         let tx = self.tx.lock();
-        let Some(blocks) = tx.as_ref().filter(|b| !b.is_empty()) else {
+        let js = self.journal_state.lock();
+        let tx_blocks = tx.as_ref().filter(|b| !b.is_empty());
+        let committed = js.as_ref().map(|j| &j.committed).filter(|c| !c.is_empty());
+        if tx_blocks.is_none() && committed.is_none() {
+            drop(js);
             drop(tx);
             return self.raw_read(offset, buf);
-        };
+        }
         let bs = self.block_size;
         let mut done = 0;
         while done < buf.len() {
             let pos = offset + done as u64;
             let (block, within) = (pos / bs, (pos % bs) as usize);
             let n = (bs as usize - within).min(buf.len() - done);
-            match blocks.get(&block) {
+            let newer = tx_blocks
+                .and_then(|t| t.get(&block))
+                .or_else(|| committed.and_then(|c| c.get(&block)));
+            match newer {
                 Some(data) => buf[done..done + n].copy_from_slice(&data[within..within + n]),
                 None => self.raw_read(pos, &mut buf[done..done + n])?,
             }
@@ -132,7 +154,15 @@ impl Inner {
                 alloc::collections::btree_map::Entry::Vacant(e) => {
                     let mut old = vec![0u8; bs as usize];
                     if n < bs as usize {
-                        self.raw_read(block * bs, &mut old)?;
+                        // コミット済みでまだディスクにない中身があれば、それが今の中身
+                        let js = self.journal_state.lock();
+                        match js.as_ref().and_then(|j| j.committed.get(&block)) {
+                            Some(c) => old.copy_from_slice(c),
+                            None => {
+                                drop(js);
+                                self.raw_read(block * bs, &mut old)?
+                            }
+                        }
                     }
                     e.insert(old)
                 }
@@ -150,6 +180,17 @@ impl Inner {
     /// チェックポイントで中身を 0 で上書きしてしまう)
     fn write_data(&self, block: u64, within: usize, data: &[u8]) -> Result<(), Errno> {
         let bs = self.block_size;
+        // ジャーナルにこのブロックの古い(メタデータとしての)中身が残っていると、電源が切れたときに
+        // リプレイがファイルの中身を上書きしてしまう。先にチェックポイントしてジャーナルを空にする
+        // (Linux なら取り消し(revoke)のレコードで防ぐところ)
+        let stale = self
+            .journal_state
+            .lock()
+            .as_ref()
+            .is_some_and(|j| j.committed.contains_key(&block));
+        if stale {
+            self.checkpoint()?;
+        }
         let pending = self.tx.lock().as_mut().and_then(|t| t.remove(&block));
         match pending {
             Some(mut whole) => {
@@ -761,28 +802,46 @@ impl Inner {
         self.disk.lock().flush().map_err(|_| Errno::EIO)
     }
 
-    /// トランザクションをジャーナルに書いてから、本来の場所に書く。
+    /// トランザクションをジャーナルにコミットする(本来の場所に書くのは、後でまとめて:`checkpoint`)。
     ///
-    /// 1. ジャーナルに記述ブロックと中身
+    /// 1. ログの続きに、記述ブロックと中身
     /// 2. コミットブロック
-    /// 3. ジャーナルのスーパーブロックで「ここから読め」と指し、ファイルシステムに「要リカバリ」の印
-    /// 4. 本来の場所に書く
-    /// 5. ジャーナルを空に戻し、印を消す
+    /// 3. ジャーナルが空だったら、「要リカバリ」の印を立ててから、スーパーブロックで「ここから読め」と指す
     ///
-    /// 各段の間で、ディスクに書き終わるのを待つ。どこで電源が切れても、3 より前なら何も変わっていない、
-    /// 3 より後ならマウントのときのリプレイで全部変わる
+    /// 各段の間で、ディスクに書き終わるのを待つ。コミットより前に電源が切れたら、このトランザクションは
+    /// なかったことになる。後なら、マウントのときのリプレイで本来の場所に書かれる
     fn commit(&self, blocks: &alloc::collections::BTreeMap<u64, Vec<u8>>) -> Result<(), Errno> {
         use crate::fs::jbd::{self, JournalIo};
         let journal = Journal::open(self, self.journal_ino)?;
         let sb = jbd::read_super(&journal)?;
         let bs = self.block_size as usize;
-        let seq = sb.sequence;
         // 記述ブロックに入るタグの数(最初のタグの後には UUID が 16 バイト付く)
         let per_descriptor = (bs - 12 - 16) / 8;
-        let needed = blocks.len() + blocks.len().div_ceil(per_descriptor) + 1;
-        if needed as u32 > sb.maxlen - sb.first {
+        let needed = (blocks.len() + blocks.len().div_ceil(per_descriptor) + 1) as u32;
+        let capacity = sb.maxlen - sb.first;
+        if needed > capacity {
             return Err(Errno::ENOSPC); // ジャーナルより大きなトランザクション
         }
+        // ログの空きが足りなければ、先にチェックポイントしてジャーナルを空にする
+        let used = {
+            let js = self.journal_state.lock();
+            let j = js.as_ref().expect("journal state");
+            if j.tail == 0 {
+                0
+            } else if j.head >= j.tail {
+                j.head - j.tail
+            } else {
+                capacity - (j.tail - j.head)
+            }
+        };
+        if used + needed >= capacity {
+            self.checkpoint()?;
+        }
+        let (seq, start) = {
+            let js = self.journal_state.lock();
+            let j = js.as_ref().expect("journal state");
+            (j.next_seq, j.head)
+        };
         let mut uuid = vec![0u8; bs];
         journal.read_log(0, &mut uuid)?;
         let uuid: Vec<u8> = uuid[48..64].to_vec();
@@ -794,7 +853,7 @@ impl Inner {
             b
         };
         // 1. 記述ブロックと中身
-        let mut pos = sb.first;
+        let mut pos = start;
         let list: Vec<(&u64, &Vec<u8>)> = blocks.iter().collect();
         for chunk in list.chunks(per_descriptor) {
             let mut desc = header(1);
@@ -830,22 +889,62 @@ impl Inner {
         self.barrier()?;
         // 2. コミット
         journal.write_log(pos, &header(2))?;
+        pos = sb.next(pos);
         self.barrier()?;
-        // 3. 「要リカバリ」の印を先に立ててから、「ここから読め」を書く(逆だと、間で電源が切れたときに
-        //    ジャーナルにデータがあるのに印がない、が残る。印があってジャーナルが空なのは害がない)
-        self.set_recover_flag(true)?;
-        self.barrier()?;
-        jbd::write_super(&journal, seq, sb.first)?;
-        self.barrier()?;
-        // 4. 本来の場所へ
+        // 3. ジャーナルが空だったら、このトランザクションから読むように指す
+        //    (「要リカバリ」の印を先に。逆だと、間で切れたときに印のないジャーナルのデータが残る)
+        let was_empty = self
+            .journal_state
+            .lock()
+            .as_ref()
+            .expect("journal state")
+            .tail
+            == 0;
+        if was_empty {
+            self.set_recover_flag(true)?;
+            self.barrier()?;
+            jbd::write_super(&journal, seq, start)?;
+            self.barrier()?;
+        }
+        let mut js = self.journal_state.lock();
+        let j = js.as_mut().expect("journal state");
+        if was_empty {
+            j.tail = start;
+        }
+        j.head = pos;
+        j.next_seq = seq.wrapping_add(1);
         for (block, data) in blocks {
+            j.committed.insert(*block, data.clone());
+        }
+        Ok(())
+    }
+
+    /// コミット済みの中身を本来の場所に書き、ジャーナルを空にする(チェックポイント)
+    fn checkpoint(&self) -> Result<(), Errno> {
+        let committed = match self.journal_state.lock().as_mut() {
+            Some(j) if j.tail != 0 => core::mem::take(&mut j.committed),
+            _ => return Ok(()),
+        };
+        for (block, data) in &committed {
             self.raw_write(block * self.block_size, data)?;
         }
         self.barrier()?;
-        // 5. ジャーナルを空に
-        jbd::write_super(&journal, seq.wrapping_add(1), 0)?;
+        let journal = Journal::open(self, self.journal_ino)?;
+        let sb = crate::fs::jbd::read_super(&journal)?;
+        let next = self
+            .journal_state
+            .lock()
+            .as_ref()
+            .expect("journal state")
+            .next_seq;
+        crate::fs::jbd::write_super(&journal, next, 0)?;
         self.set_recover_flag(false)?;
-        self.barrier()
+        self.barrier()?;
+        let mut js = self.journal_state.lock();
+        let j = js.as_mut().expect("journal state");
+        j.tail = 0;
+        j.head = sb.first;
+        Ok(())
     }
 
     /// スーパーブロックの「要リカバリ」の印
@@ -1074,6 +1173,7 @@ impl Ext2 {
             meta: crate::sync::SpinLock::new(()),
             journal_ino: 0,
             tx: crate::sync::SpinLock::new(None),
+            journal_state: crate::sync::SpinLock::new(None),
         };
         probe.read_bytes(1024, &mut sb)?;
         if le16(&sb, 56) != MAGIC {
@@ -1112,6 +1212,7 @@ impl Ext2 {
                     0
                 },
                 tx: crate::sync::SpinLock::new(None),
+                journal_state: crate::sync::SpinLock::new(None),
             }),
         };
         // ext3 のジャーナル:前に書きかけで止まっていたら、コミット済みのものを書き直す。
@@ -1125,6 +1226,13 @@ impl Ext2 {
                 fs.inner.set_recover_flag(false)?;
                 fs.inner.barrier()?;
             }
+            let jsb = crate::fs::jbd::read_super(&journal)?;
+            *fs.inner.journal_state.lock() = Some(JournalState {
+                next_seq: jsb.sequence,
+                head: jsb.first,
+                tail: 0,
+                committed: alloc::collections::BTreeMap::new(),
+            });
         }
         Ok(fs)
     }
@@ -1174,6 +1282,12 @@ impl Ext2 {
 }
 
 impl FileSystem for Ext2 {
+    /// ジャーナルにコミットしただけのものを、本来の場所まで書く
+    fn sync(&self) -> Result<(), Errno> {
+        let _meta = self.inner.meta.lock();
+        self.inner.checkpoint()
+    }
+
     /// 名前は VFS を通してしか変わらないので、dentry キャッシュに覚えてよい
     fn cacheable(&self) -> bool {
         true
@@ -2070,7 +2184,12 @@ mod write_tests {
         fsck(&disk);
     }
 
-    /// ジャーナルのスーパーブロック(次のトランザクションの番号、ログの始まり)
+    /// 次のトランザクションの番号(メモリの中の値:コミットのたびに進む)
+    fn next_seq(fs: &Ext2) -> u32 {
+        fs.inner.journal_state.lock().as_ref().unwrap().next_seq
+    }
+
+    /// ジャーナルのスーパーブロック(ディスクの値:ログの始まり、最初のトランザクションの番号)
     fn journal_super(fs: &Ext2) -> crate::fs::jbd::Super {
         let journal = Journal::open(&fs.inner, 8).unwrap();
         crate::fs::jbd::read_super(&journal).unwrap()
@@ -2080,7 +2199,7 @@ mod write_tests {
     fn operations_on_ext3_go_through_the_journal() {
         let disk = ext3_with_journal(&[]);
         let fs = Ext2::new(disk.clone()).unwrap();
-        let before = journal_super(&fs).sequence;
+        let before = next_seq(&fs);
         fs.mkdir("/d", 0o755).unwrap();
         let f = fs.create("/d/f", 0o644).unwrap();
         let data: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
@@ -2089,17 +2208,12 @@ mod write_tests {
         fs.rename("/d/f", "/d/g").unwrap();
         fs.lookup("/d/g").unwrap().set_mode(0o600).unwrap();
         fs.unlink("/keep.txt", false).unwrap();
-        let after = journal_super(&fs);
         // それぞれの操作がトランザクションとしてジャーナルを通った(大きな書き込みは何回かに分かれる)
-        assert!(
-            after.sequence >= before + 7,
-            "{before} -> {}",
-            after.sequence
-        );
-        assert_eq!(
-            after.start, 0,
-            "everything was checkpointed: the journal is empty"
-        );
+        let after = next_seq(&fs);
+        assert!(after >= before + 7, "{before} -> {after}");
+        // sync で本来の場所まで書くと、ジャーナルは空になる
+        fs.sync().unwrap();
+        assert_eq!(journal_super(&fs).start, 0, "everything was checkpointed");
         let fs = Ext2::new(disk.clone()).unwrap();
         assert_eq!(read_all(&fs, "/d/g"), data);
         fsck(&disk);
@@ -2112,10 +2226,11 @@ mod write_tests {
         let fs = Ext2::new(disk.clone()).unwrap();
         fs.mkdir("/full", 0o755).unwrap();
         fs.create("/full/x", 0o644).unwrap();
-        let before = journal_super(&fs).sequence;
+        let before = next_seq(&fs);
         assert_eq!(fs.rename("/keep.txt", "/full"), Err(Errno::EISDIR));
         assert_eq!(fs.create("/nodir/x", 0o644).err(), Some(Errno::ENOENT));
-        assert_eq!(journal_super(&fs).sequence, before);
+        assert_eq!(next_seq(&fs), before);
+        fs.sync().unwrap();
         fsck(&disk);
     }
 
@@ -2277,5 +2392,65 @@ mod write_tests {
         drop(fs);
         let fs = Ext2::new(shared(Box::new(RamDisk::from_bytes(&bytes_of(&disk))))).unwrap();
         assert_eq!(read_all(&fs, "/big"), data);
+    }
+
+    #[test]
+    fn checkpoints_are_batched_so_hot_metadata_is_written_once() {
+        // ビットマップや inode の表、ディレクトリのブロックは、続けて作るたびに書き換わる。
+        // 本来の場所への書き込みをまとめれば、それぞれ 1 回で済む(ジャーナルへのコミットは毎回)
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+        let fresh = {
+            let d = ext3_with_journal(&[]);
+            let mut v = Vec::new();
+            let mut sec = [0u8; BLOCK_SIZE];
+            let mut g = d.lock();
+            for lba in 0..g.block_count() {
+                g.read_block(lba, &mut sec).unwrap();
+                v.extend_from_slice(&sec);
+            }
+            v
+        };
+        let written = Arc::new(AtomicUsize::new(0));
+        let disk = Arc::new(crate::sync::SpinLock::new(RamDisk::from_bytes(&fresh)));
+        let dev = Crashing {
+            disk: disk.clone(),
+            budget: Arc::new(AtomicUsize::new(usize::MAX)),
+            written: written.clone(),
+        };
+        let fs = Ext2::new(shared(Box::new(dev))).unwrap();
+        written.store(0, Relaxed);
+        for i in 0..30 {
+            fs.create(&std::format!("/f{i}"), 0o644).unwrap();
+        }
+        fs.sync().unwrap();
+        let n = written.load(Relaxed);
+        // 1 回の create のトランザクションはメタデータ 4〜5 ブロック:ジャーナル(記述 + 中身 + コミット)で
+        // 約 7 ブロック = 14 セクタ。本来の場所の分はまとめて 1 回なので、30 個でも 30 × 14 + 少し
+        assert!(n < 30 * 16, "{n} sector writes for 30 creates");
+        // sync しなくても、電源が戻ればリプレイで全部見える
+        let fs2 = Ext2::new(disk.lock().clone_disk()).unwrap();
+        for i in 0..30 {
+            assert!(fs2.lookup(&std::format!("/f{i}")).is_ok());
+        }
+    }
+
+    #[test]
+    fn committed_but_not_checkpointed_work_survives_a_crash() {
+        let disk = ext3_with_journal(&[]);
+        {
+            let fs = Ext2::new(disk.clone()).unwrap();
+            fs.mkdir("/d", 0o755).unwrap();
+            fs.create("/d/f", 0o644)
+                .unwrap()
+                .write(0, b"journaled")
+                .unwrap();
+            // sync しないで電源が切れた(本来の場所には書いていない)
+            assert_ne!(journal_super(&fs).start, 0, "the journal holds the work");
+        }
+        let fs = Ext2::new(disk.clone()).unwrap();
+        assert_eq!(read_all(&fs, "/d/f"), b"journaled");
+        fs.sync().unwrap();
+        fsck(&disk);
     }
 }

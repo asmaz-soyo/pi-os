@@ -9,6 +9,13 @@ pub struct RamDisk {
 }
 
 impl RamDisk {
+    /// 同じ中身の別のディスク(電源断のあとの「そのときのディスク」を取り出すテスト用)
+    pub fn clone_disk(&self) -> crate::block::SharedDisk {
+        crate::block::shared(alloc::boxed::Box::new(Self {
+            data: self.data.clone(),
+        }))
+    }
+
     /// `blocks` 個のブロックを 0 で埋めて作る
     pub fn new(blocks: usize) -> Self {
         Self {

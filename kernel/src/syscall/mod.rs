@@ -231,11 +231,11 @@ table! {
     nr::NEWFSTATAT, "newfstatat", 4 => |p, a| result(fs::newfstatat(p, a[0], a[1], a[2], a[3]));
     nr::FSTAT, "fstat", 2 => |p, a| result(fs::fstat(p, a[0], a[1]));
     // sync:キャッシュに残っている書き込みを、すべてのディスクに書く
-    nr::SYNC, "sync", 0 => |p, a| result(crate::block::sync_all().map(|_| 0));
+    nr::SYNC, "sync", 0 => |p, a| result(p.vfs.sync().and_then(|_| crate::block::sync_all()).map(|_| 0));
     // fsync / fdatasync:今はファイルごとではなく、すべてのディスクを書く
-    nr::FSYNC, "fsync", 1 => |p, a| result(p.fds.get(a[0]).and_then(|_| crate::block::sync_all()).map(|_| 0));
+    nr::FSYNC, "fsync", 1 => |p, a| result(p.fds.get(a[0]).and_then(|_| p.vfs.sync()).and_then(|_| crate::block::sync_all()).map(|_| 0));
     nr::FDATASYNC, "fdatasync", 1
-        => |p, a| result(p.fds.get(a[0]).and_then(|_| crate::block::sync_all()).map(|_| 0));
+        => |p, a| result(p.fds.get(a[0]).and_then(|_| p.vfs.sync()).and_then(|_| crate::block::sync_all()).map(|_| 0));
     nr::TIMERFD_CREATE, "timerfd_create", 2 => |p, a| result(time::timerfd_create(p));
     nr::TIMERFD_SETTIME, "timerfd_settime", 4
         => |p, a| result(time::timerfd_settime(p, a[0], a[1], a[2], a[3]));
