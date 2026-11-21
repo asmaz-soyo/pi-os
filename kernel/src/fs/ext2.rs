@@ -19,6 +19,9 @@ use alloc::vec::Vec;
 use hal::block::BLOCK_SIZE;
 
 const MAGIC: u16 = 0xef53;
+/// スーパーブロックの機能の印:ジャーナルがある(compat)、リプレイが要る(incompat)
+const COMPAT_HAS_JOURNAL: u32 = 0x4;
+const INCOMPAT_RECOVER: u32 = 0x4;
 const ROOT_INO: u32 = 2;
 
 struct Inner {
@@ -655,6 +658,43 @@ impl Inner {
     }
 }
 
+/// ext3 のジャーナル(inode の中の領域)。ジャーナルの n 番目のブロックは、inode の n 番目のブロック
+struct Journal<'a> {
+    fs: &'a Inner,
+    inode: Inode,
+}
+
+impl<'a> Journal<'a> {
+    fn open(fs: &'a Inner, ino: u32) -> Result<Self, Errno> {
+        Ok(Self {
+            fs,
+            inode: fs.inode(ino)?,
+        })
+    }
+
+    fn place(&self, n: u32) -> Result<u64, Errno> {
+        match self.fs.block_of(&self.inode, n as u64)? {
+            0 => Err(Errno::EIO),
+            b => Ok(b as u64 * self.fs.block_size),
+        }
+    }
+}
+
+impl crate::fs::jbd::JournalIo for Journal<'_> {
+    fn block_size(&self) -> usize {
+        self.fs.block_size as usize
+    }
+    fn read_log(&self, n: u32, buf: &mut [u8]) -> Result<(), Errno> {
+        self.fs.read_bytes(self.place(n)?, buf)
+    }
+    fn write_log(&self, n: u32, buf: &[u8]) -> Result<(), Errno> {
+        self.fs.write_bytes(self.place(n)?, buf)
+    }
+    fn write_fs(&self, block: u32, buf: &[u8]) -> Result<(), Errno> {
+        self.fs.write_bytes(block as u64 * self.fs.block_size, buf)
+    }
+}
+
 /// パスを親ディレクトリと名前に分ける(`/a/b` → (`/a`, `b`))
 fn split(path: &str) -> (&str, &str) {
     match path.rfind('/') {
@@ -826,7 +866,7 @@ impl Ext2 {
         let mut gdt = vec![0u8; groups * 32];
         probe.read_bytes((first_data_block + 1) * block_size, &mut gdt)?;
         let inode_tables = (0..groups).map(|g| le32(&gdt, g * 32 + 8)).collect();
-        Ok(Self {
+        let fs = Self {
             inner: Arc::new(Inner {
                 disk,
                 block_size,
@@ -839,7 +879,16 @@ impl Ext2 {
                 gdt_block: first_data_block + 1,
                 meta: crate::sync::SpinLock::new(()),
             }),
-        })
+        };
+        // ext3 のジャーナル:前に書きかけで止まっていたら、コミット済みのものを書き直す
+        let has_journal = le32(&sb, 92) & COMPAT_HAS_JOURNAL != 0;
+        if has_journal && le32(&sb, 96) & INCOMPAT_RECOVER != 0 {
+            let journal = Journal::open(&fs.inner, le32(&sb, 224))?;
+            crate::fs::jbd::recover(&journal)?;
+            let incompat = le32(&sb, 96) & !INCOMPAT_RECOVER;
+            fs.inner.write_bytes(1024 + 96, &incompat.to_le_bytes())?;
+        }
+        Ok(fs)
     }
 }
 
@@ -1623,5 +1672,152 @@ mod write_tests {
         fs.unlink("/d/again", false).unwrap();
         fsck(&disk);
         assert_eq!(fs.link("/d", "/d2"), Err(Errno::EPERM));
+    }
+
+    /// ジャーナルのテスト用のトランザクション:(書くブロックと中身の 1 バイト, 取り消すブロック, コミットするか)
+    struct Tx {
+        writes: &'static [(u32, u8)],
+        revoke: &'static [u32],
+        commit: bool,
+    }
+
+    /// ext3(ジャーナル付き)のイメージを作り、debugfs でジャーナルにトランザクションを書く
+    /// (本来の場所には書かない:電源が切れて、リプレイを待っている状態)
+    fn ext3_with_journal(txs: &[Tx]) -> SharedDisk {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(std::format!("pios-ext3-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("root")).unwrap();
+        std::fs::write(dir.join("root/keep.txt"), b"keep").unwrap();
+        let img = dir.join("fs.img");
+        let ok = std::process::Command::new("mke2fs")
+            .args([
+                "-q",
+                "-F",
+                "-t",
+                "ext3",
+                "-O",
+                "^dir_index",
+                "-b",
+                "1024",
+                "-I",
+                "128",
+            ])
+            .args(["-J", "size=1", "-d"])
+            .arg(dir.join("root"))
+            .arg(&img)
+            .arg("4096")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let mut cmds = String::from("jo\n");
+        for (t, tx) in txs.iter().enumerate() {
+            let mut args = String::new();
+            let file = dir.join(std::format!("tx{t}"));
+            let mut data = Vec::new();
+            if !tx.writes.is_empty() {
+                let blocks: Vec<String> =
+                    tx.writes.iter().map(|(b, _)| std::format!("{b}")).collect();
+                args += &std::format!(" -b {}", blocks.join(","));
+                for (_, fill) in tx.writes {
+                    data.extend_from_slice(&[*fill; 1024]);
+                }
+            }
+            if !tx.revoke.is_empty() {
+                let r: Vec<String> = tx.revoke.iter().map(|b| std::format!("{b}")).collect();
+                args += &std::format!(" -r {}", r.join(","));
+            }
+            if !tx.commit {
+                args += " -c";
+            }
+            std::fs::write(&file, &data).unwrap();
+            cmds += &std::format!("jw{args} {}\n", file.display());
+        }
+        cmds += "jc\n";
+        std::fs::write(dir.join("cmds"), cmds).unwrap();
+        let out = std::process::Command::new("debugfs")
+            .args(["-w", "-f"])
+            .arg(dir.join("cmds"))
+            .arg(&img)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = std::fs::read(&img).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        shared(Box::new(RamDisk::from_bytes(&bytes)))
+    }
+
+    /// ディスクの 1KB のブロック
+    fn raw_block(disk: &SharedDisk, block: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut sector = [0u8; BLOCK_SIZE];
+        for i in 0..2 {
+            disk.lock()
+                .read_block(block as u64 * 2 + i, &mut sector)
+                .unwrap();
+            out.extend_from_slice(&sector);
+        }
+        out
+    }
+
+    #[test]
+    fn committed_transactions_are_replayed_on_mount() {
+        let disk = ext3_with_journal(&[Tx {
+            writes: &[(3000, b'J'), (3001, b'K')],
+            revoke: &[],
+            commit: true,
+        }]);
+        assert_eq!(raw_block(&disk, 3000), [0; 1024], "not yet in place");
+        let fs = Ext2::new(disk.clone()).unwrap();
+        assert_eq!(raw_block(&disk, 3000), [b'J'; 1024]);
+        assert_eq!(raw_block(&disk, 3001), [b'K'; 1024]);
+        assert_eq!(read_all(&fs, "/keep.txt"), b"keep");
+        // リプレイしたら「要リカバリ」の印を消し、ジャーナルを空にする(e2fsck が確かめる)
+        fsck(&disk);
+    }
+
+    #[test]
+    fn an_uncommitted_transaction_is_ignored() {
+        let disk = ext3_with_journal(&[Tx {
+            writes: &[(3000, b'X')],
+            revoke: &[],
+            commit: false,
+        }]);
+        Ext2::new(disk.clone()).unwrap();
+        assert_eq!(raw_block(&disk, 3000), [0; 1024]);
+        fsck(&disk);
+    }
+
+    #[test]
+    fn later_transactions_win_and_revoked_blocks_are_skipped() {
+        let disk = ext3_with_journal(&[
+            Tx {
+                writes: &[(3000, b'A'), (3002, b'C')],
+                revoke: &[],
+                commit: true,
+            },
+            Tx {
+                writes: &[(3000, b'B')],
+                revoke: &[],
+                commit: true,
+            },
+            // 3002 は取り消された(後で解放されて別の用途になった、など):古い中身を書いてはいけない
+            Tx {
+                writes: &[(3003, b'D')],
+                revoke: &[3002],
+                commit: true,
+            },
+        ]);
+        Ext2::new(disk.clone()).unwrap();
+        assert_eq!(raw_block(&disk, 3000), [b'B'; 1024]);
+        assert_eq!(raw_block(&disk, 3002), [0; 1024]);
+        assert_eq!(raw_block(&disk, 3003), [b'D'; 1024]);
+        fsck(&disk);
     }
 }
