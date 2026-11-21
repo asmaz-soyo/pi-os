@@ -258,3 +258,43 @@ fn dirfd_is_read_as_a_32_bit_int() {
         0
     );
 }
+
+#[test]
+fn paths_can_be_relative_to_a_directory_fd() {
+    let (mut p, _) = process();
+    let dir = open(&mut p, b"/tmp", O_DIRECTORY);
+    // mkdirat(dirfd, "sub")、openat(dirfd, "sub/x")
+    let sub = path(&mut p, b"sub");
+    assert_eq!(call(&mut p, nr::MKDIRAT, [dir, sub, 0o755, 0, 0, 0]), 0);
+    let x = path(&mut p, b"sub/x");
+    let fd = call(
+        &mut p,
+        nr::OPENAT,
+        [dir, x, O_CREAT | O_WRONLY, 0o644, 0, 0],
+    );
+    assert!((fd as i64) >= 0);
+    assert!(p.vfs.lookup("/tmp/sub/x").is_ok());
+    // fstatat(dirfd, "sub/x")
+    assert_eq!(call(&mut p, nr::NEWFSTATAT, [dir, x, SCRATCH, 0, 0, 0]), 0);
+    // unlinkat(dirfd, "sub/x")
+    assert_eq!(call(&mut p, nr::UNLINKAT, [dir, x, 0, 0, 0, 0]), 0);
+    assert!(p.vfs.lookup("/tmp/sub/x").is_err());
+    // 絶対パスなら dirfd は見ない
+    let abs = path(&mut p, b"/etc/motd");
+    assert!((call(&mut p, nr::OPENAT, [999, abs, 0, 0, 0, 0]) as i64) >= 0);
+}
+
+#[test]
+fn a_bad_directory_fd_is_ebadf_or_enotdir() {
+    let (mut p, _) = process();
+    let file = open(&mut p, b"/etc/motd", 0);
+    let rel = path(&mut p, b"x");
+    assert_eq!(
+        call(&mut p, nr::OPENAT, [file, rel, 0, 0, 0, 0]),
+        err(Errno::ENOTDIR)
+    );
+    assert_eq!(
+        call(&mut p, nr::OPENAT, [77, rel, 0, 0, 0, 0]),
+        err(Errno::EBADF)
+    );
+}
