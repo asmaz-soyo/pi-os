@@ -206,6 +206,21 @@ impl Inner {
         Ok(out)
     }
 
+    /// ディレクトリ `dir_ino` の中の `name`
+    fn lookup_in(&self, dir_ino: u32, name: &str) -> Result<(u32, Inode), Errno> {
+        let dir = self.inode(dir_ino)?;
+        if kind_of(dir.mode) != FileKind::Directory {
+            return Err(Errno::ENOTDIR);
+        }
+        let ino = self
+            .entries(&dir)?
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, i)| i)
+            .ok_or(Errno::ENOENT)?;
+        Ok((ino, self.inode(ino)?))
+    }
+
     fn lookup(&self, path: &str) -> Result<(u32, Inode), Errno> {
         let mut ino = ROOT_INO;
         let mut inode = self.inode(ino)?;
@@ -672,6 +687,10 @@ impl Inode {
 }
 
 impl File for Ext2File {
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
+    }
+
     fn set_mode(&self, mode: u32) -> Result<(), Errno> {
         let _meta = self.fs.meta.lock();
         let mut inode = self.fs.inode(self.ino)?;
@@ -868,6 +887,25 @@ impl Ext2 {
 }
 
 impl FileSystem for Ext2 {
+    /// すでに見つけたディレクトリ `dir` の中だけを探す(ルートからたどり直さない)
+    fn lookup_child(
+        &self,
+        dir: &Arc<dyn File>,
+        dir_path: &str,
+        name: &str,
+    ) -> Result<Arc<dyn File>, Errno> {
+        match dir.as_any().and_then(|a| a.downcast_ref::<Ext2File>()) {
+            Some(d) if Arc::ptr_eq(&d.fs, &self.inner) => {
+                let (ino, _) = self.inner.lookup_in(d.ino, name)?;
+                Ok(Arc::new(Ext2File {
+                    fs: self.inner.clone(),
+                    ino,
+                }))
+            }
+            _ => self.lookup(&crate::fs::vfs::normalize(dir_path, name)),
+        }
+    }
+
     fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
         let (ino, _) = self.inner.lookup(path)?;
         Ok(Arc::new(Ext2File {
@@ -1180,6 +1218,55 @@ mod tests {
             fs.lookup("/hello.txt").unwrap().readlink(),
             Err(Errno::EINVAL)
         );
+    }
+
+    /// 読んだブロックの数を数えるディスク
+    struct Counting {
+        disk: RamDisk,
+        reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl hal::block::BlockDevice for Counting {
+        fn block_count(&self) -> u64 {
+            self.disk.block_count()
+        }
+        fn read_block(
+            &mut self,
+            lba: u64,
+            buf: &mut [u8; BLOCK_SIZE],
+        ) -> Result<(), hal::block::BlockError> {
+            self.reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.disk.read_block(lba, buf)
+        }
+        fn write_block(
+            &mut self,
+            lba: u64,
+            buf: &[u8; BLOCK_SIZE],
+        ) -> Result<(), hal::block::BlockError> {
+            self.disk.write_block(lba, buf)
+        }
+    }
+
+    #[test]
+    fn deep_paths_are_walked_without_rereading_from_the_root() {
+        // VFS は 1 要素ずつ(シンボリックリンクを確かめながら)たどる。各要素をルートから
+        // 探し直すと、読む量が深さの 2 乗に比例する。前の要素のディレクトリから探せば深さに比例する
+        let path = "a/b/c/d/e/f/g/h/file";
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let disk = Counting {
+            disk: RamDisk::from_bytes(&image(&[(path, b"deep")])),
+            reads: reads.clone(),
+        };
+        let vfs = crate::fs::vfs::Vfs::new(std::sync::Arc::new(
+            Ext2::new(shared(Box::new(disk))).unwrap(),
+        ));
+        reads.store(0, std::sync::atomic::Ordering::Relaxed);
+        let f = vfs.lookup(&std::format!("/{path}")).unwrap();
+        assert_eq!(f.stat().size, 4);
+        let n = reads.load(std::sync::atomic::Ordering::Relaxed);
+        let depth = 9;
+        assert!(n <= 8 * depth, "{n} sector reads for depth {depth}");
     }
 
     #[test]

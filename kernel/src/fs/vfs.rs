@@ -305,6 +305,17 @@ pub trait FileSystem: Send + Sync {
     /// `path` はこのファイルシステムの中の絶対パス(`/` で始まる)
     fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno>;
 
+    /// ディレクトリ `dir`(このファイルシステムの中のパス `dir_path`)の中の `name` を探す。
+    /// ファイルシステムは、`dir` の実体から探せばルートからたどり直さずに済む
+    fn lookup_child(
+        &self,
+        _dir: &Arc<dyn File>,
+        dir_path: &str,
+        name: &str,
+    ) -> Result<Arc<dyn File>, Errno> {
+        self.lookup(&normalize(dir_path, name))
+    }
+
     /// 新しいファイルを作る
     fn create(&self, _path: &str, _mode: u32) -> Result<Arc<dyn File>, Errno> {
         Err(Errno::EROFS)
@@ -397,6 +408,17 @@ impl Vfs {
     /// `follow_last` なら最後の要素がリンクでも追う(open、stat)。追わないのは lstat、unlink、rename など。
     /// 最後の要素がなくてもよい(作るときのため)。追ったリンクが 40 を超えたら `ELOOP`。
     pub fn resolve_path(&self, path: &str, follow_last: bool) -> Result<String, Errno> {
+        Ok(self.walk(path, follow_last)?.0)
+    }
+
+    /// `resolve_path` の中身。たどり着いた実体も返す(最後の要素がなければ None)。
+    /// たどっている途中のディレクトリの実体を覚えておき、次の要素はその中から探す
+    /// (ファイルシステムが `lookup_child` で、ルートからたどり直さずに済む)
+    fn walk(
+        &self,
+        path: &str,
+        follow_last: bool,
+    ) -> Result<(String, Option<Arc<dyn File>>), Errno> {
         const MAX_LINKS: usize = 40;
         let mut todo: alloc::collections::VecDeque<String> = path
             .split('/')
@@ -404,12 +426,15 @@ impl Vfs {
             .map(String::from)
             .collect();
         let mut cur = String::from("/");
+        // cur の実体(None なら、必要になったときにマウントの表から探す)
+        let mut cur_file: Option<Arc<dyn File>> = None;
         let mut links = 0;
         while let Some(comp) = todo.pop_front() {
             match comp.as_str() {
                 "." => continue,
                 ".." => {
                     cur = normalize(&cur, "..");
+                    cur_file = None;
                     continue;
                 }
                 _ => {}
@@ -417,10 +442,10 @@ impl Vfs {
             let next = normalize(&cur, &comp);
             let last = todo.is_empty();
             if last && !follow_last {
-                cur = next;
-                break;
+                let file = self.child(&cur, &mut cur_file, &comp, &next).ok();
+                return Ok((next, file));
             }
-            match self.lookup_raw(&next) {
+            match self.child(&cur, &mut cur_file, &comp, &next) {
                 Ok(f) if f.stat().kind == FileKind::Symlink => {
                     links += 1;
                     if links > MAX_LINKS {
@@ -430,6 +455,7 @@ impl Vfs {
                     // 絶対のリンクはルートから、相対のリンクはリンクのあるディレクトリから
                     if target.starts_with('/') {
                         cur = String::from("/");
+                        cur_file = None;
                     }
                     for c in target.split('/').filter(|c| !c.is_empty()).rev() {
                         todo.push_front(String::from(c));
@@ -440,22 +466,52 @@ impl Vfs {
                         return Err(Errno::ENOTDIR);
                     }
                     cur = next;
+                    cur_file = Some(f);
                 }
-                Err(Errno::ENOENT) if last => cur = next,
+                Err(Errno::ENOENT) if last => return Ok((next, None)),
                 Err(e) => return Err(e),
             }
         }
-        Ok(cur)
+        let file = match cur_file {
+            Some(f) => f,
+            None => self.lookup_raw(&cur)?,
+        };
+        Ok((cur, Some(file)))
+    }
+
+    /// ディレクトリ `cur`(実体は `cur_file`)の中の `name`(絶対パスでは `next`)を探す
+    fn child(
+        &self,
+        cur: &str,
+        cur_file: &mut Option<Arc<dyn File>>,
+        name: &str,
+        next: &str,
+    ) -> Result<Arc<dyn File>, Errno> {
+        let (fs, inner) = self.resolve(next)?;
+        let (parent_fs, parent_inner) = self.resolve(cur)?;
+        // マウントポイントをまたぐときや、親の実体がまだないときは、マウントの表から探す
+        if inner == "/" || !core::ptr::addr_eq(fs, parent_fs) {
+            return fs.lookup(inner);
+        }
+        let dir = match cur_file {
+            Some(d) => d.clone(),
+            None => {
+                let d = parent_fs.lookup(parent_inner)?;
+                *cur_file = Some(d.clone());
+                d
+            }
+        };
+        fs.lookup_child(&dir, parent_inner, name)
     }
 
     /// 絶対パスの実体を探す(リンクは最後まで追う)。
     pub fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
-        self.lookup_raw(&self.resolve_path(path, true)?)
+        self.walk(path, true)?.1.ok_or(Errno::ENOENT)
     }
 
     /// 最後の要素がリンクなら、リンクそのものを返す(lstat、readlink)
     pub fn lookup_nofollow(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
-        self.lookup_raw(&self.resolve_path(path, false)?)
+        self.walk(path, false)?.1.ok_or(Errno::ENOENT)
     }
 
     /// ファイルを作る。最後がリンク(指す先がない)なら、指す先に作る
