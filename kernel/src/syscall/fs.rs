@@ -47,6 +47,15 @@ fn path_arg(p: &mut Process, dirfd: u64, ptr: u64) -> Result<alloc::string::Stri
 pub fn openat(p: &mut Process, dirfd: u64, path: u64, flags: u64, mode: u64) -> Result<u64, Errno> {
     let flags = flags as u32;
     let path = path_arg(p, dirfd, path)?;
+    // O_NOFOLLOW:最後の要素がシンボリックリンクなら開かない(AArch64 の値。x86 は 0o400000)
+    const O_NOFOLLOW: u32 = 0o100000;
+    if flags & O_NOFOLLOW != 0
+        && p.vfs
+            .lookup_nofollow(&path)
+            .is_ok_and(|f| f.stat().kind == FileKind::Symlink)
+    {
+        return Err(Errno::ELOOP);
+    }
     let file = match p.vfs.lookup(&path) {
         Ok(_) if flags & O_CREAT != 0 && flags & O_EXCL != 0 => return Err(Errno::EEXIST),
         Ok(file) => file,
@@ -176,6 +185,7 @@ pub fn getdents64(p: &mut Process, fd: u64, buf: u64, count: u64) -> Result<u64,
             FileKind::Regular => 8,
             FileKind::CharDevice => 2,
             FileKind::Fifo => 1,
+            FileKind::Symlink => 10,
         };
         out.extend_from_slice(&e.ino.to_le_bytes());
         out.extend_from_slice(&((index + 1) as u64).to_le_bytes());
@@ -330,6 +340,7 @@ fn stat_bytes(st: &Stat) -> [u8; 128] {
         FileKind::Directory => 0o040000,
         FileKind::CharDevice => 0o020000,
         FileKind::Fifo => 0o010000,
+        FileKind::Symlink => 0o120000,
     };
     b[8..16].copy_from_slice(&st.ino.to_le_bytes()); // st_ino
     b[16..20].copy_from_slice(&(kind | st.mode).to_le_bytes()); // st_mode
@@ -364,9 +375,15 @@ pub fn newfstatat(
     {
         return fstat(p, dirfd, buf);
     }
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
     let path = path_arg(p, dirfd, path)?;
-    let st = p.vfs.lookup(&path)?.stat();
-    p.mem.copy_to_user(VirtAddr(buf), &stat_bytes(&st))?;
+    let file = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        p.vfs.lookup_nofollow(&path)?
+    } else {
+        p.vfs.lookup(&path)?
+    };
+    p.mem
+        .copy_to_user(VirtAddr(buf), &stat_bytes(&file.stat()))?;
     Ok(0)
 }
 
@@ -411,10 +428,34 @@ pub fn getcwd(p: &mut Process, buf: u64, size: u64) -> Result<u64, Errno> {
 }
 
 /// readlinkat(dirfd, path, buf, size)。シンボリックリンクはまだないので、あるパスなら EINVAL。
-pub fn readlinkat(p: &mut Process, dirfd: u64, path: u64) -> Result<u64, Errno> {
+pub fn readlinkat(
+    p: &mut Process,
+    dirfd: u64,
+    path: u64,
+    buf: u64,
+    len: u64,
+) -> Result<u64, Errno> {
     let path = path_arg(p, dirfd, path)?;
-    p.vfs.lookup(&path)?;
-    Err(Errno::EINVAL)
+    let target = p.vfs.lookup_nofollow(&path)?.readlink()?;
+    // NUL は付けず、入りきらなければ切り詰める
+    let n = target.len().min(len as usize);
+    p.mem.copy_to_user(VirtAddr(buf), &target.as_bytes()[..n])?;
+    Ok(n as u64)
+}
+
+/// symlinkat(target, newdirfd, linkpath)
+pub fn symlinkat(p: &mut Process, target: u64, dirfd: u64, link: u64) -> Result<u64, Errno> {
+    let raw = p.mem.read_cstr(VirtAddr(target), PATH_MAX)?;
+    let target = core::str::from_utf8(&raw).map_err(|_| Errno::EINVAL)?;
+    if target.is_empty() {
+        return Err(Errno::ENOENT);
+    }
+    let target = alloc::string::String::from(target);
+    let link = path_arg(p, dirfd, link)?;
+    let dir = p.vfs.lookup(&vfs::normalize(&link, ".."))?;
+    p.cred.check(&dir.stat(), Access::WRITE | Access::EXEC)?;
+    p.vfs.symlink(&target, &link)?;
+    Ok(0)
 }
 
 /// chdir(path)

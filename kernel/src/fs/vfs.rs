@@ -31,6 +31,8 @@ pub enum FileKind {
     CharDevice,
     /// パイプ
     Fifo,
+    /// シンボリックリンク(中身は別のパス)
+    Symlink,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +91,11 @@ pub trait File: Send + Sync {
     /// 書き込めないファイルシステムのファイルか(open で書き込みを求められたら EROFS にする)
     fn is_read_only(&self) -> bool {
         false
+    }
+
+    /// シンボリックリンクなら、指す先のパス。リンクでなければ EINVAL
+    fn readlink(&self) -> Result<String, Errno> {
+        Err(Errno::EINVAL)
     }
 
     /// 具体的な型として取り出す(timerfd や epoll の操作で使う)
@@ -277,6 +284,11 @@ pub trait FileSystem: Send + Sync {
         Err(Errno::ENOTDIR)
     }
 
+    /// `path` に、`target` を指すシンボリックリンクを作る
+    fn symlink(&self, _path: &str, _target: &str) -> Result<(), Errno> {
+        Err(Errno::EROFS)
+    }
+
     /// `old` を `new` に移す(名前を変える)。`new` があれば置き換える。
     /// 同じパスや、自分の下への移動は呼ぶ側(`Vfs::rename`)が先に扱う。
     fn rename(&self, _old: &str, _new: &str) -> Result<(), Errno> {
@@ -330,29 +342,112 @@ impl Vfs {
         Err(Errno::ENOENT)
     }
 
-    /// 絶対パスの実体を探す。
-    pub fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
+    /// マウントの表だけで探す(シンボリックリンクは追わない)。`path` にリンクは含まれない前提
+    fn lookup_raw(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
         let (fs, inner) = self.resolve(path)?;
         fs.lookup(inner)
     }
 
+    /// パスの途中のシンボリックリンクを追って、リンクを含まない絶対パスにする。
+    /// `follow_last` なら最後の要素がリンクでも追う(open、stat)。追わないのは lstat、unlink、rename など。
+    /// 最後の要素がなくてもよい(作るときのため)。追ったリンクが 40 を超えたら `ELOOP`。
+    pub fn resolve_path(&self, path: &str, follow_last: bool) -> Result<String, Errno> {
+        const MAX_LINKS: usize = 40;
+        let mut todo: alloc::collections::VecDeque<String> = path
+            .split('/')
+            .filter(|c| !c.is_empty())
+            .map(String::from)
+            .collect();
+        let mut cur = String::from("/");
+        let mut links = 0;
+        while let Some(comp) = todo.pop_front() {
+            match comp.as_str() {
+                "." => continue,
+                ".." => {
+                    cur = normalize(&cur, "..");
+                    continue;
+                }
+                _ => {}
+            }
+            let next = normalize(&cur, &comp);
+            let last = todo.is_empty();
+            if last && !follow_last {
+                cur = next;
+                break;
+            }
+            match self.lookup_raw(&next) {
+                Ok(f) if f.stat().kind == FileKind::Symlink => {
+                    links += 1;
+                    if links > MAX_LINKS {
+                        return Err(Errno::ELOOP);
+                    }
+                    let target = f.readlink()?;
+                    // 絶対のリンクはルートから、相対のリンクはリンクのあるディレクトリから
+                    if target.starts_with('/') {
+                        cur = String::from("/");
+                    }
+                    for c in target.split('/').filter(|c| !c.is_empty()).rev() {
+                        todo.push_front(String::from(c));
+                    }
+                }
+                Ok(f) => {
+                    if !last && f.stat().kind != FileKind::Directory {
+                        return Err(Errno::ENOTDIR);
+                    }
+                    cur = next;
+                }
+                Err(Errno::ENOENT) if last => cur = next,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(cur)
+    }
+
+    /// 絶対パスの実体を探す(リンクは最後まで追う)。
+    pub fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
+        self.lookup_raw(&self.resolve_path(path, true)?)
+    }
+
+    /// 最後の要素がリンクなら、リンクそのものを返す(lstat、readlink)
+    pub fn lookup_nofollow(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
+        self.lookup_raw(&self.resolve_path(path, false)?)
+    }
+
+    /// ファイルを作る。最後がリンク(指す先がない)なら、指す先に作る
     pub fn create(&self, path: &str, mode: u32) -> Result<Arc<dyn File>, Errno> {
-        let (fs, inner) = self.resolve(path)?;
+        let path = self.resolve_path(path, true)?;
+        let (fs, inner) = self.resolve(&path)?;
         fs.create(inner, mode)
     }
 
     pub fn mkdir(&self, path: &str, mode: u32) -> Result<(), Errno> {
-        let (fs, inner) = self.resolve(path)?;
+        let path = self.resolve_path(path, false)?;
+        let (fs, inner) = self.resolve(&path)?;
         fs.mkdir(inner, mode)
     }
 
+    /// 消す(最後がリンクなら、リンクそのものを消す)
     pub fn unlink(&self, path: &str, dir: bool) -> Result<(), Errno> {
-        let (fs, inner) = self.resolve(path)?;
+        let path = self.resolve_path(path, false)?;
+        let (fs, inner) = self.resolve(&path)?;
         fs.unlink(inner, dir)
     }
 
+    /// `path` に `target` を指すシンボリックリンクを作る
+    pub fn symlink(&self, target: &str, path: &str) -> Result<(), Errno> {
+        let path = self.resolve_path(path, false)?;
+        let (fs, inner) = self.resolve(&path)?;
+        if fs.lookup(inner).is_ok() {
+            return Err(Errno::EEXIST);
+        }
+        fs.symlink(inner, target)
+    }
+
     /// `old` を `new` に移す。`noreplace` なら、`new` があるときは `EEXIST`。
+    /// どちらも最後の要素は追わない(リンクを動かすと、リンクそのものが動く)。
     pub fn rename(&self, old: &str, new: &str, noreplace: bool) -> Result<(), Errno> {
+        let old = &self.resolve_path(old, false)?;
+        let new = &self.resolve_path(new, false)?;
         let (old_fs, old_inner) = self.resolve(old)?;
         let (new_fs, new_inner) = self.resolve(new)?;
         old_fs.lookup(old_inner)?;
@@ -364,7 +459,7 @@ impl Vfs {
             return Ok(());
         }
         // 自分の下には移せない(/a → /a/b)
-        if new.starts_with(old) && new.as_bytes().get(old.len()) == Some(&b'/') {
+        if new.starts_with(old.as_str()) && new.as_bytes().get(old.len()) == Some(&b'/') {
             return Err(Errno::EINVAL);
         }
         if noreplace && new_fs.lookup(new_inner).is_ok() {
@@ -375,6 +470,7 @@ impl Vfs {
 
     /// ディレクトリの中身。マウントポイントもその名前の項目として見せる。
     pub fn readdir(&self, path: &str) -> Result<Vec<DirEntry>, Errno> {
+        let path = &self.resolve_path(path, true)?;
         let (fs, inner) = self.resolve(path)?;
         let mut entries = fs.readdir(inner)?;
         for (at, _) in &self.mounts {

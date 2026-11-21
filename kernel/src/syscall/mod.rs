@@ -27,6 +27,7 @@ pub mod nr {
     pub const IOCTL: u64 = 29;
     pub const MKDIRAT: u64 = 34;
     pub const UNLINKAT: u64 = 35;
+    pub const SYMLINKAT: u64 = 36;
     pub const RENAMEAT: u64 = 38;
     pub const FTRUNCATE: u64 = 46;
     pub const FACCESSAT: u64 = 48;
@@ -193,6 +194,7 @@ table! {
     nr::IOCTL, "ioctl", 3 => |p, a| result(fs::ioctl(p, a[0], a[1], a[2]));
     nr::MKDIRAT, "mkdirat", 3 => |p, a| result(fs::mkdirat(p, a[0], a[1], a[2]));
     nr::UNLINKAT, "unlinkat", 3 => |p, a| result(fs::unlinkat(p, a[0], a[1], a[2]));
+    nr::SYMLINKAT, "symlinkat", 3 => |p, a| result(fs::symlinkat(p, a[0], a[1], a[2]));
     nr::RENAMEAT, "renameat", 4 => |p, a| result(fs::renameat2(p, a[0], a[1], a[2], a[3], 0));
     nr::FTRUNCATE, "ftruncate", 2 => |p, a| result(fs::ftruncate(p, a[0], a[1]));
     nr::FACCESSAT, "faccessat", 3 => |p, a| result(fs::faccessat(p, a[0], a[1], a[2]));
@@ -210,7 +212,7 @@ table! {
     nr::PWRITE64, "pwrite64", 4 => |p, a| result(fs::pwrite64(p, a[0], a[1], a[2], a[3]));
     nr::PSELECT6, "pselect6", 6 => |p, a| result(poll::pselect6(p, a[0], a[1], a[2], a[3], a[4]));
     nr::PPOLL, "ppoll", 5 => |p, a| result(poll::ppoll(p, a[0], a[1], a[2]));
-    nr::READLINKAT, "readlinkat", 4 => |p, a| result(fs::readlinkat(p, a[0], a[1]));
+    nr::READLINKAT, "readlinkat", 4 => |p, a| result(fs::readlinkat(p, a[0], a[1], a[2], a[3]));
     nr::NEWFSTATAT, "newfstatat", 4 => |p, a| result(fs::newfstatat(p, a[0], a[1], a[2], a[3]));
     nr::FSTAT, "fstat", 2 => |p, a| result(fs::fstat(p, a[0], a[1]));
     nr::TIMERFD_CREATE, "timerfd_create", 2 => |p, a| result(time::timerfd_create(p));
@@ -324,6 +326,8 @@ mod tests_pipe;
 mod tests_proc;
 #[cfg(test)]
 mod tests_rename;
+#[cfg(test)]
+mod tests_symlink;
 #[cfg(test)]
 mod tests_time;
 #[cfg(test)]

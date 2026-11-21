@@ -30,6 +30,7 @@ static const char *errname(int e) {
     case EPIPE: return "EPIPE";
     case ENOTEMPTY: return "ENOTEMPTY";
     case EXDEV: return "EXDEV";
+    case ELOOP: return "ELOOP";
     case ENOSYS: return "ENOSYS";
     default: return "?";
     }
@@ -110,6 +111,32 @@ int main(int argc, char **argv) {
     show("rename dir", rename("rd", "rd2"));
     show("rmdir rd2", rmdir("rd2"));
     show("unlink r2", unlink("r2"));
+
+    // シンボリックリンク
+    close(open("t", O_CREAT | O_WRONLY, 0644));
+    show("symlink", symlink("t", "ln"));
+    show("symlink exists", symlink("t", "ln"));
+    char lb[16] = {0};
+    show("readlink", readlink("ln", lb, sizeof lb - 1));
+    printf("target = %s\n", lb);
+    show("readlink short", readlink("ln", lb, 0) );
+    show("readlink not a link", readlink("t", lb, sizeof lb));
+    struct stat ls;
+    show("lstat", lstat("ln", &ls));
+    printf("is link = %d, size = %ld\n", S_ISLNK(ls.st_mode), (long)ls.st_size);
+    show("stat through link", stat("ln", &ls));
+    printf("is regular = %d\n", S_ISREG(ls.st_mode));
+    show_fd("open through link", (fd = open("ln", O_RDONLY)));
+    close(fd);
+    show("open nofollow", open("ln", O_RDONLY | O_NOFOLLOW));
+    show("symlink loop", symlink("loop", "loop"));
+    show("open loop", open("loop", O_RDONLY));
+    show("symlink dangling", symlink("nowhere", "dang"));
+    show("open dangling", open("dang", O_RDONLY));
+    show("unlink ln", unlink("ln"));
+    show("unlink loop", unlink("loop"));
+    show("unlink dang", unlink("dang"));
+    show("unlink t", unlink("t"));
 
     // fd の複製
     fd = open("f", O_RDONLY);

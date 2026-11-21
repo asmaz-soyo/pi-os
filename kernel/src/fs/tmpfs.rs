@@ -80,6 +80,29 @@ impl File for TmpDir {
     }
 }
 
+/// シンボリックリンク:指す先のパスを持つだけ
+struct TmpLink {
+    target: String,
+    ino: u64,
+}
+
+impl File for TmpLink {
+    fn stat(&self) -> Stat {
+        Stat {
+            kind: FileKind::Symlink,
+            mode: 0o777,
+            size: self.target.len() as u64,
+            ino: self.ino,
+            uid: 0,
+            gid: 0,
+        }
+    }
+
+    fn readlink(&self) -> Result<String, Errno> {
+        Ok(self.target.clone())
+    }
+}
+
 pub struct Tmpfs {
     nodes: SpinLock<BTreeMap<String, Arc<dyn File>>>,
     next_ino: AtomicU64,
@@ -168,6 +191,20 @@ impl FileSystem for Tmpfs {
             }
         }
         nodes.remove(path);
+        Ok(())
+    }
+
+    fn symlink(&self, path: &str, target: &str) -> Result<(), Errno> {
+        let mut nodes = self.nodes.lock();
+        Self::check_new(&nodes, path)?;
+        let ino = self.next_ino.fetch_add(1, Ordering::Relaxed);
+        nodes.insert(
+            String::from(path),
+            Arc::new(TmpLink {
+                target: String::from(target),
+                ino,
+            }),
+        );
         Ok(())
     }
 
