@@ -10,6 +10,7 @@
 //! socketpair(...)      ─┘
 //! ```
 
+pub mod dev;
 pub mod inet;
 pub mod loopback;
 pub mod stack;

@@ -134,6 +134,12 @@ impl Bsp {
                 format!("file={root}{VIRT_DISK},if=none,format=raw,id=hd0"),
                 "-device".to_string(),
                 "virtio-blk-device,drive=hd0".to_string(),
+                // virtio-net(virtio-mmio)。QEMU のユーザーモードのネットワーク(slirp)につなぐ:
+                // ゲストは 10.0.2.15、ゲートウェイ 10.0.2.2、DNS 10.0.2.3。DHCP にも答える
+                "-netdev".to_string(),
+                "user,id=net0".to_string(),
+                "-device".to_string(),
+                "virtio-net-device,netdev=net0".to_string(),
             ]);
         }
         args

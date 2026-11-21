@@ -200,35 +200,91 @@ fn init_scheduler() {
     });
 }
 
-/// virtio-mmio の枠を調べ、virtio-blk が見つかったら `vda`、`vdb`、… として登録する。
+/// virtio-mmio の枠を調べ、デバイスの種類ごとにドライバを付ける。
+/// - virtio-blk(2):`vda`、`vdb`、… としてブロック層に登録する
+/// - virtio-net(1):`eth0`、`eth1`、… としてネットワークデバイスに登録する
 fn probe_virtio<B: Board>() {
-    let mut next = b'a';
+    use hal::mmio::Mmio;
+    let mut next_disk = b'a';
     for &pa in B::VIRTIO_MMIO {
-        let Ok(dma) = kernel::mm::alloc_frame() else {
-            return;
-        };
         // SAFETY: pa は virtio-mmio の枠で、デバイスの範囲としてマップ済み
-        let regs = unsafe { hal::mmio::MmioRegion::new(device_va(pa)) };
-        let dma_va = phys_to_virt(dma).0 as *mut u8;
-        // SAFETY: dma は割り当てたばかりのフレームで、このドライバだけが使う
-        match unsafe { virtio_blk::VirtioBlk::new(regs, dma_va, dma.0) } {
-            Some(dev) => {
-                let name = alloc::format!("vd{}", next as char);
-                kernel::println!("virtio-blk: /dev/{name}, {} sectors", dev.capacity());
-                // 最近使った 256 セクタ(128KB)をメモリに残す。書き込みは sync するときと、
-                // そのセクタを捨てるときにディスクへ(write-back)
-                let cached = kernel::block::cache::CachedDevice::write_back(
-                    alloc::boxed::Box::new(dev),
-                    256,
-                );
-                kernel::block::register(
-                    &name,
-                    kernel::block::shared(alloc::boxed::Box::new(cached)),
-                );
-                next += 1;
+        let mut regs = unsafe { hal::mmio::MmioRegion::new(device_va(pa)) };
+        if regs.read(virtio_blk::MAGIC) != 0x7472_6976 {
+            continue;
+        }
+        match regs.read(virtio_blk::DEVICE_ID) {
+            2 => {
+                if probe_blk(pa, next_disk) {
+                    next_disk += 1;
+                }
             }
-            None => {
-                let _ = kernel::mm::release_frame(dma);
+            1 => probe_net(pa),
+            _ => {} // 空の枠(0)やまだ知らないデバイス
+        }
+    }
+}
+
+fn probe_blk(pa: usize, letter: u8) -> bool {
+    let Ok(dma) = kernel::mm::alloc_frame() else {
+        return false;
+    };
+    // SAFETY: pa は virtio-mmio の枠で、デバイスの範囲としてマップ済み
+    let regs = unsafe { hal::mmio::MmioRegion::new(device_va(pa)) };
+    let dma_va = phys_to_virt(dma).0 as *mut u8;
+    // SAFETY: dma は割り当てたばかりのフレームで、このドライバだけが使う
+    let Some(dev) = (unsafe { virtio_blk::VirtioBlk::new(regs, dma_va, dma.0) }) else {
+        let _ = kernel::mm::release_frame(dma);
+        return false;
+    };
+    let name = alloc::format!("vd{}", letter as char);
+    kernel::println!("virtio-blk: /dev/{name}, {} sectors", dev.capacity());
+    // 最近使った 256 セクタ(128KB)をメモリに残す。書き込みは sync するときと、
+    // そのセクタを捨てるときにディスクへ(write-back)
+    let cached = kernel::block::cache::CachedDevice::write_back(alloc::boxed::Box::new(dev), 256);
+    kernel::block::register(&name, kernel::block::shared(alloc::boxed::Box::new(cached)));
+    true
+}
+
+fn probe_net(pa: usize) {
+    // リングに 1 ページ、送り受けのバッファに QUEUE_SIZE ページ
+    let mut frames = alloc::vec::Vec::new();
+    for _ in 0..=virtio_net::QUEUE_SIZE {
+        match kernel::mm::alloc_frame() {
+            Ok(f) => frames.push(f),
+            Err(_) => {
+                for f in frames {
+                    let _ = kernel::mm::release_frame(f);
+                }
+                return;
+            }
+        }
+    }
+    let page = |f: hal::addr::PhysAddr| virtio_net::Page {
+        va: phys_to_virt(f).0 as *mut u8,
+        pa: f.0,
+    };
+    let ring = page(frames[0]);
+    let bufs: [virtio_net::Page; virtio_net::QUEUE_SIZE] =
+        core::array::from_fn(|i| page(frames[i + 1]));
+    // SAFETY: pa は virtio-mmio の枠。ページは割り当てたばかりで、このドライバだけが使う
+    let regs = unsafe { hal::mmio::MmioRegion::new(device_va(pa)) };
+    match unsafe { virtio_net::VirtioNet::new(regs, ring, bufs) } {
+        Some(dev) => {
+            let m = hal::net::NetDev::mac(&dev);
+            let name = kernel::net::dev::register(alloc::boxed::Box::new(dev));
+            kernel::println!(
+                "virtio-net: {name}, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                m[0],
+                m[1],
+                m[2],
+                m[3],
+                m[4],
+                m[5]
+            );
+        }
+        None => {
+            for f in frames {
+                let _ = kernel::mm::release_frame(f);
             }
         }
     }

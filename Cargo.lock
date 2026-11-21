@@ -33,6 +33,7 @@ dependencies = [
  "spin",
  "userland",
  "virtio-blk",
+ "virtio-net",
 ]
 
 [[package]]
@@ -268,6 +269,13 @@ version = "0.1.0"
 
 [[package]]
 name = "virtio-blk"
+version = "0.1.0"
+dependencies = [
+ "hal",
+]
+
+[[package]]
+name = "virtio-net"
 version = "0.1.0"
 dependencies = [
  "hal",

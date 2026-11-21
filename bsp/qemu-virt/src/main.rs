@@ -140,6 +140,15 @@ mod tests {
     }
 
     #[test_case]
+    fn the_virtio_network_card_is_found_as_eth0() {
+        // QEMU の既定の MAC アドレスは 52:54:00:12:34:56
+        assert_eq!(
+            kernel::net::dev::mac_of("eth0"),
+            Some([0x52, 0x54, 0x00, 0x12, 0x34, 0x56])
+        );
+    }
+
+    #[test_case]
     fn virtio_disk_is_readable_and_writable_through_dev_vda() {
         assert_eq!(boot::run_program("/bin/diskread", &[b"diskread"]), Ok(0));
     }
