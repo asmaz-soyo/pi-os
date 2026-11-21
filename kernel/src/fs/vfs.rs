@@ -438,8 +438,17 @@ pub fn check_replace(old: FileKind, new: FileKind, new_empty: bool) -> Result<()
 }
 
 /// マウントの表。長いマウントポイントから順に調べる。
+/// マウントの番号(st_dev)を振る。マウントのたびに 1 つずつ増やす(Linux の、ディスクのない
+/// ファイルシステムに割り当てる番号と同じ考え方)。起動のたびにマウントの順は同じなので、番号も同じになる。
+/// VFS が別でも番号は重ならないので、(st_dev, inode 番号) で見分ける名前付きパイプやソケットが混ざらない
+fn next_device() -> u64 {
+    static NEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct Vfs {
-    mounts: Vec<(String, Arc<dyn FileSystem>)>,
+    /// (マウント先, ファイルシステム, 番号(st_dev))
+    mounts: Vec<(String, Arc<dyn FileSystem>, u64)>,
     /// dentry キャッシュ:リンクを含まない絶対パス → (実体, 種類)。見つかったものだけを覚える。
     /// 名前を変える操作(作る、消す、動かす、リンク)は全部 Vfs を通るので、そこで古い項目を消す
     dentries: crate::sync::SpinLock<Dentries>,
@@ -454,15 +463,15 @@ const DENTRY_LIMIT: usize = 1024;
 impl Vfs {
     pub fn new(root: Arc<dyn FileSystem>) -> Self {
         Self {
-            mounts: alloc::vec![(String::from("/"), root)],
+            mounts: alloc::vec![(String::from("/"), root, next_device())],
             dentries: crate::sync::SpinLock::new(alloc::collections::BTreeMap::new()),
         }
     }
 
     pub fn mount(&mut self, at: &str, fs: Arc<dyn FileSystem>) {
-        self.mounts.push((String::from(at), fs));
+        self.mounts.push((String::from(at), fs, next_device()));
         self.mounts
-            .sort_by_key(|(p, _)| core::cmp::Reverse(p.len()));
+            .sort_by_key(|(p, _, _)| core::cmp::Reverse(p.len()));
         self.dentries.lock().clear();
     }
 
@@ -471,18 +480,13 @@ impl Vfs {
     pub fn device_of(&self, path: &str, follow: bool) -> Result<u64, Errno> {
         let path = self.resolve_path(path, follow)?;
         let (fs, _) = self.resolve(&path)?;
-        let index = self
+        let dev = self
             .mounts
             .iter()
-            .position(|(_, m)| core::ptr::addr_eq(Arc::as_ptr(m), fs as *const dyn FileSystem))
+            .find(|(_, m, _)| core::ptr::addr_eq(Arc::as_ptr(m), fs as *const dyn FileSystem))
+            .map(|(_, _, dev)| *dev)
             .ok_or(Errno::ENOENT)?;
-        // マウントの表は長い順に並べ替えるので、番号はマウント先の名前から作る(並べ替えで変わらない)
-        let at = &self.mounts[index].0;
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in at.bytes() {
-            h = (h ^ b as u64).wrapping_mul(0x100_0000_01b3);
-        }
-        Ok(h & 0xffff_ffff)
+        Ok(dev)
     }
 
     /// `path` のあるファイルシステムの情報(リンクは追う)
@@ -495,7 +499,7 @@ impl Vfs {
 
     /// マウントしているすべてのファイルシステムを sync する
     pub fn sync(&self) -> Result<(), Errno> {
-        for (_, fs) in &self.mounts {
+        for (_, fs, _) in &self.mounts {
             fs.sync()?;
         }
         Ok(())
@@ -511,7 +515,7 @@ impl Vfs {
 
     /// 絶対パスを、担当するファイルシステムとその中のパスに分ける。
     fn resolve<'a>(&'a self, path: &'a str) -> Result<(&'a dyn FileSystem, &'a str), Errno> {
-        for (at, fs) in &self.mounts {
+        for (at, fs, _) in &self.mounts {
             let rest = if at == "/" {
                 Some(path)
             } else {
@@ -776,7 +780,7 @@ impl Vfs {
         let path = &self.resolve_path(path, true)?;
         let (fs, inner) = self.resolve(path)?;
         let mut entries = fs.readdir(inner)?;
-        for (at, _) in &self.mounts {
+        for (at, _, _) in &self.mounts {
             if let Some(name) = at.strip_prefix(path).map(|r| r.trim_start_matches('/'))
                 && !name.is_empty()
                 && !name.contains('/')
