@@ -96,6 +96,19 @@ pub fn openat(p: &mut Process, dirfd: u64, path: u64, flags: u64, mode: u64) -> 
     if flags & O_TRUNC != 0 && st.kind == FileKind::Regular {
         file.truncate(0)?;
     }
+    // 名前付きパイプ:同じ FIFO を開いた人どうしをパイプでつなぐ
+    let file = if st.kind == FileKind::Fifo {
+        const O_NONBLOCK: u32 = 0o4000;
+        let key = (p.vfs.device_of(&path, true)?, st.ino);
+        let write = match flags & O_ACCMODE {
+            O_RDONLY => false,
+            O_WRONLY => true,
+            _ => return Err(Errno::EINVAL), // 読み書きの両方はまだ
+        };
+        crate::fs::pipe::open_fifo(key, write, flags & O_NONBLOCK != 0)?
+    } else {
+        file
+    };
     let fd = p.fds.insert(OpenFile::with_path(file, flags, path))?;
     Ok(fd as u64)
 }
@@ -682,6 +695,41 @@ fn own_new(p: &Process, file: &dyn vfs::File, path: &str) -> Result<(), Errno> {
         file.set_mode(st.mode | S_ISGID)?;
     }
     Ok(())
+}
+
+/// mknodat(dirfd, path, mode, dev):名前付きパイプ(S_IFIFO)と普通のファイル。
+/// デバイスファイルはまだ作れない(EPERM)
+pub fn mknodat(p: &mut Process, dirfd: u64, path: u64, mode: u64) -> Result<u64, Errno> {
+    const S_IFMT: u64 = 0o170000;
+    const S_IFIFO: u64 = 0o010000;
+    const S_IFREG: u64 = 0o100000;
+    let path = path_arg(p, dirfd, path)?;
+    let dir = p.vfs.lookup(&vfs::normalize(&path, ".."))?;
+    p.cred.check(&dir.stat(), Access::WRITE | Access::EXEC)?;
+    let perm = mode as u32 & 0o7777 & !p.umask;
+    match mode & S_IFMT {
+        S_IFIFO => p.vfs.mknod(&path, FileKind::Fifo, perm)?,
+        0 | S_IFREG => {
+            if p.vfs.lookup_nofollow(&path).is_ok() {
+                return Err(Errno::EEXIST);
+            }
+            drop(p.vfs.create(&path, perm)?);
+        }
+        _ => return Err(Errno::EPERM),
+    }
+    own_new(p, &*p.vfs.lookup_nofollow(&path)?, &path)?;
+    Ok(0)
+}
+
+/// fchdir(fd):開いたディレクトリに移る
+pub fn fchdir(p: &mut Process, fd: u64) -> Result<u64, Errno> {
+    let f = p.fds.get(fd)?;
+    if f.file.stat().kind != FileKind::Directory {
+        return Err(Errno::ENOTDIR);
+    }
+    p.cred.check(&f.file.stat(), Access::EXEC)?;
+    p.cwd = f.path.clone().ok_or(Errno::ENOTDIR)?;
+    Ok(0)
 }
 
 /// symlinkat(target, newdirfd, linkpath)

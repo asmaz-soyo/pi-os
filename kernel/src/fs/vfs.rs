@@ -397,6 +397,11 @@ pub trait FileSystem: Send + Sync {
         Err(Errno::ENOTDIR)
     }
 
+    /// 特別なファイル(今は名前付きパイプ:`FileKind::Fifo` だけ)を作る
+    fn mknod(&self, _path: &str, _kind: FileKind, _mode: u32) -> Result<(), Errno> {
+        Err(Errno::EROFS)
+    }
+
     /// `path` に、`target` を指すシンボリックリンクを作る
     fn symlink(&self, _path: &str, _target: &str) -> Result<(), Errno> {
         Err(Errno::EROFS)
@@ -687,6 +692,17 @@ impl Vfs {
         let r = fs.unlink(inner, dir);
         self.forget(&path);
         r
+    }
+
+    /// 名前付きパイプなどを作る
+    pub fn mknod(&self, path: &str, kind: FileKind, mode: u32) -> Result<(), Errno> {
+        let path = self.resolve_path(path, false)?;
+        let (fs, inner) = self.resolve(&path)?;
+        if fs.lookup(inner).is_ok() {
+            return Err(Errno::EEXIST);
+        }
+        self.forget(&path);
+        fs.mknod(inner, kind, mode)
     }
 
     /// `path` に `target` を指すシンボリックリンクを作る

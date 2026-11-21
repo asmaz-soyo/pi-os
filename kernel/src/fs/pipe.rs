@@ -17,8 +17,9 @@ const CAPACITY: usize = 64 * 1024;
 #[derive(Default)]
 struct State {
     buf: VecDeque<u8>,
-    reader_closed: bool,
-    writer_closed: bool,
+    /// 開いている読む側・書く側の数(名前付きパイプは、何人も開いたり閉じたりする)
+    readers: usize,
+    writers: usize,
 }
 
 #[derive(Default)]
@@ -41,10 +42,66 @@ fn stat() -> Stat {
 pub struct ReadEnd(Arc<Pipe>);
 pub struct WriteEnd(Arc<Pipe>);
 
+impl ReadEnd {
+    fn open(pipe: Arc<Pipe>) -> Self {
+        pipe.state.lock().readers += 1;
+        Self(pipe)
+    }
+}
+
+impl WriteEnd {
+    fn open(pipe: Arc<Pipe>) -> Self {
+        pipe.state.lock().writers += 1;
+        Self(pipe)
+    }
+}
+
 /// パイプを作り、(読む側, 書く側) を返す。
 pub fn new() -> (Arc<dyn File>, Arc<dyn File>) {
     let pipe = Arc::new(Pipe::default());
-    (Arc::new(ReadEnd(pipe.clone())), Arc::new(WriteEnd(pipe)))
+    (
+        Arc::new(ReadEnd::open(pipe.clone())),
+        Arc::new(WriteEnd::open(pipe)),
+    )
+}
+
+/// 名前付きパイプ(FIFO)の中身:(st_dev, inode 番号) → パイプ。開いている人がいる間だけ残る
+static FIFOS: crate::sync::SpinLock<
+    alloc::collections::BTreeMap<(u64, u64), alloc::sync::Weak<Pipe>>,
+> = crate::sync::SpinLock::new(alloc::collections::BTreeMap::new());
+
+/// 名前付きパイプを開く。同じ FIFO(`key` = (st_dev, inode 番号))を開いた人どうしがつながる。
+/// 読む側は書く側が来るまで、書く側は読む側が来るまで待つ。`nonblock` なら待たない
+/// (読む側はそのまま開き、書く側は読む側がいなければ ENXIO)。
+pub fn open_fifo(key: (u64, u64), write: bool, nonblock: bool) -> Result<Arc<dyn File>, Errno> {
+    let pipe = {
+        let mut fifos = FIFOS.lock();
+        fifos.retain(|_, w| w.strong_count() > 0);
+        match fifos.get(&key).and_then(|w| w.upgrade()) {
+            Some(p) => p,
+            None => {
+                let p = Arc::new(Pipe::default());
+                fifos.insert(key, Arc::downgrade(&p));
+                p
+            }
+        }
+    };
+    if write {
+        if nonblock && pipe.state.lock().readers == 0 {
+            return Err(Errno::ENXIO);
+        }
+        let end = WriteEnd::open(pipe.clone());
+        while pipe.state.lock().readers == 0 {
+            crate::sched::relax();
+        }
+        Ok(Arc::new(end))
+    } else {
+        let end = ReadEnd::open(pipe.clone());
+        while !nonblock && pipe.state.lock().writers == 0 {
+            crate::sched::relax();
+        }
+        Ok(Arc::new(end))
+    }
 }
 
 impl File for ReadEnd {
@@ -66,7 +123,7 @@ impl File for ReadEnd {
                     }
                     return Ok(n);
                 }
-                if s.writer_closed {
+                if s.writers == 0 {
                     return Ok(0);
                 }
             }
@@ -77,13 +134,13 @@ impl File for ReadEnd {
 
     fn poll_readable(&self) -> bool {
         let s = self.0.state.lock();
-        !s.buf.is_empty() || s.writer_closed
+        !s.buf.is_empty() || s.writers == 0
     }
 }
 
 impl Drop for ReadEnd {
     fn drop(&mut self) {
-        self.0.state.lock().reader_closed = true;
+        self.0.state.lock().readers -= 1;
     }
 }
 
@@ -97,7 +154,7 @@ impl File for WriteEnd {
         while done < buf.len() {
             {
                 let mut s = self.0.state.lock();
-                if s.reader_closed {
+                if s.readers == 0 {
                     // 少しでも書けていればその分を返す
                     return if done > 0 {
                         Ok(done)
@@ -121,6 +178,6 @@ impl File for WriteEnd {
 
 impl Drop for WriteEnd {
     fn drop(&mut self) {
-        self.0.state.lock().writer_closed = true;
+        self.0.state.lock().writers -= 1;
     }
 }

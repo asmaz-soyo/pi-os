@@ -185,6 +185,20 @@ impl File for TmpLink {
     }
 }
 
+/// 名前付きパイプ:名前と持ち主だけ。中身(パイプ)は開いたときに pipe::open_fifo が用意する
+struct TmpFifo {
+    meta: SpinLock<Meta>,
+    ino: u64,
+}
+
+impl File for TmpFifo {
+    meta_ops!();
+
+    fn stat(&self) -> Stat {
+        Meta::stat(&self.meta, FileKind::Fifo, 0, self.ino)
+    }
+}
+
 pub struct Tmpfs {
     nodes: SpinLock<BTreeMap<String, Arc<dyn File>>>,
     next_ino: AtomicU64,
@@ -204,6 +218,8 @@ fn meta_of(f: &Arc<dyn File>) -> Option<&SpinLock<Meta>> {
     if let Some(x) = any.downcast_ref::<TmpFile>() {
         Some(&x.meta)
     } else if let Some(x) = any.downcast_ref::<TmpLink>() {
+        Some(&x.meta)
+    } else if let Some(x) = any.downcast_ref::<TmpFifo>() {
         Some(&x.meta)
     } else {
         any.downcast_ref::<TmpDir>().map(|x| &x.meta)
@@ -325,6 +341,23 @@ impl FileSystem for Tmpfs {
             m.ctime = Timespec::now();
         }
         nodes.insert(String::from(new), file);
+        Ok(())
+    }
+
+    fn mknod(&self, path: &str, kind: FileKind, mode: u32) -> Result<(), Errno> {
+        if kind != FileKind::Fifo {
+            return Err(Errno::EPERM);
+        }
+        let mut nodes = self.nodes.lock();
+        Self::check_new(&nodes, path)?;
+        let ino = self.next_ino.fetch_add(1, Ordering::Relaxed);
+        nodes.insert(
+            String::from(path),
+            Arc::new(TmpFifo {
+                meta: Meta::new(mode),
+                ino,
+            }),
+        );
         Ok(())
     }
 

@@ -31,6 +31,7 @@ static const char *errname(int e) {
     case ENOTEMPTY: return "ENOTEMPTY";
     case EXDEV: return "EXDEV";
     case ELOOP: return "ELOOP";
+    case ENXIO: return "ENXIO";
     case ENOSYS: return "ENOSYS";
     default: return "?";
     }
@@ -111,6 +112,25 @@ int main(int argc, char **argv) {
     show("rename dir", rename("rd", "rd2"));
     show("rmdir rd2", rmdir("rd2"));
     show("unlink r2", unlink("r2"));
+
+    // 名前付きパイプ
+    show("mkfifo", mkfifo("ff", 0644));
+    show("mkfifo exists", mkfifo("ff", 0644));
+    show("open fifo writer nonblock", open("ff", O_WRONLY | O_NONBLOCK));
+    int fr = open("ff", O_RDONLY | O_NONBLOCK);
+    show_fd("open fifo reader", fr);
+    int fw = open("ff", O_WRONLY);
+    show_fd("open fifo writer", fw);
+    show("fifo write", write(fw, "fifo", 4));
+    show("fifo read", read(fr, buf, sizeof buf));
+    close(fw);
+    show("fifo eof", read(fr, buf, sizeof buf));
+    close(fr);
+    stat("ff", &st);
+    printf("is fifo = %d\n", S_ISFIFO(st.st_mode));
+    show("unlink ff", unlink("ff"));
+    show("fchdir", (fd = open(".", O_RDONLY | O_DIRECTORY)) < 0 ? -1 : fchdir(fd));
+    close(fd);
 
     // O_APPEND
     fd = open("ap", O_CREAT | O_WRONLY, 0644);

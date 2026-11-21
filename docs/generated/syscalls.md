@@ -13,6 +13,7 @@
 | 24 | `dup3` | 3 |
 | 25 | `fcntl` | 3 |
 | 29 | `ioctl` | 3 |
+| 33 | `mknodat` | 4 |
 | 34 | `mkdirat` | 3 |
 | 35 | `unlinkat` | 3 |
 | 36 | `symlinkat` | 3 |
@@ -23,6 +24,7 @@
 | 46 | `ftruncate` | 2 |
 | 48 | `faccessat` | 3 |
 | 49 | `chdir` | 1 |
+| 50 | `fchdir` | 1 |
 | 52 | `fchmod` | 2 |
 | 53 | `fchmodat` | 3 |
 | 54 | `fchownat` | 5 |
@@ -86,4 +88,4 @@
 | 276 | `renameat2` | 5 |
 | 278 | `getrandom` | 3 |
 
-合計 80 個
+合計 82 個

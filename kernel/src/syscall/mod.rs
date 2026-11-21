@@ -25,6 +25,7 @@ pub mod nr {
     pub const PIPE2: u64 = 59;
     pub const FCNTL: u64 = 25;
     pub const IOCTL: u64 = 29;
+    pub const MKNODAT: u64 = 33;
     pub const MKDIRAT: u64 = 34;
     pub const UNLINKAT: u64 = 35;
     pub const SYMLINKAT: u64 = 36;
@@ -35,6 +36,7 @@ pub mod nr {
     pub const FTRUNCATE: u64 = 46;
     pub const FACCESSAT: u64 = 48;
     pub const CHDIR: u64 = 49;
+    pub const FCHDIR: u64 = 50;
     pub const FCHMOD: u64 = 52;
     pub const FCHMODAT: u64 = 53;
     pub const FCHOWNAT: u64 = 54;
@@ -204,6 +206,7 @@ table! {
     nr::DUP3, "dup3", 3 => |p, a| result(fs::dup3(p, a[0], a[1], a[2]));
     nr::FCNTL, "fcntl", 3 => |p, a| result(fs::fcntl(p, a[0], a[1], a[2]));
     nr::IOCTL, "ioctl", 3 => |p, a| result(fs::ioctl(p, a[0], a[1], a[2]));
+    nr::MKNODAT, "mknodat", 4 => |p, a| result(fs::mknodat(p, a[0], a[1], a[2]));
     nr::MKDIRAT, "mkdirat", 3 => |p, a| result(fs::mkdirat(p, a[0], a[1], a[2]));
     nr::UNLINKAT, "unlinkat", 3 => |p, a| result(fs::unlinkat(p, a[0], a[1], a[2]));
     nr::SYMLINKAT, "symlinkat", 3 => |p, a| result(fs::symlinkat(p, a[0], a[1], a[2]));
@@ -214,6 +217,7 @@ table! {
     nr::FTRUNCATE, "ftruncate", 2 => |p, a| result(fs::ftruncate(p, a[0], a[1]));
     nr::FACCESSAT, "faccessat", 3 => |p, a| result(fs::faccessat(p, a[0], a[1], a[2]));
     nr::CHDIR, "chdir", 1 => |p, a| result(fs::chdir(p, a[0]));
+    nr::FCHDIR, "fchdir", 1 => |p, a| result(fs::fchdir(p, a[0]));
     nr::FCHMOD, "fchmod", 2 => |p, a| result(fs::fchmod(p, a[0], a[1]));
     nr::FCHMODAT, "fchmodat", 3 => |p, a| result(fs::fchmodat(p, a[0], a[1], a[2]));
     nr::FCHOWNAT, "fchownat", 5 => |p, a| result(fs::fchownat(p, a[0], a[1], a[2], a[3], a[4]));
@@ -351,6 +355,8 @@ pub fn dispatch(p: &mut Process, nr: u64, a: [u64; 6]) -> Action {
 
 #[cfg(test)]
 mod tests_chmod;
+#[cfg(test)]
+mod tests_fifo;
 #[cfg(test)]
 mod tests_link;
 #[cfg(test)]

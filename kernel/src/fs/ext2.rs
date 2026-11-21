@@ -360,6 +360,7 @@ impl Inner {
 const S_IFREG: u16 = 0x8000;
 const S_IFDIR: u16 = 0x4000;
 const S_IFLNK: u16 = 0xa000;
+const S_IFIFO: u16 = 0x1000;
 /// これより短いリンクは、指す先を inode のブロック番号の欄(60 バイト)にそのまま入れる
 const FAST_LINK_MAX: usize = 60;
 const SB: u64 = 1024;
@@ -664,6 +665,7 @@ impl Inner {
         let ftype = match kind {
             FileKind::Directory => 2,
             FileKind::Symlink => 7,
+            FileKind::Fifo => 5,
             _ => 1,
         };
         let bs = self.block_size as usize;
@@ -1012,6 +1014,7 @@ fn kind_of(mode: u16) -> FileKind {
         0x4000 => FileKind::Directory,
         0x2000 => FileKind::CharDevice,
         0xa000 => FileKind::Symlink,
+        0x1000 => FileKind::Fifo,
         _ => FileKind::Regular,
     }
 }
@@ -1436,6 +1439,32 @@ impl FileSystem for Ext2 {
             inode.ctime = now_secs();
             self.inner.write_inode(ino, &inode)?;
             self.inner.add_entry(dir_ino, name, ino, kind)
+        })
+    }
+
+    fn mknod(&self, path: &str, kind: FileKind, mode: u32) -> Result<(), Errno> {
+        if kind != FileKind::Fifo {
+            return Err(Errno::EPERM);
+        }
+        let _meta = self.inner.meta.lock();
+        self.inner.transaction(|| {
+            let (parent, name) = split(path);
+            let (dir_ino, dir) = self.inner.lookup(parent)?;
+            if kind_of(dir.mode) != FileKind::Directory {
+                return Err(Errno::ENOTDIR);
+            }
+            if self.inner.lookup(path).is_ok() {
+                return Err(Errno::EEXIST);
+            }
+            let ino = self.inner.alloc_inode(false)?;
+            let inode = Inode {
+                mode: S_IFIFO | (mode as u16 & 0o7777),
+                links: 1,
+                ..Inode::default()
+            }
+            .born();
+            self.inner.write_inode(ino, &inode)?;
+            self.inner.add_entry(dir_ino, name, ino, FileKind::Fifo)
         })
     }
 
@@ -2488,6 +2517,27 @@ mod write_tests {
         assert_eq!(after.free_blocks, before.free_blocks - 10);
         assert_eq!(after.free_files, before.free_files - 1);
         // ここで数えている空きは、e2fsck が確かめるスーパーブロックの値と同じ
+        fsck(&disk);
+    }
+
+    #[test]
+    fn fifos_are_stored_as_inodes() {
+        let disk = blank();
+        {
+            let fs = Ext2::new(disk.clone()).unwrap();
+            fs.mknod("/q", FileKind::Fifo, 0o640).unwrap();
+        }
+        let fs = Ext2::new(disk.clone()).unwrap();
+        let st = fs.lookup("/q").unwrap().stat();
+        assert_eq!((st.kind, st.mode), (FileKind::Fifo, 0o640));
+        assert!(
+            fs.readdir("/")
+                .unwrap()
+                .iter()
+                .any(|e| e.name == "q" && e.kind == FileKind::Fifo)
+        );
+        fsck(&disk);
+        fs.unlink("/q", false).unwrap();
         fsck(&disk);
     }
 }
