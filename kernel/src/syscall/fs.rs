@@ -65,7 +65,9 @@ pub fn openat(p: &mut Process, dirfd: u64, path: u64, flags: u64, mode: u64) -> 
             if let Ok(dir) = p.vfs.lookup(&parent) {
                 p.cred.check(&dir.stat(), Access::WRITE | Access::EXEC)?;
             }
-            p.vfs.create(&path, mode as u32 & 0o777)?
+            let file = p.vfs.create(&path, mode as u32 & 0o777)?;
+            own_new(p, &*file)?;
+            file
         }
         Err(e) => return Err(e),
     };
@@ -104,6 +106,7 @@ const AT_REMOVEDIR: u64 = 0x200;
 pub fn mkdirat(p: &mut Process, dirfd: u64, path: u64, mode: u64) -> Result<u64, Errno> {
     let path = path_arg(p, dirfd, path)?;
     p.vfs.mkdir(&path, mode as u32 & 0o7777)?;
+    own_new(p, &*p.vfs.lookup_nofollow(&path)?)?;
     Ok(0)
 }
 
@@ -443,6 +446,72 @@ pub fn readlinkat(
     Ok(n as u64)
 }
 
+/// chmod の共通部分:持ち主か root だけが変えられる
+fn change_mode(p: &Process, file: &dyn vfs::File, mode: u64) -> Result<u64, Errno> {
+    if p.cred.euid != 0 && p.cred.euid != file.stat().uid {
+        return Err(Errno::EPERM);
+    }
+    file.set_mode(mode as u32 & 0o7777)?;
+    Ok(0)
+}
+
+/// chown の共通部分:root だけが変えられる。-1(u32::MAX)はその値を変えない
+fn change_owner(p: &Process, file: &dyn vfs::File, uid: u64, gid: u64) -> Result<u64, Errno> {
+    if p.cred.euid != 0 {
+        return Err(Errno::EPERM);
+    }
+    let st = file.stat();
+    let pick = |v: u64, old: u32| if v as u32 == u32::MAX { old } else { v as u32 };
+    file.set_owner(pick(uid, st.uid), pick(gid, st.gid))?;
+    Ok(0)
+}
+
+/// fchmodat(dirfd, path, mode, flags)
+pub fn fchmodat(p: &mut Process, dirfd: u64, path: u64, mode: u64) -> Result<u64, Errno> {
+    let path = path_arg(p, dirfd, path)?;
+    let file = p.vfs.lookup(&path)?;
+    change_mode(p, &*file, mode)
+}
+
+/// fchmod(fd, mode)
+pub fn fchmod(p: &mut Process, fd: u64, mode: u64) -> Result<u64, Errno> {
+    let file = p.fds.get(fd)?.file.clone();
+    change_mode(p, &*file, mode)
+}
+
+/// fchownat(dirfd, path, uid, gid, flags)。AT_SYMLINK_NOFOLLOW ならリンクそのもの(lchown)
+pub fn fchownat(
+    p: &mut Process,
+    dirfd: u64,
+    path: u64,
+    uid: u64,
+    gid: u64,
+    flags: u64,
+) -> Result<u64, Errno> {
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    let path = path_arg(p, dirfd, path)?;
+    let file = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        p.vfs.lookup_nofollow(&path)?
+    } else {
+        p.vfs.lookup(&path)?
+    };
+    change_owner(p, &*file, uid, gid)
+}
+
+/// fchown(fd, uid, gid)
+pub fn fchown(p: &mut Process, fd: u64, uid: u64, gid: u64) -> Result<u64, Errno> {
+    let file = p.fds.get(fd)?.file.clone();
+    change_owner(p, &*file, uid, gid)
+}
+
+/// 新しく作ったものを、作ったプロセスの持ち主(実効 uid と gid)にする
+fn own_new(p: &Process, file: &dyn vfs::File) -> Result<(), Errno> {
+    if p.cred.euid != 0 || p.cred.egid != 0 {
+        file.set_owner(p.cred.euid, p.cred.egid)?;
+    }
+    Ok(())
+}
+
 /// symlinkat(target, newdirfd, linkpath)
 pub fn symlinkat(p: &mut Process, target: u64, dirfd: u64, link: u64) -> Result<u64, Errno> {
     let raw = p.mem.read_cstr(VirtAddr(target), PATH_MAX)?;
@@ -455,6 +524,7 @@ pub fn symlinkat(p: &mut Process, target: u64, dirfd: u64, link: u64) -> Result<
     let dir = p.vfs.lookup(&vfs::normalize(&link, ".."))?;
     p.cred.check(&dir.stat(), Access::WRITE | Access::EXEC)?;
     p.vfs.symlink(&target, &link)?;
+    own_new(p, &*p.vfs.lookup_nofollow(&link)?)?;
     Ok(0)
 }
 

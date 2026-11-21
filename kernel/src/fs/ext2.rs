@@ -97,8 +97,9 @@ impl Inner {
         }
         Ok(Inode {
             mode: le16(&raw, 0),
-            uid: le16(&raw, 2) as u32,
-            gid: le16(&raw, 24) as u32,
+            // 下の 16 ビットと、Linux の拡張の上の 16 ビット(120 バイト目、122 バイト目)
+            uid: le16(&raw, 2) as u32 | (le16(&raw, 120) as u32) << 16,
+            gid: le16(&raw, 24) as u32 | (le16(&raw, 122) as u32) << 16,
             size: le32(&raw, 4) as u64 | ((le32(&raw, 108) as u64) << 32),
             links: le16(&raw, 26),
             sectors: le32(&raw, 28),
@@ -339,6 +340,8 @@ impl Inner {
         raw[20..24].copy_from_slice(&inode.dtime.to_le_bytes());
         raw[24..26].copy_from_slice(&(inode.gid as u16).to_le_bytes());
         raw[26..28].copy_from_slice(&inode.links.to_le_bytes());
+        raw[120..122].copy_from_slice(&((inode.uid >> 16) as u16).to_le_bytes());
+        raw[122..124].copy_from_slice(&((inode.gid >> 16) as u16).to_le_bytes());
         raw[28..32].copy_from_slice(&inode.sectors.to_le_bytes());
         for (i, b) in inode.blocks.iter().enumerate() {
             raw[40 + i * 4..44 + i * 4].copy_from_slice(&b.to_le_bytes());
@@ -638,6 +641,21 @@ impl Inode {
 }
 
 impl File for Ext2File {
+    fn set_mode(&self, mode: u32) -> Result<(), Errno> {
+        let _meta = self.fs.meta.lock();
+        let mut inode = self.fs.inode(self.ino)?;
+        inode.mode = (inode.mode & 0xf000) | (mode as u16 & 0o7777);
+        self.fs.write_inode(self.ino, &inode)
+    }
+
+    fn set_owner(&self, uid: u32, gid: u32) -> Result<(), Errno> {
+        let _meta = self.fs.meta.lock();
+        let mut inode = self.fs.inode(self.ino)?;
+        inode.uid = uid;
+        inode.gid = gid;
+        self.fs.write_inode(self.ino, &inode)
+    }
+
     fn readlink(&self) -> Result<String, Errno> {
         let inode = self.fs.inode(self.ino)?;
         if kind_of(inode.mode) != FileKind::Symlink {
@@ -1321,6 +1339,23 @@ mod write_tests {
         fs.unlink("/long", false).unwrap();
         fs.rename("/d/up", "/up").unwrap();
         assert_eq!(fs.lookup("/up").unwrap().readlink().unwrap(), "..");
+        fsck(&disk);
+    }
+
+    #[test]
+    fn mode_and_owner_changes_are_written_to_the_inode() {
+        let disk = blank();
+        {
+            let fs = Ext2::new(disk.clone()).unwrap();
+            let f = fs.lookup("/keep.txt").unwrap();
+            f.set_mode(0o4750).unwrap();
+            // 16 ビットを超える uid(上の 16 ビットは inode の別の場所に入る)
+            f.set_owner(70000, 100).unwrap();
+        }
+        let fs = Ext2::new(disk.clone()).unwrap();
+        let st = fs.lookup("/keep.txt").unwrap().stat();
+        assert_eq!((st.mode, st.uid, st.gid), (0o4750, 70000, 100));
+        assert_eq!(st.kind, FileKind::Regular);
         fsck(&disk);
     }
 }

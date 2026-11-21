@@ -112,6 +112,19 @@ int main(int argc, char **argv) {
     show("rmdir rd2", rmdir("rd2"));
     show("unlink r2", unlink("r2"));
 
+    // chmod
+    close(open("cm", O_CREAT | O_WRONLY, 0644));
+    show("chmod", chmod("cm", 0600));
+    stat("cm", &st);
+    printf("mode = %o\n", st.st_mode & 07777);
+    fd = open("cm", O_RDONLY);
+    show("fchmod", fchmod(fd, 04755));
+    fstat(fd, &st);
+    printf("mode = %o\n", st.st_mode & 07777);
+    close(fd);
+    show("chmod missing", chmod("nope", 0600));
+    show("unlink cm", unlink("cm"));
+
     // シンボリックリンク
     close(open("t", O_CREAT | O_WRONLY, 0644));
     show("symlink", symlink("t", "ln"));

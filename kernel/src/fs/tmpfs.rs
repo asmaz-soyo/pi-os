@@ -12,22 +12,65 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+/// 持ち主と権限(chmod と chown で変わる)
+#[derive(Clone, Copy)]
+struct Meta {
+    mode: u32,
+    uid: u32,
+    gid: u32,
+}
+
+impl Meta {
+    fn new(mode: u32) -> SpinLock<Meta> {
+        SpinLock::new(Meta {
+            mode: mode & 0o7777,
+            uid: 0,
+            gid: 0,
+        })
+    }
+
+    fn stat(meta: &SpinLock<Meta>, kind: FileKind, size: u64, ino: u64) -> Stat {
+        let m = *meta.lock();
+        Stat {
+            kind,
+            mode: m.mode,
+            size,
+            ino,
+            uid: m.uid,
+            gid: m.gid,
+        }
+    }
+}
+
+/// chmod と chown(どのノードも同じ)
+macro_rules! meta_ops {
+    () => {
+        fn set_mode(&self, mode: u32) -> Result<(), Errno> {
+            self.meta.lock().mode = mode & 0o7777;
+            Ok(())
+        }
+
+        fn set_owner(&self, uid: u32, gid: u32) -> Result<(), Errno> {
+            let mut m = self.meta.lock();
+            m.uid = uid;
+            m.gid = gid;
+            Ok(())
+        }
+    };
+}
+
 struct TmpFile {
     data: SpinLock<Vec<u8>>,
-    mode: u32,
+    meta: SpinLock<Meta>,
     ino: u64,
 }
 
 impl File for TmpFile {
+    meta_ops!();
+
     fn stat(&self) -> Stat {
-        Stat {
-            kind: FileKind::Regular,
-            mode: self.mode & 0o777,
-            size: self.data.lock().len() as u64,
-            ino: self.ino,
-            uid: 0,
-            gid: 0,
-        }
+        let size = self.data.lock().len() as u64;
+        Meta::stat(&self.meta, FileKind::Regular, size, self.ino)
     }
 
     fn read(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
@@ -55,20 +98,15 @@ impl File for TmpFile {
 }
 
 struct TmpDir {
-    mode: u32,
+    meta: SpinLock<Meta>,
     ino: u64,
 }
 
 impl File for TmpDir {
+    meta_ops!();
+
     fn stat(&self) -> Stat {
-        Stat {
-            kind: FileKind::Directory,
-            mode: self.mode & 0o777,
-            size: 0,
-            ino: self.ino,
-            uid: 0,
-            gid: 0,
-        }
+        Meta::stat(&self.meta, FileKind::Directory, 0, self.ino)
     }
 
     fn read(&self, _offset: u64, _buf: &mut [u8]) -> Result<usize, Errno> {
@@ -83,19 +121,20 @@ impl File for TmpDir {
 /// シンボリックリンク:指す先のパスを持つだけ
 struct TmpLink {
     target: String,
+    meta: SpinLock<Meta>,
     ino: u64,
 }
 
 impl File for TmpLink {
+    meta_ops!();
+
     fn stat(&self) -> Stat {
-        Stat {
-            kind: FileKind::Symlink,
-            mode: 0o777,
-            size: self.target.len() as u64,
-            ino: self.ino,
-            uid: 0,
-            gid: 0,
-        }
+        Meta::stat(
+            &self.meta,
+            FileKind::Symlink,
+            self.target.len() as u64,
+            self.ino,
+        )
     }
 
     fn readlink(&self) -> Result<String, Errno> {
@@ -122,7 +161,7 @@ impl Tmpfs {
         nodes.insert(
             String::from("/"),
             Arc::new(TmpDir {
-                mode: 0o1777,
+                meta: Meta::new(0o1777),
                 ino: 1,
             }),
         );
@@ -161,7 +200,7 @@ impl FileSystem for Tmpfs {
         Self::check_new(&nodes, path)?;
         let file: Arc<dyn File> = Arc::new(TmpFile {
             data: SpinLock::new(Vec::new()),
-            mode,
+            meta: Meta::new(mode),
             ino: self.next_ino.fetch_add(1, Ordering::Relaxed),
         });
         nodes.insert(String::from(path), file.clone());
@@ -172,7 +211,13 @@ impl FileSystem for Tmpfs {
         let mut nodes = self.nodes.lock();
         Self::check_new(&nodes, path)?;
         let ino = self.next_ino.fetch_add(1, Ordering::Relaxed);
-        nodes.insert(String::from(path), Arc::new(TmpDir { mode, ino }));
+        nodes.insert(
+            String::from(path),
+            Arc::new(TmpDir {
+                meta: Meta::new(mode),
+                ino,
+            }),
+        );
         Ok(())
     }
 
@@ -202,6 +247,7 @@ impl FileSystem for Tmpfs {
             String::from(path),
             Arc::new(TmpLink {
                 target: String::from(target),
+                meta: Meta::new(0o777),
                 ino,
             }),
         );

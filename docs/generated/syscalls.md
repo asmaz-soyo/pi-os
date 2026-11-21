@@ -20,6 +20,10 @@
 | 46 | `ftruncate` | 2 |
 | 48 | `faccessat` | 3 |
 | 49 | `chdir` | 1 |
+| 52 | `fchmod` | 2 |
+| 53 | `fchmodat` | 3 |
+| 54 | `fchownat` | 5 |
+| 55 | `fchown` | 3 |
 | 56 | `openat` | 4 |
 | 57 | `close` | 1 |
 | 59 | `pipe2` | 2 |
@@ -74,4 +78,4 @@
 | 276 | `renameat2` | 5 |
 | 278 | `getrandom` | 3 |
 
-合計 68 個
+合計 72 個

@@ -32,6 +32,10 @@ pub mod nr {
     pub const FTRUNCATE: u64 = 46;
     pub const FACCESSAT: u64 = 48;
     pub const CHDIR: u64 = 49;
+    pub const FCHMOD: u64 = 52;
+    pub const FCHMODAT: u64 = 53;
+    pub const FCHOWNAT: u64 = 54;
+    pub const FCHOWN: u64 = 55;
     pub const OPENAT: u64 = 56;
     pub const CLOSE: u64 = 57;
     pub const GETDENTS64: u64 = 61;
@@ -199,6 +203,10 @@ table! {
     nr::FTRUNCATE, "ftruncate", 2 => |p, a| result(fs::ftruncate(p, a[0], a[1]));
     nr::FACCESSAT, "faccessat", 3 => |p, a| result(fs::faccessat(p, a[0], a[1], a[2]));
     nr::CHDIR, "chdir", 1 => |p, a| result(fs::chdir(p, a[0]));
+    nr::FCHMOD, "fchmod", 2 => |p, a| result(fs::fchmod(p, a[0], a[1]));
+    nr::FCHMODAT, "fchmodat", 3 => |p, a| result(fs::fchmodat(p, a[0], a[1], a[2]));
+    nr::FCHOWNAT, "fchownat", 5 => |p, a| result(fs::fchownat(p, a[0], a[1], a[2], a[3], a[4]));
+    nr::FCHOWN, "fchown", 3 => |p, a| result(fs::fchown(p, a[0], a[1], a[2]));
     nr::OPENAT, "openat", 4 => |p, a| result(fs::openat(p, a[0], a[1], a[2], a[3]));
     nr::CLOSE, "close", 1 => |p, a| result(p.fds.close(a[0]).map(|_| 0));
     nr::PIPE2, "pipe2", 2 => |p, a| result(fs::pipe2(p, a[0], a[1]));
@@ -318,6 +326,8 @@ pub fn dispatch(p: &mut Process, nr: u64, a: [u64; 6]) -> Action {
     action
 }
 
+#[cfg(test)]
+mod tests_chmod;
 #[cfg(test)]
 mod tests_mm;
 #[cfg(test)]

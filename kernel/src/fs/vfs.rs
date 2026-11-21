@@ -93,6 +93,16 @@ pub trait File: Send + Sync {
         false
     }
 
+    /// 権限のビット(下の 12 ビット:rwx と setuid・setgid・スティッキー)を変える
+    fn set_mode(&self, _mode: u32) -> Result<(), Errno> {
+        Err(Errno::EROFS)
+    }
+
+    /// 持ち主を変える
+    fn set_owner(&self, _uid: u32, _gid: u32) -> Result<(), Errno> {
+        Err(Errno::EROFS)
+    }
+
     /// シンボリックリンクなら、指す先のパス。リンクでなければ EINVAL
     fn readlink(&self) -> Result<String, Errno> {
         Err(Errno::EINVAL)
