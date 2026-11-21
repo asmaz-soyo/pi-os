@@ -75,6 +75,10 @@ pub fn init<B: Board>() {
     init_scheduler();
     // 6. タイマ割り込み
     start_timer::<B>();
+    // 7. キャッシュに残った書き込みを、後ろで少しずつディスクへ書くスレッド(ディスクがあるときだけ)
+    if kernel::block::find("vda").is_some() {
+        kernel::sched::spawn(flusher, 0).expect("start the flusher thread");
+    }
     if cfg!(feature = "trace-syscalls") {
         kernel::syscall::TRACE.store(true, core::sync::atomic::Ordering::Relaxed);
     }
@@ -161,6 +165,18 @@ fn new_context(
 ) -> kernel::sched::SavedContext {
     kernel::sched::SavedContext {
         regs: arch_aarch64::context::new_thread_context(stack_top, entry, arg, exit),
+    }
+}
+
+/// 汚れてから 5 秒たったセクタを、1 秒ごとにディスクへ書く(Linux の dirty_expire と同じ考え)。
+/// 書き込みをしばらくまとめつつ、急に電源が切れても失うのは最後の数秒分だけにする
+fn flusher(_: usize) {
+    const SEC: u64 = 1_000_000_000;
+    loop {
+        kernel::sched::sleep_until(kernel::time::now_ns() + SEC);
+        if let Err(e) = kernel::block::flush_older_all(5 * SEC) {
+            kernel::println!("flusher: {e:?}");
+        }
     }
 }
 

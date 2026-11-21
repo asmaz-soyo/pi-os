@@ -15,6 +15,11 @@ pub trait BlockDevice: Send {
     fn flush(&mut self) -> Result<(), BlockError> {
         Ok(())
     }
+    /// まだ書いていないもののうち、`age_ns` ナノ秒より前から書いていないものだけを書く
+    /// (後ろで少しずつ書き出すため)
+    fn flush_older(&mut self, _age_ns: u64) -> Result<(), BlockError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

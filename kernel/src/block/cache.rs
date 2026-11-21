@@ -18,6 +18,8 @@ struct Entry {
     used: u64,
     /// まだディスクに書いていない(write-back)
     dirty: bool,
+    /// 最初に汚れた時刻(ナノ秒)
+    dirty_since: u64,
 }
 
 pub struct CachedDevice {
@@ -28,6 +30,8 @@ pub struct CachedDevice {
     order: BTreeMap<u64, u64>,
     clock: u64,
     write_back: bool,
+    /// 今の時刻(ナノ秒)。テストでは差し替える
+    now: fn() -> u64,
 }
 
 impl CachedDevice {
@@ -40,7 +44,13 @@ impl CachedDevice {
             order: BTreeMap::new(),
             clock: 0,
             write_back: false,
+            now: crate::time::now_ns,
         }
+    }
+
+    /// 時刻の取り方を差し替える(テスト用)
+    pub fn with_clock(self, now: fn() -> u64) -> Self {
+        Self { now, ..self }
     }
 
     /// write-back のキャッシュ(書き込みは `flush` か、そのセクタを捨てるときにディスクへ)
@@ -69,8 +79,12 @@ impl CachedDevice {
         data: &[u8; BLOCK_SIZE],
         dirty: bool,
     ) -> Result<(), BlockError> {
+        let now = (self.now)();
         if let Some(e) = self.entries.get_mut(&lba) {
             e.data.copy_from_slice(data);
+            if dirty && !e.dirty {
+                e.dirty_since = now;
+            }
             e.dirty |= dirty;
             self.touch(lba);
             return Ok(());
@@ -94,6 +108,7 @@ impl CachedDevice {
                 data: data_box,
                 used: 0,
                 dirty,
+                dirty_since: now,
             },
         );
         // 順番は 1 から数えるので、used: 0 は順番の表にない。touch で表に入る
@@ -133,6 +148,17 @@ impl BlockDevice for CachedDevice {
             }
         }
         self.inner.flush()
+    }
+
+    fn flush_older(&mut self, age_ns: u64) -> Result<(), BlockError> {
+        let now = (self.now)();
+        for (&lba, e) in self.entries.iter_mut() {
+            if e.dirty && now.saturating_sub(e.dirty_since) >= age_ns {
+                self.inner.write_block(lba, &e.data)?;
+                e.dirty = false;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -191,6 +217,48 @@ mod tests {
         assert_eq!(buf, [2; BLOCK_SIZE]);
         dev.flush().unwrap();
         assert_eq!(writes.load(Ordering::Relaxed), 2, "nothing left to write");
+    }
+
+    static FAKE_NOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    fn fake_now() -> u64 {
+        FAKE_NOW.load(Ordering::Relaxed)
+    }
+    const SEC: u64 = 1_000_000_000;
+
+    #[test]
+    fn sectors_dirty_for_long_enough_are_written_in_the_background() {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let mut dev = CachedDevice::write_back(
+            Box::new(CountingWrites(RamDisk::new(64), writes.clone())),
+            8,
+        )
+        .with_clock(fake_now);
+        FAKE_NOW.store(0, Ordering::Relaxed);
+        dev.write_block(1, &[1; BLOCK_SIZE]).unwrap();
+        FAKE_NOW.store(3 * SEC, Ordering::Relaxed);
+        dev.write_block(2, &[2; BLOCK_SIZE]).unwrap();
+        // 書き直しても、最初に汚れた時刻は変わらない(書き続けると、いつまでも書かれないのを防ぐ)
+        FAKE_NOW.store(4 * SEC, Ordering::Relaxed);
+        dev.write_block(1, &[9; BLOCK_SIZE]).unwrap();
+        dev.flush_older(5 * SEC).unwrap();
+        assert_eq!(writes.load(Ordering::Relaxed), 0, "nothing is 5 s old yet");
+        FAKE_NOW.store(6 * SEC, Ordering::Relaxed);
+        dev.flush_older(5 * SEC).unwrap();
+        assert_eq!(
+            writes.load(Ordering::Relaxed),
+            1,
+            "sector 1 was dirtied at 0 s"
+        );
+        let mut buf = [0u8; BLOCK_SIZE];
+        dev.inner.read_block(1, &mut buf).unwrap();
+        assert_eq!(buf, [9; BLOCK_SIZE]);
+        FAKE_NOW.store(9 * SEC, Ordering::Relaxed);
+        dev.flush_older(5 * SEC).unwrap();
+        assert_eq!(
+            writes.load(Ordering::Relaxed),
+            2,
+            "sector 2 was dirtied at 3 s"
+        );
     }
 
     #[test]

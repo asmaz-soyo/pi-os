@@ -38,6 +38,17 @@ pub fn sync_all() -> Result<(), crate::Errno> {
     Ok(())
 }
 
+/// 登録したすべてのディスクの、`age_ns` より前から書いていないものを書く(後ろでの書き出し)
+pub fn flush_older_all(age_ns: u64) -> Result<(), crate::Errno> {
+    let disks: Vec<SharedDisk> = DISKS.lock().iter().map(|(_, d)| d.clone()).collect();
+    for d in disks {
+        d.lock()
+            .flush_older(age_ns)
+            .map_err(|_| crate::Errno::EIO)?;
+    }
+    Ok(())
+}
+
 pub fn find(name: &str) -> Option<SharedDisk> {
     DISKS
         .lock()
@@ -96,6 +107,10 @@ impl BlockDevice for PartitionDevice {
 
     fn flush(&mut self) -> Result<(), hal::block::BlockError> {
         self.disk.lock().flush()
+    }
+
+    fn flush_older(&mut self, age_ns: u64) -> Result<(), hal::block::BlockError> {
+        self.disk.lock().flush_older(age_ns)
     }
 }
 
