@@ -368,7 +368,7 @@ fn make_disk(path: &str, overlay: &[(&str, String)]) -> Result<(), String> {
     std::fs::write(&ext2, b"").map_err(|e| e.to_string())?;
     // fakeroot の中で持ち主を root にしてから作る(ディスクのファイルは root の持ち物にする)
     let script = format!(
-        "chown -R 0:0 '{}' && mke2fs -q -F -t ext2 -b 1024 -I 128 -d '{}' '{}' {}",
+        "chown -R 0:0 '{}' && mke2fs -q -F -t ext3 -O ^dir_index -J size=4 -b 1024 -I 128 -d '{}' '{}' {}",
         stage.display(),
         stage.display(),
         ext2.display(),

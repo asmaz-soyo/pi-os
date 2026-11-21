@@ -27,6 +27,7 @@
 | CPython 3.15(QEMU virt のディスクから) | 完了 | `p2-cpython` |
 | VFS の作り込み:rename、dirfd、シンボリックリンク、chmod/chown、時刻、ハードリンク | 完了 | `p2-vfs` |
 | VFS の続き:umask、スティッキー、setgid、パスのたどり方、dentry キャッシュ、ブロックキャッシュ(write-back)、sync | 完了 | `p2-vfs2` |
+| ext3 のジャーナル(JBD2:リプレイ、トランザクション、電源断のテスト)、negative dentry、後ろでの書き出し | 完了 | `p2-journal` |
 | GPIO 割り込みの fd、リアルタイム優先度、ジッタ計測 | 完了 | `p2-realtime` |
 | ブロック層(virtio-blk、MBR)、ext2 の読み書き、procfs | 完了 | `p2-ext2` |
 | FAT32 の読み込み(`/boot`) | 完了 | `p2-fat32` |
