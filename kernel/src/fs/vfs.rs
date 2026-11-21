@@ -377,8 +377,8 @@ pub struct Vfs {
     dentries: crate::sync::SpinLock<Dentries>,
 }
 
-/// dentry キャッシュの中身:パス → (実体, 種類)
-type Dentries = alloc::collections::BTreeMap<String, (Arc<dyn File>, FileKind)>;
+/// dentry キャッシュの中身:パス → (実体, 種類)。None は「その名前はない」(negative dentry)
+type Dentries = alloc::collections::BTreeMap<String, Option<(Arc<dyn File>, FileKind)>>;
 
 /// dentry キャッシュに覚える数の上限(超えたら全部忘れて覚え直す)
 const DENTRY_LIMIT: usize = 1024;
@@ -514,13 +514,43 @@ impl Vfs {
         next: &str,
     ) -> Result<(Arc<dyn File>, FileKind), Errno> {
         if let Some(hit) = self.dentries.lock().get(next) {
-            return Ok(hit.clone());
+            return hit.clone().ok_or(Errno::ENOENT);
         }
         let (fs, inner) = self.resolve(next)?;
         let (parent_fs, parent_inner) = self.resolve(cur)?;
+        let found = self.find(fs, inner, parent_fs, parent_inner, cur_file, name);
+        let entry = match found {
+            Ok(file) => {
+                // 種類は変わらないので、実体と一緒に覚える(たどるたびに inode を読まずに済む)
+                let kind = file.stat().kind;
+                Some((file, kind))
+            }
+            Err(Errno::ENOENT) => None,
+            Err(e) => return Err(e),
+        };
+        if fs.cacheable() {
+            let mut d = self.dentries.lock();
+            if d.len() >= DENTRY_LIMIT {
+                d.clear();
+            }
+            d.insert(String::from(next), entry.clone());
+        }
+        entry.ok_or(Errno::ENOENT)
+    }
+
+    /// `child` の中身:ファイルシステムに聞く
+    fn find(
+        &self,
+        fs: &dyn FileSystem,
+        inner: &str,
+        parent_fs: &dyn FileSystem,
+        parent_inner: &str,
+        cur_file: &mut Option<Arc<dyn File>>,
+        name: &str,
+    ) -> Result<Arc<dyn File>, Errno> {
         // マウントポイントをまたぐときは、マウントの表から探す
-        let file = if inner == "/" || !core::ptr::addr_eq(fs, parent_fs) {
-            fs.lookup(inner)?
+        if inner == "/" || !core::ptr::addr_eq(fs, parent_fs) {
+            fs.lookup(inner)
         } else {
             let dir = match cur_file {
                 Some(d) => d.clone(),
@@ -530,18 +560,8 @@ impl Vfs {
                     d
                 }
             };
-            fs.lookup_child(&dir, parent_inner, name)?
-        };
-        // 種類は変わらないので、実体と一緒に覚える(たどるたびに inode を読まずに済む)
-        let kind = file.stat().kind;
-        if fs.cacheable() {
-            let mut d = self.dentries.lock();
-            if d.len() >= DENTRY_LIMIT {
-                d.clear();
-            }
-            d.insert(String::from(next), (file.clone(), kind));
+            fs.lookup_child(&dir, parent_inner, name)
         }
-        Ok((file, kind))
     }
 
     /// 絶対パスの実体を探す(リンクは最後まで追う)。
@@ -751,6 +771,27 @@ mod tests {
         assert!(vfs.lookup("/l/x").is_ok());
         vfs.unlink("/l", false).unwrap();
         assert_eq!(vfs.lookup("/l/x").err(), Some(Errno::ENOENT));
+    }
+
+    #[test]
+    fn remembered_missing_names_are_forgotten_when_created() {
+        let vfs = tmp_vfs();
+        for (path, make) in [("/n1", 0), ("/n2", 1), ("/n3", 2), ("/n4", 3), ("/n5", 4)] {
+            assert_eq!(vfs.lookup(path).err(), Some(Errno::ENOENT));
+            match make {
+                0 => drop(vfs.create(path, 0o644).unwrap()),
+                1 => vfs.mkdir(path, 0o755).unwrap(),
+                2 => vfs.symlink("/a", path).unwrap(),
+                3 => vfs.link("/a", path, false).unwrap(),
+                _ => vfs.rename("/a", path, false).unwrap(),
+            }
+            assert!(vfs.lookup(path).is_ok(), "{path}");
+        }
+        // 「ない」ディレクトリの下も「ない」
+        assert_eq!(vfs.lookup("/nodir/x").err(), Some(Errno::ENOENT));
+        vfs.mkdir("/nodir", 0o755).unwrap();
+        vfs.create("/nodir/x", 0o644).unwrap();
+        assert!(vfs.lookup("/nodir/x").is_ok());
     }
 
     #[test]

@@ -1293,6 +1293,26 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_name_is_remembered_as_missing() {
+        // シェルの PATH 探しや Python の import は、ない名前を何度も探す
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let disk = Counting {
+            disk: RamDisk::from_bytes(&image(&[("usr/lib/x.py", b"x")])),
+            reads: reads.clone(),
+        };
+        let vfs = crate::fs::vfs::Vfs::new(std::sync::Arc::new(
+            Ext2::new(shared(Box::new(disk))).unwrap(),
+        ));
+        assert_eq!(vfs.lookup("/usr/lib/missing.py").err(), Some(Errno::ENOENT));
+        reads.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(vfs.lookup("/usr/lib/missing.py").err(), Some(Errno::ENOENT));
+        assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 0);
+        // 作ったら見える(「ない」の記憶は消える)
+        vfs.create("/usr/lib/missing.py", 0o644).unwrap();
+        assert!(vfs.lookup("/usr/lib/missing.py").is_ok());
+    }
+
+    #[test]
     fn missing_paths_and_bad_images() {
         let fs = mount(&[("a", b"x")]);
         assert_eq!(fs.lookup("/nope").err(), Some(Errno::ENOENT));
