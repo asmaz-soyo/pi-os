@@ -568,6 +568,13 @@ pub const COMPAT_CASES: &[(&str, &[&str])] = &[
     ("busybox", &["sh", "-c", "x=$((2 ** 10)); echo $x; exit 4"]),
     ("busybox", &["test", "-d", "/nonexistent"]),
     ("busybox", &["ls", "/nonexistent"]),
+    (
+        "micropython",
+        &[
+            "-c",
+            "import sys; print(sum(range(100)), [x * x for x in range(5)], 'ok'); sys.exit(5)",
+        ],
+    ),
 ];
 
 /// Pi-OS で互換テストを動かすシェルスクリプト。ケースごとに印を出し、終了コードを出す。

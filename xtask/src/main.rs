@@ -192,10 +192,10 @@ fn compat(cases: &[(String, Vec<String>)], cmd: &Cmd) -> Result<(), String> {
     let bin = initramfs_tar()?.parent().unwrap().to_path_buf();
     let mut linux = Vec::new();
     for (prog, args) in cases {
-        let path = if prog == "busybox" {
-            bin.join("busybox-1.38.0/busybox_unstripped")
-        } else {
-            bin.join(prog)
+        let path = match prog.as_str() {
+            "busybox" => bin.join("busybox-1.38.0/busybox_unstripped"),
+            "micropython" => bin.join("micropython-1.29.0/ports/unix/build-standard/micropython"),
+            _ => bin.join(prog),
         };
         let out = Command::new("qemu-aarch64")
             .arg(&path)

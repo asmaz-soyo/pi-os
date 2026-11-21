@@ -31,6 +31,11 @@ fn main() {
     // Rust のプログラム(user/rust/<名前>)
     let svcman = build_rust_program(&root, "svcman", &out);
     files.push(("bin/svcman".to_string(), std::fs::read(svcman).unwrap()));
+    let micropython = build_micropython(&root.join("third_party/micropython"), &out);
+    files.push((
+        "bin/micropython".to_string(),
+        std::fs::read(micropython).unwrap(),
+    ));
     let busybox = build_busybox(&root.join("third_party/busybox"), &out);
     files.push(("bin/busybox".to_string(), std::fs::read(busybox).unwrap()));
     collect(&root.join("rootfs"), "", &mut files);
@@ -152,6 +157,54 @@ fn build_rust_program(root: &Path, name: &str, out: &Path) -> PathBuf {
         "building {name} for {TARGET} failed (rustup target add {TARGET})"
     );
     target_dir.join(TARGET).join("release").join(name)
+}
+
+/// MicroPython の unix ポートをビルドする(ffi、btree、ssl、frozen モジュールはなし:サブモジュールが要るため)。
+/// 1. ホストの cc で mpy-cross(.py をバイトコードにする道具)を作る
+/// 2. zig cc(`zcc.sh` / `zcpp.sh`)で aarch64-linux-musl の静的リンクの `micropython` を作る
+fn build_micropython(dir: &Path, out: &Path) -> PathBuf {
+    const VERSION: &str = "micropython-1.29.0";
+    let src = out.join(VERSION);
+    let bin = src.join("ports/unix/build-standard/micropython");
+    if bin.exists() {
+        return bin;
+    }
+    if !src.join("py").exists() {
+        let mut cmd = Command::new("tar");
+        cmd.arg("-xzf")
+            .arg(dir.join(format!("{VERSION}.tar.gz")))
+            .arg("-C")
+            .arg(out);
+        run(cmd, "extracting MicroPython");
+    }
+    let jobs = std::env::var("NUM_JOBS").unwrap_or_else(|_| "4".to_string());
+    // cargo がビルドスクリプトに渡す DEBUG=true を、MicroPython の Makefile は
+    // 「デバッグビルド(-O0 -g)」と読むので外す
+    let mut cmd = Command::new("make");
+    cmd.current_dir(src.join("mpy-cross"))
+        .env_remove("DEBUG")
+        .arg(format!("-j{jobs}"))
+        .stdout(std::process::Stdio::null());
+    run(cmd, "building mpy-cross");
+    let mut cmd = Command::new("make");
+    cmd.current_dir(src.join("ports/unix"))
+        .env_remove("DEBUG")
+        .env("ZIG_LOCAL_CACHE_DIR", out.join("zig-cache"))
+        .env("ZIG_GLOBAL_CACHE_DIR", out.join("zig-global-cache"))
+        .arg(format!("-j{jobs}"))
+        .arg("VARIANT=standard")
+        .arg(format!("CC={}", dir.join("zcc.sh").display()))
+        .arg(format!("LD={}", dir.join("zcc.sh").display()))
+        .arg(format!("CPP={}", dir.join("zcpp.sh").display()))
+        .args(["STRIP=true", "SIZE=true", "FROZEN_MANIFEST="])
+        .args(["MICROPY_PY_FFI=0", "MICROPY_PY_BTREE=0", "MICROPY_PY_SSL=0"])
+        .arg("MICROPY_STANDALONE=0")
+        // zig のリンカは -Map を知らない
+        .arg("LDFLAGS_ARCH=-Wl,--gc-sections")
+        .arg("LDFLAGS_EXTRA=-static -s")
+        .stdout(std::process::Stdio::null());
+    run(cmd, "building MicroPython");
+    bin
 }
 
 /// BusyBox を、tarball を展開して `pios.config`(機能を絞った設定)でビルドする。

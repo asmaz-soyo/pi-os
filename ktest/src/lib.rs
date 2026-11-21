@@ -266,6 +266,19 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn micropython_runs_code_and_scripts() {
+            let argv: [&[u8]; 3] = [
+                b"micropython",
+                b"-c",
+                b"import sys; assert sum(range(10)) == 45; print('Hello from MicroPython')",
+            ];
+            assert_eq!(boot::run_program("/bin/micropython", &argv), Ok(0));
+            // ファイルの読み書き、os.listdir、sys.exit(3)
+            let argv: [&[u8]; 2] = [b"micropython", b"/hello.py"];
+            assert_eq!(boot::run_program("/bin/micropython", &argv), Ok(3));
+        }
+
+        #[test_case]
         fn a_realtime_task_wakes_on_time_despite_a_busy_task() {
             // 5ms 周期で起き、遅れの最大が 1ms 以内(低い優先度のタスクが CPU を回していても)
             let argv: [&[u8]; 3] = [b"jitter", b"rt", b"1000"];

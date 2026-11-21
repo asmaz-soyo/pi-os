@@ -16,6 +16,7 @@ bin
 dev
 etc
 hello.js
+hello.py
 proc
 tmp
 pi-os:/$ cat /proc/version
