@@ -622,6 +622,9 @@ impl Inner {
             while at < bs {
                 let e_ino = le32(&data, at);
                 let rec = le16(&data, at + 4) as usize;
+                if rec < 8 || at + rec > bs {
+                    return Err(Errno::EIO); // 壊れたディレクトリ(長さ 0 だと先に進めない)
+                }
                 let used = if e_ino == 0 {
                     0
                 } else {
@@ -668,6 +671,9 @@ impl Inner {
             while at < bs {
                 let ino = le32(&data, at);
                 let rec = le16(&data, at + 4) as usize;
+                if rec < 8 || at + rec > bs {
+                    return Err(Errno::EIO); // 壊れたディレクトリ(長さ 0 だと先に進めない)
+                }
                 let len = data[at + 6] as usize;
                 if ino != 0 && &data[at + 8..at + 8 + len] == name.as_bytes() {
                     match prev {
@@ -702,6 +708,9 @@ impl Inner {
         let mut at = 0;
         while at + 8 <= bs {
             let rec = le16(&data, at + 4) as usize;
+            if rec < 8 || at + rec > bs {
+                return Err(Errno::EIO); // 壊れたディレクトリ(長さ 0 だと先に進めない)
+            }
             let len = data[at + 6] as usize;
             if len == 2 && &data[at + 8..at + 10] == b".." {
                 return self.write_bytes(base + at as u64, &parent.to_le_bytes());
@@ -808,9 +817,11 @@ impl Inner {
         // 2. コミット
         journal.write_log(pos, &header(2))?;
         self.barrier()?;
-        // 3. 「ここから読め」と「要リカバリ」
-        jbd::write_super(&journal, seq, sb.first)?;
+        // 3. 「要リカバリ」の印を先に立ててから、「ここから読め」を書く(逆だと、間で電源が切れたときに
+        //    ジャーナルにデータがあるのに印がない、が残る。印があってジャーナルが空なのは害がない)
         self.set_recover_flag(true)?;
+        self.barrier()?;
+        jbd::write_super(&journal, seq, sb.first)?;
         self.barrier()?;
         // 4. 本来の場所へ
         for (block, data) in blocks {
@@ -1089,13 +1100,17 @@ impl Ext2 {
                 tx: crate::sync::SpinLock::new(None),
             }),
         };
-        // ext3 のジャーナル:前に書きかけで止まっていたら、コミット済みのものを書き直す
-        let has_journal = le32(&sb, 92) & COMPAT_HAS_JOURNAL != 0;
-        if has_journal && le32(&sb, 96) & INCOMPAT_RECOVER != 0 {
-            let journal = Journal::open(&fs.inner, le32(&sb, 224))?;
-            crate::fs::jbd::recover(&journal)?;
-            let incompat = le32(&sb, 96) & !INCOMPAT_RECOVER;
-            fs.inner.write_bytes(1024 + 96, &incompat.to_le_bytes())?;
+        // ext3 のジャーナル:前に書きかけで止まっていたら、コミット済みのものを書き直す。
+        // 「要リカバリ」の印がなくても、ジャーナルにデータが残っていればリプレイする
+        if fs.inner.journal_ino != 0 {
+            let journal = Journal::open(&fs.inner, fs.inner.journal_ino)?;
+            let pending = crate::fs::jbd::read_super(&journal)?.start != 0;
+            if pending || le32(&sb, 96) & INCOMPAT_RECOVER != 0 {
+                crate::fs::jbd::recover(&journal)?;
+                fs.inner.barrier()?;
+                fs.inner.set_recover_flag(false)?;
+                fs.inner.barrier()?;
+            }
         }
         Ok(fs)
     }
@@ -2088,5 +2103,126 @@ mod write_tests {
         assert_eq!(fs.create("/nodir/x", 0o644).err(), Some(Errno::ENOENT));
         assert_eq!(journal_super(&fs).sequence, before);
         fsck(&disk);
+    }
+
+    /// 電源断のまね:`budget` 回書いたら、それ以降の書き込みは黙って消える
+    struct Crashing {
+        disk: std::sync::Arc<crate::sync::SpinLock<RamDisk>>,
+        budget: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        written: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl hal::block::BlockDevice for Crashing {
+        fn block_count(&self) -> u64 {
+            self.disk.lock().block_count()
+        }
+        fn read_block(
+            &mut self,
+            lba: u64,
+            buf: &mut [u8; BLOCK_SIZE],
+        ) -> Result<(), hal::block::BlockError> {
+            self.disk.lock().read_block(lba, buf)
+        }
+        fn write_block(
+            &mut self,
+            lba: u64,
+            buf: &[u8; BLOCK_SIZE],
+        ) -> Result<(), hal::block::BlockError> {
+            use std::sync::atomic::Ordering::Relaxed;
+            self.written.fetch_add(1, Relaxed);
+            if self.budget.load(Relaxed) == 0 {
+                return Ok(()); // 電源が切れた後:書いたつもりでも残らない
+            }
+            self.budget.fetch_sub(1, Relaxed);
+            self.disk.lock().write_block(lba, buf)
+        }
+    }
+
+    /// 一続きの操作(エラーは無視:電源が切れた後は、カーネルの中の状態とディスクが食い違うので)
+    fn workload(fs: &Ext2, data: &[u8]) {
+        let _ = fs.mkdir("/d", 0o755);
+        if let Ok(f) = fs.create("/d/f", 0o644) {
+            let _ = f.write(0, data);
+        }
+        let _ = fs.rename("/d/f", "/g");
+        let _ = fs.unlink("/keep.txt", false);
+    }
+
+    fn bytes_of(disk: &crate::sync::SpinLock<RamDisk>) -> Vec<u8> {
+        use hal::block::BlockDevice;
+        let mut d = disk.lock();
+        let mut out = Vec::new();
+        let mut sector = [0u8; BLOCK_SIZE];
+        for lba in 0..d.block_count() {
+            d.read_block(lba, &mut sector).unwrap();
+            out.extend_from_slice(&sector);
+        }
+        out
+    }
+
+    #[test]
+    fn a_power_cut_at_any_write_leaves_a_consistent_filesystem() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+        let fresh = bytes_of(&crate::sync::SpinLock::new(RamDisk::from_bytes(&{
+            let d = ext3_with_journal(&[]);
+            let mut v = Vec::new();
+            let mut sec = [0u8; BLOCK_SIZE];
+            let mut g = d.lock();
+            for lba in 0..g.block_count() {
+                g.read_block(lba, &mut sec).unwrap();
+                v.extend_from_slice(&sec);
+            }
+            v
+        })));
+        let data: Vec<u8> = (0..3000u32).map(|i| (i % 250) as u8 + 1).collect();
+        // 1 回目:最後まで書いて、全部で何回書くかを数える
+        let run = |budget: usize| {
+            let disk = Arc::new(crate::sync::SpinLock::new(RamDisk::from_bytes(&fresh)));
+            let written = Arc::new(AtomicUsize::new(0));
+            let dev = Crashing {
+                disk: disk.clone(),
+                budget: Arc::new(AtomicUsize::new(budget)),
+                written: written.clone(),
+            };
+            if let Ok(fs) = Ext2::new(shared(Box::new(dev))) {
+                workload(&fs, &data);
+            }
+            (bytes_of(&disk), written.load(Relaxed))
+        };
+        let (_, total) = run(usize::MAX);
+        assert!(total > 20, "{total} writes");
+        for cut in 0..=total {
+            let (after, _) = run(cut);
+            // 電源が戻った:ふつうにマウントすると、ジャーナルのリプレイが走る
+            let disk = shared(Box::new(RamDisk::from_bytes(&after)));
+            let fs =
+                Ext2::new(disk.clone()).unwrap_or_else(|e| panic!("cut at {cut}: mount {e:?}"));
+            let content = |p: &str| {
+                fs.lookup(p).ok().map(|f| {
+                    let mut v = std::vec![0u8; f.stat().size as usize];
+                    f.read(0, &mut v).unwrap();
+                    v
+                })
+            };
+            // それぞれの操作は「全部か、何もなしか」
+            let (g, df) = (content("/g"), content("/d/f"));
+            assert!(
+                g.is_none() || df.is_none(),
+                "cut at {cut}: both names exist"
+            );
+            for c in [&g, &df].into_iter().flatten() {
+                assert!(
+                    c.is_empty() || *c == data,
+                    "cut at {cut}: partial write ({} bytes)",
+                    c.len()
+                );
+            }
+            if let Some(k) = content("/keep.txt") {
+                assert_eq!(k, b"keep", "cut at {cut}");
+            }
+            drop(fs);
+            fsck(&disk);
+        }
     }
 }
