@@ -159,7 +159,12 @@ pub struct OpenFile {
     pub offset: SpinLock<u64>,
     /// 開いたときの絶対パス(ディレクトリの一覧に使う)
     pub path: Option<String>,
+    /// 追記(O_APPEND):書くときは毎回ファイルの終わりから。fcntl(F_SETFL)で変えられる
+    pub append: core::sync::atomic::AtomicBool,
 }
+
+/// 追記で開く(書くときは毎回ファイルの終わりから)
+pub const O_APPEND: u32 = 0o2000;
 
 impl OpenFile {
     pub fn new(file: Arc<dyn File>, flags: u32) -> Arc<Self> {
@@ -168,6 +173,7 @@ impl OpenFile {
             flags,
             offset: SpinLock::new(0),
             path: None,
+            append: core::sync::atomic::AtomicBool::new(flags & O_APPEND != 0),
         })
     }
 
@@ -177,7 +183,14 @@ impl OpenFile {
             flags,
             offset: SpinLock::new(0),
             path: Some(path),
+            append: core::sync::atomic::AtomicBool::new(flags & O_APPEND != 0),
         })
+    }
+
+    /// 今の状態のフラグ(fcntl の F_GETFL)
+    pub fn status_flags(&self) -> u32 {
+        let append = self.append.load(core::sync::atomic::Ordering::Relaxed);
+        (self.flags & !O_APPEND) | if append { O_APPEND } else { 0 }
     }
 
     pub fn readable(&self) -> bool {

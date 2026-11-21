@@ -311,3 +311,65 @@ fn sync_and_fsync_succeed_on_open_files() {
         err(Errno::EBADF)
     );
 }
+
+const O_APPEND: u64 = 0o2000;
+const F_GETFL: u64 = 3;
+const F_SETFL: u64 = 4;
+
+fn write_str(p: &mut crate::process::Process, fd: u64, s: &[u8]) {
+    put(p, SCRATCH, s);
+    assert_eq!(
+        call(p, nr::WRITE, [fd, SCRATCH, s.len() as u64, 0, 0, 0]),
+        s.len() as u64
+    );
+}
+
+fn contents(p: &mut crate::process::Process, path_: &[u8]) -> std::vec::Vec<u8> {
+    let fd = open(p, path_, 0);
+    let n = call(p, nr::READ, [fd, SCRATCH + 0x100, 256, 0, 0, 0]);
+    get(p, SCRATCH + 0x100, n as usize)
+}
+
+#[test]
+fn o_append_writes_always_go_to_the_end() {
+    let (mut p, _) = process();
+    let fd = open(&mut p, b"/tmp/log", O_CREAT | O_WRONLY);
+    write_str(&mut p, fd, b"first\n");
+    let fd = open(&mut p, b"/tmp/log", O_WRONLY | O_APPEND);
+    write_str(&mut p, fd, b"second\n");
+    // 先頭に戻しても、書くときは末尾
+    call(&mut p, nr::LSEEK, [fd, 0, 0, 0, 0, 0]);
+    write_str(&mut p, fd, b"third\n");
+    assert_eq!(contents(&mut p, b"/tmp/log"), b"first\nsecond\nthird\n");
+    // 別の fd が途中で伸ばしても、その後ろに書く
+    let other = open(&mut p, b"/tmp/log", O_WRONLY | O_APPEND);
+    write_str(&mut p, other, b"4\n");
+    write_str(&mut p, fd, b"5\n");
+    assert_eq!(
+        contents(&mut p, b"/tmp/log"),
+        b"first\nsecond\nthird\n4\n5\n"
+    );
+}
+
+#[test]
+fn fcntl_reports_and_changes_o_append() {
+    let (mut p, _) = process();
+    let fd = open(&mut p, b"/tmp/f", O_CREAT | O_WRONLY | O_APPEND);
+    assert_eq!(
+        call(&mut p, nr::FCNTL, [fd, F_GETFL, 0, 0, 0, 0]) & O_APPEND,
+        O_APPEND
+    );
+    assert_eq!(call(&mut p, nr::FCNTL, [fd, F_SETFL, 0, 0, 0, 0]), 0);
+    assert_eq!(
+        call(&mut p, nr::FCNTL, [fd, F_GETFL, 0, 0, 0, 0]) & O_APPEND,
+        0
+    );
+    write_str(&mut p, fd, b"abc");
+    call(&mut p, nr::LSEEK, [fd, 0, 0, 0, 0, 0]);
+    write_str(&mut p, fd, b"X");
+    assert_eq!(
+        contents(&mut p, b"/tmp/f"),
+        b"Xbc",
+        "without O_APPEND, writes go to the offset"
+    );
+}

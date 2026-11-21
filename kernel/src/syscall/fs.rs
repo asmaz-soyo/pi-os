@@ -288,10 +288,15 @@ fn read_into(p: &mut Process, f: &OpenFile, buf: u64, count: u64) -> Result<u64,
 fn write_from(p: &mut Process, f: &OpenFile, buf: u64, count: u64) -> Result<u64, Errno> {
     let mut chunk = vec![0u8; CHUNK.min(count as usize)];
     let mut done = 0;
+    let append = f.append.load(core::sync::atomic::Ordering::Relaxed);
     while done < count {
         let n = (count - done).min(CHUNK as u64) as usize;
         p.mem
             .copy_from_user(VirtAddr(buf + done), &mut chunk[..n])?;
+        // 追記なら、書く直前のファイルの終わりから(ほかの fd が伸ばしていても、その後ろに)
+        if append {
+            *f.offset.lock() = f.file.stat().size;
+        }
         let offset = *f.offset.lock();
         let written = f.file.write(offset, &chunk[..n])?;
         *f.offset.lock() = offset + written as u64;
@@ -729,9 +734,15 @@ pub fn fcntl(p: &mut Process, fd: u64, cmd: u64, arg: u64) -> Result<u64, Errno>
             p.fds.set_cloexec(fd, arg & FD_CLOEXEC != 0)?;
             Ok(0)
         }
-        F_GETFL => Ok(f.flags as u64),
-        // O_NONBLOCK などはまだ扱わない(受け付けるだけ)
-        F_SETFL => Ok(0),
+        F_GETFL => Ok(f.status_flags() as u64),
+        // 変えられるのは O_APPEND だけ(O_NONBLOCK などはまだ扱わない:受け付けるだけ)
+        F_SETFL => {
+            f.append.store(
+                arg as u32 & vfs::O_APPEND != 0,
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            Ok(0)
+        }
         _ => Err(Errno::EINVAL),
     }
 }

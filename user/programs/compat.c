@@ -112,6 +112,19 @@ int main(int argc, char **argv) {
     show("rmdir rd2", rmdir("rd2"));
     show("unlink r2", unlink("r2"));
 
+    // O_APPEND
+    fd = open("ap", O_CREAT | O_WRONLY, 0644);
+    write(fd, "one\n", 4);
+    close(fd);
+    fd = open("ap", O_WRONLY | O_APPEND);
+    lseek(fd, 0, SEEK_SET);
+    show("append write", write(fd, "two\n", 4));
+    show("append flag", fcntl(fd, F_GETFL) & O_APPEND ? 1 : 0);
+    close(fd);
+    stat("ap", &st);
+    printf("size after append = %ld\n", (long)st.st_size);
+    show("unlink ap", unlink("ap"));
+
     // ハードリンク
     close(open("h1", O_CREAT | O_WRONLY, 0644));
     show("link", link("h1", "h2"));
