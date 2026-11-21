@@ -38,6 +38,10 @@ struct Inner {
     gdt_block: u64,
     /// メタデータ(ビットマップ、記述子、ディレクトリ)を変える処理を 1 つずつにする
     meta: crate::sync::SpinLock<()>,
+    /// ジャーナルの inode(0 ならジャーナルなし:ext2)
+    journal_ino: u32,
+    /// 進行中のトランザクション:ブロック番号 → 新しい中身。操作の間の書き込みはここに貯める
+    tx: crate::sync::SpinLock<Option<alloc::collections::BTreeMap<u64, Vec<u8>>>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -88,7 +92,59 @@ fn le32(b: &[u8], off: usize) -> u32 {
 
 impl Inner {
     /// ディスクのバイト位置 `offset` から `buf` を読む
+    /// 読む。トランザクションの途中なら、まだディスクに書いていない新しい中身を優先する
     fn read_bytes(&self, offset: u64, buf: &mut [u8]) -> Result<(), Errno> {
+        let tx = self.tx.lock();
+        let Some(blocks) = tx.as_ref().filter(|b| !b.is_empty()) else {
+            drop(tx);
+            return self.raw_read(offset, buf);
+        };
+        let bs = self.block_size;
+        let mut done = 0;
+        while done < buf.len() {
+            let pos = offset + done as u64;
+            let (block, within) = (pos / bs, (pos % bs) as usize);
+            let n = (bs as usize - within).min(buf.len() - done);
+            match blocks.get(&block) {
+                Some(data) => buf[done..done + n].copy_from_slice(&data[within..within + n]),
+                None => self.raw_read(pos, &mut buf[done..done + n])?,
+            }
+            done += n;
+        }
+        Ok(())
+    }
+
+    /// 書く。トランザクションの途中なら、ブロック単位で表に貯める(ディスクにはまだ書かない)
+    fn write_bytes(&self, offset: u64, data: &[u8]) -> Result<(), Errno> {
+        let mut tx = self.tx.lock();
+        let Some(blocks) = tx.as_mut() else {
+            drop(tx);
+            return self.raw_write(offset, data);
+        };
+        let bs = self.block_size;
+        let mut done = 0;
+        while done < data.len() {
+            let pos = offset + done as u64;
+            let (block, within) = (pos / bs, (pos % bs) as usize);
+            let n = (bs as usize - within).min(data.len() - done);
+            let b = match blocks.entry(block) {
+                alloc::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+                alloc::collections::btree_map::Entry::Vacant(e) => {
+                    let mut old = vec![0u8; bs as usize];
+                    if n < bs as usize {
+                        self.raw_read(block * bs, &mut old)?;
+                    }
+                    e.insert(old)
+                }
+            };
+            b[within..within + n].copy_from_slice(&data[done..done + n]);
+            done += n;
+        }
+        Ok(())
+    }
+
+    /// ディスクから直接読む
+    fn raw_read(&self, offset: u64, buf: &mut [u8]) -> Result<(), Errno> {
         let mut disk = self.disk.lock();
         let mut sector = [0u8; BLOCK_SIZE];
         let mut done = 0;
@@ -252,7 +308,8 @@ const SB: u64 = 1024;
 
 /// 書き込みの処理(ビットマップでの割り当て、inode とディレクトリの更新)
 impl Inner {
-    fn write_bytes(&self, offset: u64, data: &[u8]) -> Result<(), Errno> {
+    /// ディスクに直接書く
+    fn raw_write(&self, offset: u64, data: &[u8]) -> Result<(), Errno> {
         let mut disk = self.disk.lock();
         let mut sector = [0u8; BLOCK_SIZE];
         let mut done = 0;
@@ -658,6 +715,128 @@ impl Inner {
     }
 }
 
+impl Inner {
+    /// `f` を 1 つのトランザクションとして行う。ジャーナルがなければそのまま行う。
+    /// 成功したらジャーナルを通してディスクに書く。失敗したら貯めた書き込みを捨てる(何も書かない)。
+    /// トランザクションの中でさらに呼んだら、外側のトランザクションの一部になる
+    fn transaction<R>(&self, f: impl FnOnce() -> Result<R, Errno>) -> Result<R, Errno> {
+        if self.journal_ino == 0 || self.tx.lock().is_some() {
+            return f();
+        }
+        *self.tx.lock() = Some(alloc::collections::BTreeMap::new());
+        let result = f();
+        let blocks = self.tx.lock().take().unwrap_or_default();
+        let r = result?;
+        if !blocks.is_empty() {
+            self.commit(&blocks)?;
+        }
+        Ok(r)
+    }
+
+    /// ディスクの書き込みを最後まで済ませる(順番を守るための区切り)
+    fn barrier(&self) -> Result<(), Errno> {
+        self.disk.lock().flush().map_err(|_| Errno::EIO)
+    }
+
+    /// トランザクションをジャーナルに書いてから、本来の場所に書く。
+    ///
+    /// 1. ジャーナルに記述ブロックと中身
+    /// 2. コミットブロック
+    /// 3. ジャーナルのスーパーブロックで「ここから読め」と指し、ファイルシステムに「要リカバリ」の印
+    /// 4. 本来の場所に書く
+    /// 5. ジャーナルを空に戻し、印を消す
+    ///
+    /// 各段の間で、ディスクに書き終わるのを待つ。どこで電源が切れても、3 より前なら何も変わっていない、
+    /// 3 より後ならマウントのときのリプレイで全部変わる
+    fn commit(&self, blocks: &alloc::collections::BTreeMap<u64, Vec<u8>>) -> Result<(), Errno> {
+        use crate::fs::jbd::{self, JournalIo};
+        let journal = Journal::open(self, self.journal_ino)?;
+        let sb = jbd::read_super(&journal)?;
+        let bs = self.block_size as usize;
+        let seq = sb.sequence;
+        // 記述ブロックに入るタグの数(最初のタグの後には UUID が 16 バイト付く)
+        let per_descriptor = (bs - 12 - 16) / 8;
+        let needed = blocks.len() + blocks.len().div_ceil(per_descriptor) + 1;
+        if needed as u32 > sb.maxlen - sb.first {
+            return Err(Errno::ENOSPC); // ジャーナルより大きなトランザクション
+        }
+        let mut uuid = vec![0u8; bs];
+        journal.read_log(0, &mut uuid)?;
+        let uuid: Vec<u8> = uuid[48..64].to_vec();
+        let header = |kind: u32| {
+            let mut b = vec![0u8; bs];
+            jbd::put_be32(&mut b, 0, jbd::MAGIC);
+            jbd::put_be32(&mut b, 4, kind);
+            jbd::put_be32(&mut b, 8, seq);
+            b
+        };
+        // 1. 記述ブロックと中身
+        let mut pos = sb.first;
+        let list: Vec<(&u64, &Vec<u8>)> = blocks.iter().collect();
+        for chunk in list.chunks(per_descriptor) {
+            let mut desc = header(1);
+            let desc_pos = pos;
+            pos = sb.next(pos);
+            let mut at = 12;
+            for (i, (block, data)) in chunk.iter().enumerate() {
+                let mut flags = 0u16;
+                let mut logged = (*data).clone();
+                if jbd::be32(&logged, 0) == jbd::MAGIC {
+                    // 中身がジャーナルの印で始まると、ジャーナルの区切りと見分けがつかない
+                    flags |= 1; // ESCAPE
+                    jbd::put_be32(&mut logged, 0, 0);
+                }
+                if i > 0 {
+                    flags |= 2; // SAME_UUID
+                }
+                if i + 1 == chunk.len() {
+                    flags |= 8; // LAST_TAG
+                }
+                jbd::put_be32(&mut desc, at, **block as u32);
+                desc[at + 6..at + 8].copy_from_slice(&flags.to_be_bytes());
+                at += 8;
+                if i == 0 {
+                    desc[at..at + 16].copy_from_slice(&uuid);
+                    at += 16;
+                }
+                journal.write_log(pos, &logged)?;
+                pos = sb.next(pos);
+            }
+            journal.write_log(desc_pos, &desc)?;
+        }
+        self.barrier()?;
+        // 2. コミット
+        journal.write_log(pos, &header(2))?;
+        self.barrier()?;
+        // 3. 「ここから読め」と「要リカバリ」
+        jbd::write_super(&journal, seq, sb.first)?;
+        self.set_recover_flag(true)?;
+        self.barrier()?;
+        // 4. 本来の場所へ
+        for (block, data) in blocks {
+            self.raw_write(block * self.block_size, data)?;
+        }
+        self.barrier()?;
+        // 5. ジャーナルを空に
+        jbd::write_super(&journal, seq.wrapping_add(1), 0)?;
+        self.set_recover_flag(false)?;
+        self.barrier()
+    }
+
+    /// スーパーブロックの「要リカバリ」の印
+    fn set_recover_flag(&self, on: bool) -> Result<(), Errno> {
+        let mut b = [0u8; 4];
+        self.raw_read(1024 + 96, &mut b)?;
+        let mut incompat = u32::from_le_bytes(b);
+        if on {
+            incompat |= INCOMPAT_RECOVER;
+        } else {
+            incompat &= !INCOMPAT_RECOVER;
+        }
+        self.raw_write(1024 + 96, &incompat.to_le_bytes())
+    }
+}
+
 /// ext3 のジャーナル(inode の中の領域)。ジャーナルの n 番目のブロックは、inode の n 番目のブロック
 struct Journal<'a> {
     fs: &'a Inner,
@@ -733,19 +912,23 @@ impl File for Ext2File {
 
     fn set_mode(&self, mode: u32) -> Result<(), Errno> {
         let _meta = self.fs.meta.lock();
-        let mut inode = self.fs.inode(self.ino)?;
-        inode.mode = (inode.mode & 0xf000) | (mode as u16 & 0o7777);
-        inode.ctime = now_secs();
-        self.fs.write_inode(self.ino, &inode)
+        self.fs.transaction(|| {
+            let mut inode = self.fs.inode(self.ino)?;
+            inode.mode = (inode.mode & 0xf000) | (mode as u16 & 0o7777);
+            inode.ctime = now_secs();
+            self.fs.write_inode(self.ino, &inode)
+        })
     }
 
     fn set_owner(&self, uid: u32, gid: u32) -> Result<(), Errno> {
         let _meta = self.fs.meta.lock();
-        let mut inode = self.fs.inode(self.ino)?;
-        inode.uid = uid;
-        inode.gid = gid;
-        inode.ctime = now_secs();
-        self.fs.write_inode(self.ino, &inode)
+        self.fs.transaction(|| {
+            let mut inode = self.fs.inode(self.ino)?;
+            inode.uid = uid;
+            inode.gid = gid;
+            inode.ctime = now_secs();
+            self.fs.write_inode(self.ino, &inode)
+        })
     }
 
     fn set_times(
@@ -754,15 +937,17 @@ impl File for Ext2File {
         mtime: Option<crate::fs::vfs::Timespec>,
     ) -> Result<(), Errno> {
         let _meta = self.fs.meta.lock();
-        let mut inode = self.fs.inode(self.ino)?;
-        if let Some(t) = atime {
-            inode.atime = t.sec as u32;
-        }
-        if let Some(t) = mtime {
-            inode.mtime = t.sec as u32;
-        }
-        inode.ctime = now_secs();
-        self.fs.write_inode(self.ino, &inode)
+        self.fs.transaction(|| {
+            let mut inode = self.fs.inode(self.ino)?;
+            if let Some(t) = atime {
+                inode.atime = t.sec as u32;
+            }
+            if let Some(t) = mtime {
+                inode.mtime = t.sec as u32;
+            }
+            inode.ctime = now_secs();
+            self.fs.write_inode(self.ino, &inode)
+        })
     }
 
     fn readlink(&self) -> Result<String, Errno> {
@@ -808,22 +993,38 @@ impl File for Ext2File {
 
     fn write(&self, offset: u64, buf: &[u8]) -> Result<usize, Errno> {
         let _meta = self.fs.meta.lock();
-        let mut inode = self.fs.inode(self.ino)?;
-        if kind_of(inode.mode) == FileKind::Directory {
-            return Err(Errno::EISDIR);
+        // ジャーナルに入りきるように、128 ブロックずつのトランザクションに分ける
+        // (大きな書き込み全体は 1 つにならないが、それぞれの区切りでは食い違わない)
+        let chunk = (128 * self.fs.block_size) as usize;
+        let mut done = 0;
+        while done < buf.len() || buf.is_empty() {
+            let part = &buf[done..(done + chunk).min(buf.len())];
+            let n = self.fs.transaction(|| {
+                let mut inode = self.fs.inode(self.ino)?;
+                if kind_of(inode.mode) == FileKind::Directory {
+                    return Err(Errno::EISDIR);
+                }
+                let n = self.fs.write_file(&mut inode, offset + done as u64, part)?;
+                (inode.mtime, inode.ctime) = (now_secs(), now_secs());
+                self.fs.write_inode(self.ino, &inode)?;
+                Ok(n)
+            })?;
+            done += n;
+            if buf.is_empty() || n < part.len() {
+                break;
+            }
         }
-        let n = self.fs.write_file(&mut inode, offset, buf)?;
-        (inode.mtime, inode.ctime) = (now_secs(), now_secs());
-        self.fs.write_inode(self.ino, &inode)?;
-        Ok(n)
+        Ok(done)
     }
 
     fn truncate(&self, len: u64) -> Result<(), Errno> {
         let _meta = self.fs.meta.lock();
-        self.fs.truncate(self.ino, len)?;
-        let mut inode = self.fs.inode(self.ino)?;
-        (inode.mtime, inode.ctime) = (now_secs(), now_secs());
-        self.fs.write_inode(self.ino, &inode)
+        self.fs.transaction(|| {
+            self.fs.truncate(self.ino, len)?;
+            let mut inode = self.fs.inode(self.ino)?;
+            (inode.mtime, inode.ctime) = (now_secs(), now_secs());
+            self.fs.write_inode(self.ino, &inode)
+        })
     }
 }
 
@@ -846,6 +1047,8 @@ impl Ext2 {
             first_data_block: 0,
             gdt_block: 0,
             meta: crate::sync::SpinLock::new(()),
+            journal_ino: 0,
+            tx: crate::sync::SpinLock::new(None),
         };
         probe.read_bytes(1024, &mut sb)?;
         if le16(&sb, 56) != MAGIC {
@@ -878,6 +1081,12 @@ impl Ext2 {
                 first_data_block,
                 gdt_block: first_data_block + 1,
                 meta: crate::sync::SpinLock::new(()),
+                journal_ino: if le32(&sb, 92) & COMPAT_HAS_JOURNAL != 0 {
+                    le32(&sb, 224)
+                } else {
+                    0
+                },
+                tx: crate::sync::SpinLock::new(None),
             }),
         };
         // ext3 のジャーナル:前に書きかけで止まっていたら、コミット済みのものを書き直す
@@ -970,165 +1179,176 @@ impl FileSystem for Ext2 {
 
     fn create(&self, path: &str, mode: u32) -> Result<Arc<dyn File>, Errno> {
         let _meta = self.inner.meta.lock();
-        let (parent, name) = split(path);
-        let (dir_ino, dir) = self.inner.lookup(parent)?;
-        if kind_of(dir.mode) != FileKind::Directory {
-            return Err(Errno::ENOTDIR);
-        }
-        if self.inner.lookup(path).is_ok() {
-            return Err(Errno::EEXIST);
-        }
-        let ino = self.inner.alloc_inode(false)?;
-        let inode = Inode {
-            mode: S_IFREG | (mode as u16 & 0o7777),
-            links: 1,
-            ..Inode::default()
-        }
-        .born();
-        self.inner.write_inode(ino, &inode)?;
-        self.inner
-            .add_entry(dir_ino, name, ino, FileKind::Regular)?;
-        Ok(Arc::new(Ext2File {
-            fs: self.inner.clone(),
-            ino,
-        }))
+        self.inner.transaction(|| -> Result<Arc<dyn File>, Errno> {
+            let (parent, name) = split(path);
+            let (dir_ino, dir) = self.inner.lookup(parent)?;
+            if kind_of(dir.mode) != FileKind::Directory {
+                return Err(Errno::ENOTDIR);
+            }
+            if self.inner.lookup(path).is_ok() {
+                return Err(Errno::EEXIST);
+            }
+            let ino = self.inner.alloc_inode(false)?;
+            let inode = Inode {
+                mode: S_IFREG | (mode as u16 & 0o7777),
+                links: 1,
+                ..Inode::default()
+            }
+            .born();
+            self.inner.write_inode(ino, &inode)?;
+            self.inner
+                .add_entry(dir_ino, name, ino, FileKind::Regular)?;
+            Ok(Arc::new(Ext2File {
+                fs: self.inner.clone(),
+                ino,
+            }))
+        })
     }
 
     fn mkdir(&self, path: &str, mode: u32) -> Result<(), Errno> {
         let _meta = self.inner.meta.lock();
-        let (parent, name) = split(path);
-        let (dir_ino, mut dir) = self.inner.lookup(parent)?;
-        if kind_of(dir.mode) != FileKind::Directory {
-            return Err(Errno::ENOTDIR);
-        }
-        if self.inner.lookup(path).is_ok() {
-            return Err(Errno::EEXIST);
-        }
-        let ino = self.inner.alloc_inode(true)?;
-        let mut inode = Inode {
-            mode: S_IFDIR | (mode as u16 & 0o7777),
-            links: 2, // 親の項目と、自分の「.」
-            ..Inode::default()
-        }
-        .born();
-        let block = self.inner.alloc_for(&mut inode)?;
-        inode.blocks[0] = block;
-        inode.size = self.inner.block_size;
-        // 「.」(12 バイト)と「..」(ブロックの残り全部)
-        let mut data = vec![0u8; self.inner.block_size as usize];
-        data[0..4].copy_from_slice(&ino.to_le_bytes());
-        data[4..6].copy_from_slice(&12u16.to_le_bytes());
-        data[6] = 1;
-        data[7] = 2;
-        data[8] = b'.';
-        data[12..16].copy_from_slice(&dir_ino.to_le_bytes());
-        data[16..18].copy_from_slice(&((self.inner.block_size - 12) as u16).to_le_bytes());
-        data[18] = 2;
-        data[19] = 2;
-        data[20..22].copy_from_slice(b"..");
-        self.inner
-            .write_bytes(block as u64 * self.inner.block_size, &data)?;
-        self.inner.write_inode(ino, &inode)?;
-        // 子の「..」が親を指すので、親のリンク数が 1 増える
-        dir.links += 1;
-        self.inner.write_inode(dir_ino, &dir)?;
-        self.inner
-            .add_entry(dir_ino, name, ino, FileKind::Directory)
+        self.inner.transaction(|| {
+            let (parent, name) = split(path);
+            let (dir_ino, mut dir) = self.inner.lookup(parent)?;
+            if kind_of(dir.mode) != FileKind::Directory {
+                return Err(Errno::ENOTDIR);
+            }
+            if self.inner.lookup(path).is_ok() {
+                return Err(Errno::EEXIST);
+            }
+            let ino = self.inner.alloc_inode(true)?;
+            let mut inode = Inode {
+                mode: S_IFDIR | (mode as u16 & 0o7777),
+                links: 2, // 親の項目と、自分の「.」
+                ..Inode::default()
+            }
+            .born();
+            let block = self.inner.alloc_for(&mut inode)?;
+            inode.blocks[0] = block;
+            inode.size = self.inner.block_size;
+            // 「.」(12 バイト)と「..」(ブロックの残り全部)
+            let mut data = vec![0u8; self.inner.block_size as usize];
+            data[0..4].copy_from_slice(&ino.to_le_bytes());
+            data[4..6].copy_from_slice(&12u16.to_le_bytes());
+            data[6] = 1;
+            data[7] = 2;
+            data[8] = b'.';
+            data[12..16].copy_from_slice(&dir_ino.to_le_bytes());
+            data[16..18].copy_from_slice(&((self.inner.block_size - 12) as u16).to_le_bytes());
+            data[18] = 2;
+            data[19] = 2;
+            data[20..22].copy_from_slice(b"..");
+            self.inner
+                .write_bytes(block as u64 * self.inner.block_size, &data)?;
+            self.inner.write_inode(ino, &inode)?;
+            // 子の「..」が親を指すので、親のリンク数が 1 増える
+            dir.links += 1;
+            self.inner.write_inode(dir_ino, &dir)?;
+            self.inner
+                .add_entry(dir_ino, name, ino, FileKind::Directory)
+        })
     }
 
     fn unlink(&self, path: &str, want_dir: bool) -> Result<(), Errno> {
         let _meta = self.inner.meta.lock();
-        self.unlink_locked(path, want_dir)
+        self.inner
+            .transaction(|| self.unlink_locked(path, want_dir))
     }
 
     fn link(&self, old: &str, new: &str) -> Result<(), Errno> {
         let _meta = self.inner.meta.lock();
-        let (ino, mut inode) = self.inner.lookup(old)?;
-        let kind = kind_of(inode.mode);
-        if kind == FileKind::Directory {
-            return Err(Errno::EPERM);
-        }
-        let (parent, name) = split(new);
-        let (dir_ino, dir) = self.inner.lookup(parent)?;
-        if kind_of(dir.mode) != FileKind::Directory {
-            return Err(Errno::ENOTDIR);
-        }
-        if self.inner.lookup(new).is_ok() {
-            return Err(Errno::EEXIST);
-        }
-        inode.links += 1;
-        inode.ctime = now_secs();
-        self.inner.write_inode(ino, &inode)?;
-        self.inner.add_entry(dir_ino, name, ino, kind)
+        self.inner.transaction(|| {
+            let (ino, mut inode) = self.inner.lookup(old)?;
+            let kind = kind_of(inode.mode);
+            if kind == FileKind::Directory {
+                return Err(Errno::EPERM);
+            }
+            let (parent, name) = split(new);
+            let (dir_ino, dir) = self.inner.lookup(parent)?;
+            if kind_of(dir.mode) != FileKind::Directory {
+                return Err(Errno::ENOTDIR);
+            }
+            if self.inner.lookup(new).is_ok() {
+                return Err(Errno::EEXIST);
+            }
+            inode.links += 1;
+            inode.ctime = now_secs();
+            self.inner.write_inode(ino, &inode)?;
+            self.inner.add_entry(dir_ino, name, ino, kind)
+        })
     }
 
     fn symlink(&self, path: &str, target: &str) -> Result<(), Errno> {
         let _meta = self.inner.meta.lock();
-        let (parent, name) = split(path);
-        let (dir_ino, dir) = self.inner.lookup(parent)?;
-        if kind_of(dir.mode) != FileKind::Directory {
-            return Err(Errno::ENOTDIR);
-        }
-        if self.inner.lookup(path).is_ok() {
-            return Err(Errno::EEXIST);
-        }
-        let ino = self.inner.alloc_inode(false)?;
-        let mut inode = Inode {
-            mode: S_IFLNK | 0o777,
-            links: 1,
-            ..Inode::default()
-        }
-        .born();
-        if target.len() < FAST_LINK_MAX {
-            // 短いリンク:ブロック番号の欄に文字列を入れる
-            let mut raw = [0u8; FAST_LINK_MAX];
-            raw[..target.len()].copy_from_slice(target.as_bytes());
-            for (i, b) in inode.blocks.iter_mut().enumerate() {
-                *b = u32::from_le_bytes(raw[i * 4..i * 4 + 4].try_into().unwrap());
+        self.inner.transaction(|| {
+            let (parent, name) = split(path);
+            let (dir_ino, dir) = self.inner.lookup(parent)?;
+            if kind_of(dir.mode) != FileKind::Directory {
+                return Err(Errno::ENOTDIR);
             }
-            inode.size = target.len() as u64;
-        } else {
-            self.inner.write_file(&mut inode, 0, target.as_bytes())?;
-        }
-        self.inner.write_inode(ino, &inode)?;
-        self.inner.add_entry(dir_ino, name, ino, FileKind::Symlink)
+            if self.inner.lookup(path).is_ok() {
+                return Err(Errno::EEXIST);
+            }
+            let ino = self.inner.alloc_inode(false)?;
+            let mut inode = Inode {
+                mode: S_IFLNK | 0o777,
+                links: 1,
+                ..Inode::default()
+            }
+            .born();
+            if target.len() < FAST_LINK_MAX {
+                // 短いリンク:ブロック番号の欄に文字列を入れる
+                let mut raw = [0u8; FAST_LINK_MAX];
+                raw[..target.len()].copy_from_slice(target.as_bytes());
+                for (i, b) in inode.blocks.iter_mut().enumerate() {
+                    *b = u32::from_le_bytes(raw[i * 4..i * 4 + 4].try_into().unwrap());
+                }
+                inode.size = target.len() as u64;
+            } else {
+                self.inner.write_file(&mut inode, 0, target.as_bytes())?;
+            }
+            self.inner.write_inode(ino, &inode)?;
+            self.inner.add_entry(dir_ino, name, ino, FileKind::Symlink)
+        })
     }
 
     fn rename(&self, old: &str, new: &str) -> Result<(), Errno> {
         let _meta = self.inner.meta.lock();
-        let (old_parent, old_name) = split(old);
-        let (new_parent, new_name) = split(new);
-        let (old_dir_ino, _) = self.inner.lookup(old_parent)?;
-        let (ino, inode) = self.inner.lookup(old)?;
-        let (new_dir_ino, new_dir) = self.inner.lookup(new_parent)?;
-        if kind_of(new_dir.mode) != FileKind::Directory {
-            return Err(Errno::ENOTDIR);
-        }
-        let kind = kind_of(inode.mode);
-        let is_dir = kind == FileKind::Directory;
-        // 置き換えられる側を先に消す(ファイルか、空のディレクトリだけ)
-        if let Ok((_, target)) = self.inner.lookup(new) {
-            let target_kind = kind_of(target.mode);
-            let empty =
-                target_kind == FileKind::Directory && self.inner.entries(&target)?.len() <= 2;
-            crate::fs::vfs::check_replace(kind, target_kind, empty)?;
-            self.unlink_locked(new, target_kind == FileKind::Directory)?;
-        }
-        // 新しい名前を足してから、古い名前を消す(途中で止まっても、ファイルはどこかに残る)
-        self.inner.add_entry(new_dir_ino, new_name, ino, kind)?;
-        let old_dir = self.inner.inode(old_dir_ino)?;
-        self.inner.remove_entry(&old_dir, old_name)?;
-        if is_dir && old_dir_ino != new_dir_ino {
-            // 移したディレクトリの「..」を新しい親に向け、親のリンク数を付け替える
-            self.inner.set_dotdot(&inode, new_dir_ino)?;
-            let mut od = self.inner.inode(old_dir_ino)?;
-            od.links -= 1;
-            self.inner.write_inode(old_dir_ino, &od)?;
-            let mut nd = self.inner.inode(new_dir_ino)?;
-            nd.links += 1;
-            self.inner.write_inode(new_dir_ino, &nd)?;
-        }
-        Ok(())
+        self.inner.transaction(|| {
+            let (old_parent, old_name) = split(old);
+            let (new_parent, new_name) = split(new);
+            let (old_dir_ino, _) = self.inner.lookup(old_parent)?;
+            let (ino, inode) = self.inner.lookup(old)?;
+            let (new_dir_ino, new_dir) = self.inner.lookup(new_parent)?;
+            if kind_of(new_dir.mode) != FileKind::Directory {
+                return Err(Errno::ENOTDIR);
+            }
+            let kind = kind_of(inode.mode);
+            let is_dir = kind == FileKind::Directory;
+            // 置き換えられる側を先に消す(ファイルか、空のディレクトリだけ)
+            if let Ok((_, target)) = self.inner.lookup(new) {
+                let target_kind = kind_of(target.mode);
+                let empty =
+                    target_kind == FileKind::Directory && self.inner.entries(&target)?.len() <= 2;
+                crate::fs::vfs::check_replace(kind, target_kind, empty)?;
+                self.unlink_locked(new, target_kind == FileKind::Directory)?;
+            }
+            // 新しい名前を足してから、古い名前を消す(途中で止まっても、ファイルはどこかに残る)
+            self.inner.add_entry(new_dir_ino, new_name, ino, kind)?;
+            let old_dir = self.inner.inode(old_dir_ino)?;
+            self.inner.remove_entry(&old_dir, old_name)?;
+            if is_dir && old_dir_ino != new_dir_ino {
+                // 移したディレクトリの「..」を新しい親に向け、親のリンク数を付け替える
+                self.inner.set_dotdot(&inode, new_dir_ino)?;
+                let mut od = self.inner.inode(old_dir_ino)?;
+                od.links -= 1;
+                self.inner.write_inode(old_dir_ino, &od)?;
+                let mut nd = self.inner.inode(new_dir_ino)?;
+                nd.links += 1;
+                self.inner.write_inode(new_dir_ino, &nd)?;
+            }
+            Ok(())
+        })
     }
 
     fn readdir(&self, path: &str) -> Result<Vec<DirEntry>, Errno> {
@@ -1818,6 +2038,55 @@ mod write_tests {
         assert_eq!(raw_block(&disk, 3000), [b'B'; 1024]);
         assert_eq!(raw_block(&disk, 3002), [0; 1024]);
         assert_eq!(raw_block(&disk, 3003), [b'D'; 1024]);
+        fsck(&disk);
+    }
+
+    /// ジャーナルのスーパーブロック(次のトランザクションの番号、ログの始まり)
+    fn journal_super(fs: &Ext2) -> crate::fs::jbd::Super {
+        let journal = Journal::open(&fs.inner, 8).unwrap();
+        crate::fs::jbd::read_super(&journal).unwrap()
+    }
+
+    #[test]
+    fn operations_on_ext3_go_through_the_journal() {
+        let disk = ext3_with_journal(&[]);
+        let fs = Ext2::new(disk.clone()).unwrap();
+        let before = journal_super(&fs).sequence;
+        fs.mkdir("/d", 0o755).unwrap();
+        let f = fs.create("/d/f", 0o644).unwrap();
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        assert_eq!(f.write(0, &data), Ok(data.len()));
+        fs.symlink("/d/l", "f").unwrap();
+        fs.rename("/d/f", "/d/g").unwrap();
+        fs.lookup("/d/g").unwrap().set_mode(0o600).unwrap();
+        fs.unlink("/keep.txt", false).unwrap();
+        let after = journal_super(&fs);
+        // それぞれの操作がトランザクションとしてジャーナルを通った(大きな書き込みは何回かに分かれる)
+        assert!(
+            after.sequence >= before + 7,
+            "{before} -> {}",
+            after.sequence
+        );
+        assert_eq!(
+            after.start, 0,
+            "everything was checkpointed: the journal is empty"
+        );
+        let fs = Ext2::new(disk.clone()).unwrap();
+        assert_eq!(read_all(&fs, "/d/g"), data);
+        fsck(&disk);
+    }
+
+    #[test]
+    fn a_failed_operation_writes_nothing() {
+        // 操作の途中で失敗したら、貯めていた書き込みは捨てる(ディスクには何も書かない)
+        let disk = ext3_with_journal(&[]);
+        let fs = Ext2::new(disk.clone()).unwrap();
+        fs.mkdir("/full", 0o755).unwrap();
+        fs.create("/full/x", 0o644).unwrap();
+        let before = journal_super(&fs).sequence;
+        assert_eq!(fs.rename("/keep.txt", "/full"), Err(Errno::EISDIR));
+        assert_eq!(fs.create("/nodir/x", 0o644).err(), Some(Errno::ENOENT));
+        assert_eq!(journal_super(&fs).sequence, before);
         fsck(&disk);
     }
 }
