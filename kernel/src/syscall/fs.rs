@@ -30,7 +30,8 @@ const AT_EMPTY_PATH: u64 = 0x1000;
 fn path_arg(p: &mut Process, dirfd: u64, ptr: u64) -> Result<alloc::string::String, Errno> {
     let raw = p.mem.read_cstr(VirtAddr(ptr), PATH_MAX)?;
     let path = core::str::from_utf8(&raw).map_err(|_| Errno::EINVAL)?;
-    if !path.starts_with('/') && dirfd as i64 != AT_FDCWD {
+    // dirfd は int:上位 32 ビットは見ない(int の -100 が 0x0000_0000_ffff_ff9c で届くことがある)
+    if !path.starts_with('/') && dirfd as i32 as i64 != AT_FDCWD {
         // ディレクトリの fd を基準にした相対パスは、まだ扱わない
         return Err(Errno::EBADF);
     }

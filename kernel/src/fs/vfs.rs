@@ -21,7 +21,8 @@ pub const O_ACCMODE: u32 = 3;
 pub const O_CREAT: u32 = 0o100;
 pub const O_EXCL: u32 = 0o200;
 pub const O_TRUNC: u32 = 0o1000;
-pub const O_DIRECTORY: u32 = 0o200000;
+/// AArch64 の値(x86 の 0o200000 とは違う。x86 の値を使っていたのを互換テストで見つけた)
+pub const O_DIRECTORY: u32 = 0o40000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {

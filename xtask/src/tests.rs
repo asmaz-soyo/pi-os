@@ -247,6 +247,7 @@ fn ci_plan_runs_checks_then_all_test_layers_then_builds() {
     want.push(qemu_test("bsp-qemu-virt", VIRT_RUNNER_ARGS));
     want.push(qemu_test("bsp-raspi3", RASPI3_ARGS));
     want.extend(displays(&plan(Task::Test(TestKind::Snapshot))));
+    want.extend(displays(&plan(Task::Test(TestKind::Compat))));
     want.extend(all_builds());
     assert_eq!(displays(&plan(Task::Ci)), want);
 }
@@ -353,4 +354,39 @@ fn gpio_script_presses_the_power_button_from_the_qemu_monitor() {
     assert_eq!(GPIO_SCRIPT[0], ("$ ", "svcman /etc/svcman-gpio.conf\r"));
     assert!(GPIO_SCRIPT.contains(&("(qemu) ", "system_powerdown\r")));
     assert_eq!(GPIO_SCRIPT.last(), Some(&("$ ", "exit\r")));
+}
+
+#[test]
+fn parses_compat_test() {
+    assert_eq!(
+        parse(&["test", "--compat"]),
+        Ok(Task::Test(TestKind::Compat))
+    );
+}
+
+#[test]
+fn compat_test_builds_the_kernel_then_compares() {
+    let steps = plan(Task::Test(TestKind::Compat));
+    assert_eq!(steps[0], Step::Run(kernel_build(Bsp::QemuVirt)));
+    assert!(matches!(steps.last(), Some(Step::Compat { .. })));
+}
+
+#[test]
+fn compat_script_marks_each_case_and_quotes_arguments() {
+    let cases: &[(&str, &[&str])] = &[("compat", &["one"]), ("busybox", &["echo", "it's"])];
+    assert_eq!(
+        compat_script(cases),
+        "echo @@case 0\n/bin/compat 'one' 2>/dev/null\necho @@exit $?\n\
+         echo @@case 1\n/bin/busybox 'echo' 'it'\\''s' 2>/dev/null\necho @@exit $?\n"
+    );
+}
+
+#[test]
+fn compat_output_is_split_into_cases() {
+    let out =
+        "boot noise\r\n@@case 0\r\nhello\r\n@@exit 3\r\n@@case 1\r\n@@exit 0\r\ninit: done\r\n";
+    assert_eq!(
+        split_compat_output(out),
+        vec![(String::from("hello\n"), Some(3)), (String::new(), Some(0)),]
+    );
 }

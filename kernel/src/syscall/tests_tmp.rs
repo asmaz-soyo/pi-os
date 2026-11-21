@@ -9,7 +9,8 @@ const O_RDWR: u64 = 0o2;
 const O_CREAT: u64 = 0o100;
 const O_EXCL: u64 = 0o200;
 const O_TRUNC: u64 = 0o1000;
-const O_DIRECTORY: u64 = 0o200000;
+// AArch64 の値(x86 の 0o200000 とは違う)
+const O_DIRECTORY: u64 = 0o40000;
 const AT_FDCWD: u64 = -100i64 as u64;
 const AT_REMOVEDIR: u64 = 0x200;
 
@@ -230,4 +231,30 @@ fn pread_and_pwrite_use_their_own_offset() {
     assert_eq!(get(&mut p, SCRATCH + 0x100, 4), b"2AB5");
     // ファイルの位置は動かない(書いたあとの 10 のまま)
     assert_eq!(call(&mut p, nr::LSEEK, [fd, 0, 1, 0, 0, 0]), 10);
+}
+
+#[test]
+fn dirfd_is_read_as_a_32_bit_int() {
+    // int の AT_FDCWD(-100)は、上位 32 ビットが 0 のまま届くことがある(musl の syscall() 経由)
+    let (mut p, _) = process();
+    let at_fdcwd_zero_extended = 0xffff_ff9c_u64;
+    p.cwd = alloc::string::String::from("/tmp");
+    put(&mut p, SCRATCH, b"sub\0");
+    assert_eq!(
+        call(
+            &mut p,
+            nr::MKDIRAT,
+            [at_fdcwd_zero_extended, SCRATCH, 0o755, 0, 0, 0]
+        ),
+        0
+    );
+    const AT_REMOVEDIR: u64 = 0x200;
+    assert_eq!(
+        call(
+            &mut p,
+            nr::UNLINKAT,
+            [at_fdcwd_zero_extended, SCRATCH, AT_REMOVEDIR, 0, 0, 0]
+        ),
+        0
+    );
 }

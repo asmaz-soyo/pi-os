@@ -533,7 +533,7 @@ pub(crate) mod tests {
             "O_WRONLY"
         );
         assert_eq!(open(&mut p, b"/new", 0o101), err(Errno::EROFS), "O_CREAT");
-        assert_eq!(open(&mut p, b"/etc/motd", 0o200000), err(Errno::ENOTDIR));
+        assert_eq!(open(&mut p, b"/etc/motd", 0o40000), err(Errno::ENOTDIR));
     }
 
     #[test]

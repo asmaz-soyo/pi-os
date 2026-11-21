@@ -38,7 +38,8 @@ fn execute(step: &Step) -> Result<(), String> {
             }
         }
         Step::GenerateDocs { path, check } => generate_docs(path, *check),
-        Step::MakeDisk { path } => make_disk(path),
+        Step::MakeDisk { path } => make_disk(path, &[]),
+        Step::Compat { cases, cmd } => compat(cases, cmd),
         Step::Snapshot {
             expected,
             exit_code,
@@ -185,7 +186,93 @@ fn generate_docs(path: &str, check: bool) -> Result<(), String> {
 ///
 /// セクタ 0 は MBR、セクタ 1 は目印の文字列、LBA 2048 から ext2 のパーティション
 /// (`user/diskroot/` の中身を `mke2fs -d` で入れる)。
-fn make_disk(path: &str) -> Result<(), String> {
+/// 互換テスト:それぞれのケースを Linux(qemu-aarch64)で動かし、次に Pi-OS で
+/// (init を互換テスト用のスクリプトに差し替えたディスクで)まとめて動かして、出力と終了コードを比べる
+fn compat(cases: &[(String, Vec<String>)], cmd: &Cmd) -> Result<(), String> {
+    let bin = initramfs_tar()?.parent().unwrap().to_path_buf();
+    let mut linux = Vec::new();
+    for (prog, args) in cases {
+        let path = if prog == "busybox" {
+            bin.join("busybox-1.38.0/busybox_unstripped")
+        } else {
+            bin.join(prog)
+        };
+        let out = Command::new("qemu-aarch64")
+            .arg(&path)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("qemu-aarch64 (qemu-user) is needed: {e}"))?;
+        linux.push((
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            out.status.code(),
+        ));
+    }
+
+    let refs: Vec<(&str, Vec<&str>)> = cases
+        .iter()
+        .map(|(p, a)| (p.as_str(), a.iter().map(String::as_str).collect()))
+        .collect();
+    let refs: Vec<(&str, &[&str])> = refs.iter().map(|(p, a)| (*p, a.as_slice())).collect();
+    let script = xtask::compat_script(&refs);
+    make_disk(
+        xtask::VIRT_DISK,
+        &[
+            (
+                "etc/init.rc",
+                "/bin/busybox sh /etc/compat.sh\n".to_string(),
+            ),
+            ("etc/compat.sh", script),
+        ],
+    )?;
+    let out = Command::new(&cmd.program)
+        .args(&cmd.args)
+        .current_dir(root())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    let pios = xtask::split_compat_output(&String::from_utf8_lossy(&out.stdout));
+
+    let mut failed = 0;
+    for (i, (prog, args)) in cases.iter().enumerate() {
+        let name = format!("{prog} {}", args.join(" "));
+        let Some((got, code)) = pios.get(i) else {
+            println!("FAIL {name}: did not run on Pi-OS");
+            failed += 1;
+            continue;
+        };
+        let (want, want_code) = &linux[i];
+        if got == want && code == want_code {
+            println!("ok   {name}");
+            continue;
+        }
+        failed += 1;
+        println!("FAIL {name}");
+        if code != want_code {
+            println!("  exit: Linux {want_code:?}, Pi-OS {code:?}");
+        }
+        let (w, g): (Vec<&str>, Vec<&str>) = (want.lines().collect(), got.lines().collect());
+        for j in 0..w.len().max(g.len()) {
+            let (a, b) = (w.get(j), g.get(j));
+            if a != b {
+                println!("  line {}: Linux {:?}", j + 1, a.unwrap_or(&"(none)"));
+                println!("  line {}: Pi-OS {:?}", j + 1, b.unwrap_or(&"(none)"));
+            }
+        }
+    }
+    if failed > 0 {
+        Err(format!(
+            "compat: {failed} of {} case(s) differ",
+            cases.len()
+        ))
+    } else {
+        println!("compat: all {} case(s) match Linux", cases.len());
+        Ok(())
+    }
+}
+
+/// `overlay` の (パス, 中身) はルートのファイルシステム(p2)の上に重ねて書く(init の差し替えなど)
+fn make_disk(path: &str, overlay: &[(&str, String)]) -> Result<(), String> {
     // SD カードと同じ形:p1 = FAT32(/boot)、p2 = ext2
     const BOOT_START: usize = 2048;
     const BOOT_MIB: usize = 34; // FAT32 にはクラスタが 65525 個以上いる(1 クラスタ 512 バイトで約 33MiB)
@@ -228,6 +315,9 @@ fn make_disk(path: &str) -> Result<(), String> {
         &stage,
     )?;
     copy_tree(&root().join("user/diskroot"), &stage)?;
+    for (rel, content) in overlay {
+        std::fs::write(stage.join(rel), content).map_err(|e| e.to_string())?;
+    }
     let ext2 = full.with_extension("ext2");
     // 先に空のファイルを作っておくと、mke2fs が「Creating regular file」と言わない
     std::fs::write(&ext2, b"").map_err(|e| e.to_string())?;

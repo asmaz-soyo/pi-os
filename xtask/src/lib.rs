@@ -57,6 +57,8 @@ pub enum TestKind {
     Qemu(Bsp),
     /// QEMU で起動し、UART の出力を期待値(スナップショット)と比べる
     Snapshot,
+    /// 同じプログラムを Linux(qemu-aarch64)と Pi-OS で動かし、出力と終了コードを比べる
+    Compat,
 }
 
 /// ボード(BSP)。
@@ -191,6 +193,7 @@ pub fn parse(args: &[&str]) -> Result<Task, String> {
         ["test"] => Ok(Task::Test(TestKind::Host)),
         ["test", "--bsp", bsp] => Ok(Task::Test(TestKind::Qemu(Bsp::parse(bsp)?))),
         ["test", "--snapshot"] => Ok(Task::Test(TestKind::Snapshot)),
+        ["test", "--compat"] => Ok(Task::Test(TestKind::Compat)),
         ["ci"] => Ok(Task::Ci),
         _ => Err(USAGE.to_string()),
     }
@@ -271,6 +274,11 @@ pub enum Step {
         script: Vec<(String, String)>,
         cmd: Cmd,
     },
+    /// 互換テスト:`cases` を Linux(qemu-aarch64)と Pi-OS(`cmd` の QEMU)で動かして比べる
+    Compat {
+        cases: Vec<(String, Vec<String>)>,
+        cmd: Cmd,
+    },
 }
 
 impl fmt::Display for Step {
@@ -290,6 +298,9 @@ impl fmt::Display for Step {
                 f,
                 "snapshot {expected} (exit {exit_code}, script {script:?}) <= {cmd}"
             ),
+            Self::Compat { cases, cmd } => {
+                write!(f, "compat {} case(s): qemu-aarch64 vs {cmd}", cases.len())
+            }
         }
     }
 }
@@ -314,6 +325,7 @@ pub fn plan(task: Task) -> Vec<Step> {
         Task::Test(TestKind::Host) => vec![Step::Run(host_tests())],
         Task::Test(TestKind::Qemu(bsp)) => qemu_test_steps(bsp),
         Task::Test(TestKind::Snapshot) => snapshot_tests(),
+        Task::Test(TestKind::Compat) => compat_test(),
         Task::Ci => {
             let mut steps = vec![
                 docs_step(true),
@@ -333,10 +345,31 @@ pub fn plan(task: Task) -> Vec<Step> {
             steps.push(Step::Run(host_tests()));
             steps.extend(Bsp::ALL.iter().flat_map(|&bsp| qemu_test_steps(bsp)));
             steps.extend(snapshot_tests());
+            steps.extend(compat_test());
             steps.extend(target_builds());
             steps
         }
     }
+}
+
+fn compat_test() -> Vec<Step> {
+    vec![
+        Step::Run(kernel_build(Bsp::QemuVirt)),
+        Step::Compat {
+            cases: COMPAT_CASES
+                .iter()
+                .map(|(prog, args)| {
+                    (
+                        prog.to_string(),
+                        args.iter().map(|a| a.to_string()).collect(),
+                    )
+                })
+                .collect(),
+            cmd: Bsp::QemuVirt
+                .qemu(&Bsp::QemuVirt.kernel_elf())
+                .with_timeout(60),
+        },
+    ]
 }
 
 /// 自動生成のシステムコール表の置き場所
@@ -523,6 +556,60 @@ pub fn normalize_output(raw: &str) -> String {
     } else {
         format!("{trimmed}\n")
     }
+}
+
+/// 互換テストで動かすもの:(/bin の下のプログラム, 引数)。出力が環境で変わらないものだけ
+pub const COMPAT_CASES: &[(&str, &[&str])] = &[
+    ("compat", &["one"]),
+    ("busybox", &["echo", "hello", "world"]),
+    ("busybox", &["seq", "3"]),
+    ("busybox", &["expr", "6", "*", "7"]),
+    ("busybox", &["printf", "%05d|%s|%x\\n", "42", "str", "255"]),
+    ("busybox", &["sh", "-c", "x=$((2 ** 10)); echo $x; exit 4"]),
+    ("busybox", &["test", "-d", "/nonexistent"]),
+    ("busybox", &["ls", "/nonexistent"]),
+];
+
+/// Pi-OS で互換テストを動かすシェルスクリプト。ケースごとに印を出し、終了コードを出す。
+/// 標準エラー出力は捨てる(Pi-OS では UART に混ざるが、Linux 側は標準出力だけを比べるため)
+pub fn compat_script(cases: &[(&str, &[&str])]) -> String {
+    let quote = |a: &str| format!("'{}'", a.replace('\'', "'\\''"));
+    let mut out = String::new();
+    for (i, (prog, args)) in cases.iter().enumerate() {
+        let args: Vec<String> = args.iter().map(|a| quote(a)).collect();
+        let sep = if args.is_empty() { "" } else { " " };
+        out.push_str(&format!(
+            "echo @@case {i}\n/bin/{prog}{sep}{} 2>/dev/null\necho @@exit $?\n",
+            args.join(" ")
+        ));
+    }
+    out
+}
+
+/// Pi-OS の出力を、ケースごとの (出力, 終了コード) に分ける
+pub fn split_compat_output(raw: &str) -> Vec<(String, Option<i32>)> {
+    let text = raw.replace('\r', "");
+    let mut cases = Vec::new();
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        if line.starts_with("@@case ") {
+            if let Some(out) = current.take() {
+                cases.push((out, None)); // 終了コードが出なかった
+            }
+            current = Some(String::new());
+        } else if let Some(code) = line.strip_prefix("@@exit ") {
+            if let Some(out) = current.take() {
+                cases.push((out, code.trim().parse().ok()));
+            }
+        } else if let Some(out) = current.as_mut() {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if let Some(out) = current {
+        cases.push((out, None));
+    }
+    cases
 }
 
 /// 期待する出力(パターン)と実際の出力を比べる。

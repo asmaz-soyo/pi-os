@@ -190,9 +190,14 @@ impl ProcessTable {
 
     /// プロセスを終える。メモリはここで返し、終わり方だけを残す。
     pub fn exit(&self, pid: Pid, status: ExitStatus) {
-        self.info.lock().remove(&pid);
+        let info = self.info.lock().remove(&pid);
         let process = self.live.lock().remove(&pid);
-        let ppid = process.as_ref().map_or(0, |p| p.ppid);
+        // 表から取り出されたまま終わることもあるので、親は info からも引く
+        let ppid = process
+            .as_ref()
+            .map(|p| p.ppid)
+            .or(info.map(|(ppid, _)| ppid))
+            .unwrap_or(0);
         drop(process);
         self.add_zombie(pid, ppid, status);
     }
@@ -225,13 +230,14 @@ impl ProcessTable {
                 return Ok(Some((child, status)));
             }
         }
+        // 子はシステムコールの途中で表(live)の外にいることがあるので、取り出している間も
+        // 残る info(番号 → 親)で調べる
         let alive = self
-            .live
+            .info
             .lock()
             .iter()
-            .any(|(child, p)| p.ppid == ppid && matches(*child));
-        // 子がシステムコールの途中で表の外にいることがあるので、番号を指定されたときは
-        // スケジューラのタスクとして生きているかでも確かめる
+            .any(|(child, (parent, _))| *parent == ppid && matches(*child));
+        // 番号を指定されたときは、スケジューラのタスクとして生きているかでも確かめる
         let alive = alive || pid.is_some_and(crate::sched::is_alive);
         if alive {
             Ok(None)
@@ -299,5 +305,25 @@ mod tests {
         p.cwd = alloc::string::String::from("/etc");
         table.put_back(1, p);
         assert_eq!(table.with(1, |p| p.cwd.clone()).unwrap(), "/etc");
+    }
+
+    #[test]
+    fn a_child_in_the_middle_of_a_syscall_still_counts_as_a_child() {
+        // 子が自分の子を待っている間(表から取り出されている間)も、親の wait4(-1) は
+        // 「子がいない(ECHILD)」ではなく「まだ終わっていない」にならないといけない
+        let table = ProcessTable::new();
+        let (mut child, _) = process();
+        child.ppid = 1;
+        table.insert(2, child);
+        let taken = table.take(2).unwrap();
+        assert_eq!(table.wait_child(1, None), Ok(None));
+        // 取り出されたまま終わっても、親が分かる
+        drop(taken);
+        table.exit(2, ExitStatus::Code(3));
+        assert_eq!(
+            table.wait_child(1, None),
+            Ok(Some((2, ExitStatus::Code(3))))
+        );
+        assert_eq!(table.wait_child(1, None), Err(crate::Errno::ECHILD));
     }
 }
