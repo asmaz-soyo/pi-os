@@ -27,6 +27,7 @@ pub mod nr {
     pub const IOCTL: u64 = 29;
     pub const MKDIRAT: u64 = 34;
     pub const UNLINKAT: u64 = 35;
+    pub const RENAMEAT: u64 = 38;
     pub const FTRUNCATE: u64 = 46;
     pub const FACCESSAT: u64 = 48;
     pub const CHDIR: u64 = 49;
@@ -80,6 +81,7 @@ pub mod nr {
     pub const MPROTECT: u64 = 226;
     pub const MADVISE: u64 = 233;
     pub const WAIT4: u64 = 260;
+    pub const RENAMEAT2: u64 = 276;
     pub const GETRANDOM: u64 = 278;
 }
 
@@ -191,6 +193,7 @@ table! {
     nr::IOCTL, "ioctl", 3 => |p, a| result(fs::ioctl(p, a[0], a[1], a[2]));
     nr::MKDIRAT, "mkdirat", 3 => |p, a| result(fs::mkdirat(p, a[0], a[1], a[2]));
     nr::UNLINKAT, "unlinkat", 3 => |p, a| result(fs::unlinkat(p, a[0], a[1], a[2]));
+    nr::RENAMEAT, "renameat", 4 => |p, a| result(fs::renameat2(p, a[0], a[1], a[2], a[3], 0));
     nr::FTRUNCATE, "ftruncate", 2 => |p, a| result(fs::ftruncate(p, a[0], a[1]));
     nr::FACCESSAT, "faccessat", 3 => |p, a| result(fs::faccessat(p, a[0], a[1], a[2]));
     nr::CHDIR, "chdir", 1 => |p, a| result(fs::chdir(p, a[0]));
@@ -258,6 +261,8 @@ table! {
     // 助言は無視してよい
     nr::MADVISE, "madvise", 3 => |p, a| Action::Return(0);
     nr::WAIT4, "wait4", 4 => |p, a| result(proc::wait4(p, a[0] as i64, a[1], a[2]));
+    nr::RENAMEAT2, "renameat2", 5
+        => |p, a| result(fs::renameat2(p, a[0], a[1], a[2], a[3], a[4]));
     nr::GETRANDOM, "getrandom", 3 => |p, a| result(misc::getrandom(p, a[0], a[1]));
 }
 
@@ -317,6 +322,8 @@ mod tests_mm;
 mod tests_pipe;
 #[cfg(test)]
 mod tests_proc;
+#[cfg(test)]
+mod tests_rename;
 #[cfg(test)]
 mod tests_time;
 #[cfg(test)]

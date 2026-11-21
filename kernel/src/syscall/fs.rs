@@ -100,6 +100,30 @@ pub fn unlinkat(p: &mut Process, dirfd: u64, path: u64, flags: u64) -> Result<u6
     Ok(0)
 }
 
+/// renameat2(olddirfd, old, newdirfd, new, flags)。flags は RENAME_NOREPLACE だけ。
+/// 両方の親ディレクトリに、書き込みとたどる(実行)権限が要る。
+pub fn renameat2(
+    p: &mut Process,
+    olddirfd: u64,
+    old: u64,
+    newdirfd: u64,
+    new: u64,
+    flags: u64,
+) -> Result<u64, Errno> {
+    const RENAME_NOREPLACE: u64 = 1;
+    if flags & !RENAME_NOREPLACE != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let old = path_arg(p, olddirfd, old)?;
+    let new = path_arg(p, newdirfd, new)?;
+    for path in [&old, &new] {
+        let dir = p.vfs.lookup(&vfs::normalize(path, ".."))?;
+        p.cred.check(&dir.stat(), Access::WRITE | Access::EXEC)?;
+    }
+    p.vfs.rename(&old, &new, flags & RENAME_NOREPLACE != 0)?;
+    Ok(0)
+}
+
 /// ftruncate(fd, length)
 pub fn ftruncate(p: &mut Process, fd: u64, len: u64) -> Result<u64, Errno> {
     let f = p.fds.get(fd)?;

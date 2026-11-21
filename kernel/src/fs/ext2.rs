@@ -575,6 +575,29 @@ impl Inner {
     }
 }
 
+impl Inner {
+    /// ディレクトリ `dir` の「..」の項目を `parent` に向ける(「..」は最初のブロックにある)
+    fn set_dotdot(&self, dir: &Inode, parent: u32) -> Result<(), Errno> {
+        let bs = self.block_size as usize;
+        let base = self.block_of(dir, 0)? as u64 * self.block_size;
+        let mut data = vec![0u8; bs];
+        self.read_bytes(base, &mut data)?;
+        let mut at = 0;
+        while at + 8 <= bs {
+            let rec = le16(&data, at + 4) as usize;
+            let len = data[at + 6] as usize;
+            if len == 2 && &data[at + 8..at + 10] == b".." {
+                return self.write_bytes(base + at as u64, &parent.to_le_bytes());
+            }
+            if rec == 0 {
+                break;
+            }
+            at += rec;
+        }
+        Err(Errno::EIO)
+    }
+}
+
 /// パスを親ディレクトリと名前に分ける(`/a/b` → (`/a`, `b`))
 fn split(path: &str) -> (&str, &str) {
     match path.rfind('/') {
@@ -692,6 +715,39 @@ impl Ext2 {
     }
 }
 
+impl Ext2 {
+    /// unlink の中身(メタデータのロックは呼ぶ側が持つ)。rename の置き換えでも使う
+    fn unlink_locked(&self, path: &str, want_dir: bool) -> Result<(), Errno> {
+        let (parent, name) = split(path);
+
+        let (dir_ino, mut dir) = self.inner.lookup(parent)?;
+        let (ino, mut inode) = self.inner.lookup(path)?;
+        let is_dir = kind_of(inode.mode) == FileKind::Directory;
+        match (is_dir, want_dir) {
+            (true, false) => return Err(Errno::EISDIR),
+            (false, true) => return Err(Errno::ENOTDIR),
+            _ => {}
+        }
+        if is_dir && self.inner.entries(&inode)?.len() > 2 {
+            return Err(Errno::ENOTEMPTY);
+        }
+        self.inner.remove_entry(&dir, name)?;
+        self.inner.free_from(&mut inode, 0)?;
+        inode.links = 0;
+        inode.size = 0;
+        // 削除時刻(秒)。小さな値だと ext3 の orphan リスト(次の inode 番号)と見なされる
+        inode.dtime = (crate::time::BOOT_EPOCH + crate::time::now_ns() / 1_000_000_000) as u32;
+        self.inner.write_inode(ino, &inode)?;
+        self.inner.free_inode(ino, is_dir)?;
+        if is_dir {
+            dir = self.inner.inode(dir_ino)?;
+            dir.links -= 1;
+            self.inner.write_inode(dir_ino, &dir)?;
+        }
+        Ok(())
+    }
+}
+
 impl FileSystem for Ext2 {
     fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
         let (ino, _) = self.inner.lookup(path)?;
@@ -767,30 +823,42 @@ impl FileSystem for Ext2 {
 
     fn unlink(&self, path: &str, want_dir: bool) -> Result<(), Errno> {
         let _meta = self.inner.meta.lock();
-        let (parent, name) = split(path);
-        let (dir_ino, mut dir) = self.inner.lookup(parent)?;
-        let (ino, mut inode) = self.inner.lookup(path)?;
-        let is_dir = kind_of(inode.mode) == FileKind::Directory;
-        match (is_dir, want_dir) {
-            (true, false) => return Err(Errno::EISDIR),
-            (false, true) => return Err(Errno::ENOTDIR),
-            _ => {}
+        self.unlink_locked(path, want_dir)
+    }
+
+    fn rename(&self, old: &str, new: &str) -> Result<(), Errno> {
+        let _meta = self.inner.meta.lock();
+        let (old_parent, old_name) = split(old);
+        let (new_parent, new_name) = split(new);
+        let (old_dir_ino, _) = self.inner.lookup(old_parent)?;
+        let (ino, inode) = self.inner.lookup(old)?;
+        let (new_dir_ino, new_dir) = self.inner.lookup(new_parent)?;
+        if kind_of(new_dir.mode) != FileKind::Directory {
+            return Err(Errno::ENOTDIR);
         }
-        if is_dir && self.inner.entries(&inode)?.len() > 2 {
-            return Err(Errno::ENOTEMPTY);
+        let kind = kind_of(inode.mode);
+        let is_dir = kind == FileKind::Directory;
+        // 置き換えられる側を先に消す(ファイルか、空のディレクトリだけ)
+        if let Ok((_, target)) = self.inner.lookup(new) {
+            let target_kind = kind_of(target.mode);
+            let empty =
+                target_kind == FileKind::Directory && self.inner.entries(&target)?.len() <= 2;
+            crate::fs::vfs::check_replace(kind, target_kind, empty)?;
+            self.unlink_locked(new, target_kind == FileKind::Directory)?;
         }
-        self.inner.remove_entry(&dir, name)?;
-        self.inner.free_from(&mut inode, 0)?;
-        inode.links = 0;
-        inode.size = 0;
-        // 削除時刻(秒)。小さな値だと ext3 の orphan リスト(次の inode 番号)と見なされる
-        inode.dtime = (crate::time::BOOT_EPOCH + crate::time::now_ns() / 1_000_000_000) as u32;
-        self.inner.write_inode(ino, &inode)?;
-        self.inner.free_inode(ino, is_dir)?;
-        if is_dir {
-            dir = self.inner.inode(dir_ino)?;
-            dir.links -= 1;
-            self.inner.write_inode(dir_ino, &dir)?;
+        // 新しい名前を足してから、古い名前を消す(途中で止まっても、ファイルはどこかに残る)
+        self.inner.add_entry(new_dir_ino, new_name, ino, is_dir)?;
+        let old_dir = self.inner.inode(old_dir_ino)?;
+        self.inner.remove_entry(&old_dir, old_name)?;
+        if is_dir && old_dir_ino != new_dir_ino {
+            // 移したディレクトリの「..」を新しい親に向け、親のリンク数を付け替える
+            self.inner.set_dotdot(&inode, new_dir_ino)?;
+            let mut od = self.inner.inode(old_dir_ino)?;
+            od.links -= 1;
+            self.inner.write_inode(old_dir_ino, &od)?;
+            let mut nd = self.inner.inode(new_dir_ino)?;
+            nd.links += 1;
+            self.inner.write_inode(new_dir_ino, &nd)?;
         }
         Ok(())
     }
@@ -1056,6 +1124,75 @@ mod write_tests {
         assert_eq!(f.stat().size, 0);
         f.write(0, b"short").unwrap();
         assert_eq!(read_all(&fs, "/t"), b"short");
+        fsck(&disk);
+    }
+
+    #[test]
+    fn rename_moves_files_between_directories() {
+        let disk = blank();
+        let fs = Ext2::new(disk.clone()).unwrap();
+        fs.mkdir("/d", 0o755).unwrap();
+        fs.rename("/keep.txt", "/d/kept.txt").unwrap();
+        assert_eq!(fs.lookup("/keep.txt").err(), Some(Errno::ENOENT));
+        assert_eq!(read_all(&fs, "/d/kept.txt"), b"keep");
+        fs.rename("/d/kept.txt", "/d/again.txt").unwrap();
+        assert_eq!(read_all(&fs, "/d/again.txt"), b"keep");
+        fsck(&disk);
+    }
+
+    #[test]
+    fn rename_replaces_a_file_and_frees_the_old_one() {
+        let disk = blank();
+        let fs = Ext2::new(disk.clone()).unwrap();
+        fs.create("/new.tmp", 0o644)
+            .unwrap()
+            .write(0, b"fresh")
+            .unwrap();
+        fs.create("/target", 0o644)
+            .unwrap()
+            .write(0, &[1u8; 5000])
+            .unwrap();
+        fs.rename("/new.tmp", "/target").unwrap();
+        assert_eq!(read_all(&fs, "/target"), b"fresh");
+        assert_eq!(fs.lookup("/new.tmp").err(), Some(Errno::ENOENT));
+        // 置き換えられた古い /target の inode とブロックが返されていること(e2fsck が確かめる)
+        fsck(&disk);
+    }
+
+    #[test]
+    fn rename_moves_a_directory_and_fixes_its_parent_link() {
+        let disk = blank();
+        let fs = Ext2::new(disk.clone()).unwrap();
+        fs.mkdir("/a", 0o755).unwrap();
+        fs.mkdir("/a/sub", 0o755).unwrap();
+        fs.create("/a/sub/f", 0o644)
+            .unwrap()
+            .write(0, b"deep")
+            .unwrap();
+        fs.mkdir("/b", 0o755).unwrap();
+        fs.mkdir("/b/empty", 0o755).unwrap();
+        // 別の親へ移す:sub の「..」が /b を指し、/a と /b のリンク数が変わる
+        fs.rename("/a/sub", "/b/sub").unwrap();
+        assert_eq!(read_all(&fs, "/b/sub/f"), b"deep");
+        // 空のディレクトリは置き換えられる
+        fs.rename("/b/sub", "/b/empty").unwrap();
+        assert_eq!(read_all(&fs, "/b/empty/f"), b"deep");
+        assert_eq!(fs.lookup("/b/sub").err(), Some(Errno::ENOENT));
+        fsck(&disk);
+    }
+
+    #[test]
+    fn rename_refuses_bad_replacements() {
+        let disk = blank();
+        let fs = Ext2::new(disk.clone()).unwrap();
+        fs.mkdir("/d", 0o755).unwrap();
+        fs.mkdir("/full", 0o755).unwrap();
+        fs.create("/full/x", 0o644).unwrap();
+        assert_eq!(fs.rename("/keep.txt", "/d"), Err(Errno::EISDIR));
+        assert_eq!(fs.rename("/d", "/keep.txt"), Err(Errno::ENOTDIR));
+        assert_eq!(fs.rename("/d", "/full"), Err(Errno::ENOTEMPTY));
+        assert_eq!(fs.rename("/nope", "/x"), Err(Errno::ENOENT));
+        assert_eq!(fs.rename("/keep.txt", "/nodir/x"), Err(Errno::ENOENT));
         fsck(&disk);
     }
 }

@@ -276,6 +276,23 @@ pub trait FileSystem: Send + Sync {
     fn readdir(&self, _path: &str) -> Result<Vec<DirEntry>, Errno> {
         Err(Errno::ENOTDIR)
     }
+
+    /// `old` を `new` に移す(名前を変える)。`new` があれば置き換える。
+    /// 同じパスや、自分の下への移動は呼ぶ側(`Vfs::rename`)が先に扱う。
+    fn rename(&self, _old: &str, _new: &str) -> Result<(), Errno> {
+        Err(Errno::EROFS)
+    }
+}
+
+/// rename で `old` が `new` を置き換えてよいか(`new_empty`:`new` が空のディレクトリか)。
+/// ファイルはファイルを、ディレクトリは空のディレクトリだけを置き換えられる。
+pub fn check_replace(old: FileKind, new: FileKind, new_empty: bool) -> Result<(), Errno> {
+    match (old == FileKind::Directory, new == FileKind::Directory) {
+        (false, true) => Err(Errno::EISDIR),
+        (true, false) => Err(Errno::ENOTDIR),
+        (true, true) if !new_empty => Err(Errno::ENOTEMPTY),
+        _ => Ok(()),
+    }
 }
 
 /// マウントの表。長いマウントポイントから順に調べる。
@@ -332,6 +349,28 @@ impl Vfs {
     pub fn unlink(&self, path: &str, dir: bool) -> Result<(), Errno> {
         let (fs, inner) = self.resolve(path)?;
         fs.unlink(inner, dir)
+    }
+
+    /// `old` を `new` に移す。`noreplace` なら、`new` があるときは `EEXIST`。
+    pub fn rename(&self, old: &str, new: &str, noreplace: bool) -> Result<(), Errno> {
+        let (old_fs, old_inner) = self.resolve(old)?;
+        let (new_fs, new_inner) = self.resolve(new)?;
+        old_fs.lookup(old_inner)?;
+        // マウントポイントを動かすことも、ファイルシステムをまたぐこともできない
+        if !core::ptr::addr_eq(old_fs, new_fs) || old_inner == "/" || new_inner == "/" {
+            return Err(Errno::EXDEV);
+        }
+        if old == new {
+            return Ok(());
+        }
+        // 自分の下には移せない(/a → /a/b)
+        if new.starts_with(old) && new.as_bytes().get(old.len()) == Some(&b'/') {
+            return Err(Errno::EINVAL);
+        }
+        if noreplace && new_fs.lookup(new_inner).is_ok() {
+            return Err(Errno::EEXIST);
+        }
+        old_fs.rename(old_inner, new_inner)
     }
 
     /// ディレクトリの中身。マウントポイントもその名前の項目として見せる。

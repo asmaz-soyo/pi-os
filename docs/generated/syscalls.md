@@ -15,6 +15,7 @@
 | 29 | `ioctl` | 3 |
 | 34 | `mkdirat` | 3 |
 | 35 | `unlinkat` | 3 |
+| 38 | `renameat` | 4 |
 | 46 | `ftruncate` | 2 |
 | 48 | `faccessat` | 3 |
 | 49 | `chdir` | 1 |
@@ -69,6 +70,7 @@
 | 226 | `mprotect` | 3 |
 | 233 | `madvise` | 3 |
 | 260 | `wait4` | 4 |
+| 276 | `renameat2` | 5 |
 | 278 | `getrandom` | 3 |
 
-合計 65 個
+合計 67 個

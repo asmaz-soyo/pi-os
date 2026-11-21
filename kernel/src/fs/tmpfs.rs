@@ -171,6 +171,36 @@ impl FileSystem for Tmpfs {
         Ok(())
     }
 
+    fn rename(&self, old: &str, new: &str) -> Result<(), Errno> {
+        let mut nodes = self.nodes.lock();
+        let kind = nodes.get(old).ok_or(Errno::ENOENT)?.stat().kind;
+        match nodes.get(parent(new)) {
+            None => return Err(Errno::ENOENT),
+            Some(p) if p.stat().kind != FileKind::Directory => return Err(Errno::ENOTDIR),
+            Some(_) => {}
+        }
+        let below = |dir: &str| alloc::format!("{dir}/");
+        if let Some(target) = nodes.get(new) {
+            let new_prefix = below(new);
+            let empty = !nodes.keys().any(|k| k.starts_with(&new_prefix));
+            crate::fs::vfs::check_replace(kind, target.stat().kind, empty)?;
+            nodes.remove(new);
+        }
+        // 自分と、ディレクトリなら中身すべての名前を付け替える(パスが鍵なので)
+        let old_prefix = below(old);
+        let moved: Vec<String> = nodes
+            .keys()
+            .filter(|k| k.as_str() == old || k.starts_with(&old_prefix))
+            .cloned()
+            .collect();
+        for key in moved {
+            let file = nodes.remove(&key).expect("listed above");
+            let new_key = alloc::format!("{new}{}", &key[old.len()..]);
+            nodes.insert(new_key, file);
+        }
+        Ok(())
+    }
+
     fn readdir(&self, path: &str) -> Result<Vec<DirEntry>, Errno> {
         let nodes = self.nodes.lock();
         let dir = nodes.get(path).ok_or(Errno::ENOENT)?;

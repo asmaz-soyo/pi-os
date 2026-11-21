@@ -29,6 +29,7 @@ static const char *errname(int e) {
     case ESPIPE: return "ESPIPE";
     case EPIPE: return "EPIPE";
     case ENOTEMPTY: return "ENOTEMPTY";
+    case EXDEV: return "EXDEV";
     case ENOSYS: return "ENOSYS";
     default: return "?";
     }
@@ -95,6 +96,20 @@ int main(int argc, char **argv) {
     show("unlink sub/x", unlink("sub/x"));
     show("rmdir sub", rmdir("sub"));
     show("unlink missing", unlink("missing"));
+
+    // rename
+    close(open("r1", O_CREAT | O_WRONLY, 0644));
+    close(open("r2", O_CREAT | O_WRONLY, 0644));
+    show("rename", rename("r1", "r3"));
+    show("rename missing", rename("r1", "r4"));
+    show("rename over file", rename("r3", "r2"));
+    show("mkdir rd", mkdir("rd", 0755));
+    show("rename file over dir", rename("r2", "rd"));
+    show("rename dir over file", rename("rd", "r2"));
+    show("rename into itself", rename("rd", "rd/x"));
+    show("rename dir", rename("rd", "rd2"));
+    show("rmdir rd2", rmdir("rd2"));
+    show("unlink r2", unlink("r2"));
 
     // fd の複製
     fd = open("f", O_RDONLY);
