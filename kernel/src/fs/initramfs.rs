@@ -47,6 +47,29 @@ impl File for RamFile {
     }
 }
 
+/// シンボリックリンク:指す先は tar の見出しの中(埋め込みデータなので 'static)
+struct RamLink {
+    target: &'static str,
+    ino: u64,
+}
+
+impl File for RamLink {
+    fn stat(&self) -> Stat {
+        Stat {
+            kind: FileKind::Symlink,
+            mode: 0o777,
+            size: self.target.len() as u64,
+            ino: self.ino,
+            uid: 0,
+            gid: 0,
+        }
+    }
+
+    fn readlink(&self) -> Result<alloc::string::String, Errno> {
+        Ok(alloc::string::String::from(self.target))
+    }
+}
+
 struct RamDir {
     ino: u64,
 }
@@ -107,6 +130,10 @@ impl Initramfs {
                     ino: next_ino(),
                     uid: entry.uid,
                     gid: entry.gid,
+                }),
+                Kind::Symlink => Arc::new(RamLink {
+                    target: entry.link,
+                    ino: next_ino(),
                 }),
                 _ => continue,
             };
@@ -187,6 +214,17 @@ mod tests {
             fs.lookup("/etc").unwrap().read(0, &mut buf),
             Err(Errno::EISDIR)
         );
+    }
+
+    #[test]
+    fn symlinks_in_the_tar_become_links() {
+        let mut tar = build(&[("bin/busybox", b'0', b"ELF"), ("bin/seq", b'2', b"")]);
+        crate::fs::tar::tests::set_link(&mut tar, "bin/seq", "busybox");
+        let fs = Initramfs::new(Box::leak(tar.into_boxed_slice())).unwrap();
+        let link = fs.lookup("/bin/seq").unwrap();
+        assert_eq!(link.stat().kind, FileKind::Symlink);
+        assert_eq!(link.readlink().unwrap(), "busybox");
+        assert_eq!(link.stat().size, 7);
     }
 
     #[test]

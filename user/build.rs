@@ -48,8 +48,17 @@ fn main() {
     build_cpython(&root.join("third_party/cpython"), &out);
     let busybox = build_busybox(&root.join("third_party/busybox"), &out);
     files.push(("bin/busybox".to_string(), std::fs::read(busybox).unwrap()));
+    // アプレットは /bin/<名前> → busybox のシンボリックリンクで呼べるようにする
+    // (自作のプログラムと同じ名前のもの:sh、ls、cat などは自作のほうを残す)
+    let mut links: Vec<(String, String)> = Vec::new();
+    for name in busybox_applets(&out) {
+        let path = format!("bin/{name}");
+        if !files.iter().any(|(p, _)| *p == path) && !links.iter().any(|(p, _)| *p == path) {
+            links.push((path, "busybox".to_string()));
+        }
+    }
     collect(&root.join("rootfs"), "", &mut files);
-    std::fs::write(out.join("initramfs.tar"), tar(&files)).unwrap();
+    std::fs::write(out.join("initramfs.tar"), tar(&files, &links)).unwrap();
 }
 
 fn sorted(dir: &Path) -> Vec<PathBuf> {
@@ -448,11 +457,22 @@ fn build_busybox(dir: &Path, out: &Path) -> PathBuf {
             .arg(format!("AR={zig} ar"))
             // strip は CC の -s で済ませる(make の strip の段は busybox_unstripped を作った後)
             .arg("STRIP=true")
-            .arg("busybox_unstripped")
+            // busybox.links:アプレットの一覧(/bin/ls、/usr/bin/seq、…)
+            .args(["busybox_unstripped", "busybox.links"])
             .stdout(std::process::Stdio::null());
         run(cmd, "building BusyBox");
     }
     bin
+}
+
+/// BusyBox のアプレットの名前(`busybox.links` から)
+fn busybox_applets(out: &Path) -> Vec<String> {
+    let list = std::fs::read_to_string(out.join("busybox-1.38.0/busybox.links")).unwrap();
+    list.lines()
+        .filter_map(|l| l.rsplit('/').next())
+        .filter(|n| !n.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 /// `src`(.S か .c)を `bin` にビルドする。それ以外の拡張子なら false。
@@ -477,8 +497,27 @@ fn build_program(src: &Path, bin: &Path, out: &Path) -> bool {
 }
 
 /// ustar 形式の tar を作る(ディレクトリの項目は省く。カーネルはパスから推測する)。
-fn tar(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+fn tar(files: &[(String, Vec<u8>)], links: &[(String, String)]) -> Vec<u8> {
     let mut out = Vec::new();
+    for (name, target) in links {
+        // シンボリックリンク:種類 '2'、指す先は 157 バイト目から
+        assert!(name.len() < 100 && target.len() < 100);
+        let mut h = [0u8; 512];
+        h[..name.len()].copy_from_slice(name.as_bytes());
+        h[100..107].copy_from_slice(b"0000777");
+        h[108..115].copy_from_slice(b"0000000");
+        h[116..123].copy_from_slice(b"0000000");
+        h[124..135].copy_from_slice(b"00000000000");
+        h[136..147].copy_from_slice(b"00000000000");
+        h[156] = b'2';
+        h[157..157 + target.len()].copy_from_slice(target.as_bytes());
+        h[257..263].copy_from_slice(b"ustar\0");
+        h[263..265].copy_from_slice(b"00");
+        h[148..156].copy_from_slice(b"        ");
+        let sum: u32 = h.iter().map(|&b| b as u32).sum();
+        h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        out.extend_from_slice(&h);
+    }
     for (name, data) in files {
         assert!(name.len() < 100, "path too long for ustar: {name}");
         let mut h = [0u8; 512];

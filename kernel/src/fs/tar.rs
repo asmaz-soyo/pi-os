@@ -178,6 +178,24 @@ pub(crate) mod tests {
         panic!("{name} not in tar");
     }
 
+    /// テスト用:`name` の項目の、シンボリックリンクの指す先を書く
+    pub fn set_link(tar: &mut [u8], name: &str, link: &str) {
+        let mut at = 0;
+        while at + 512 <= tar.len() && tar[at] != 0 {
+            let size = super::octal(&tar[at + 124..at + 136]).unwrap() as usize;
+            if super::cstr(&tar[at..at + 100]) == name {
+                let h = &mut tar[at..at + 512];
+                h[157..157 + link.len()].copy_from_slice(link.as_bytes());
+                h[148..156].copy_from_slice(b"        ");
+                let sum: u32 = h.iter().map(|&b| b as u32).sum();
+                h[148..156].copy_from_slice(std::format!("{sum:06o}\0 ").as_bytes());
+                return;
+            }
+            at += 512 + size.div_ceil(512) * 512;
+        }
+        panic!("{name} not in tar");
+    }
+
     #[test]
     fn owner_ids_are_read_from_the_header() {
         let mut tar = build(&[("a", b'0', b"x")]);

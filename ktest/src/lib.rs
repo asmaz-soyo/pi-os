@@ -259,6 +259,14 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn busybox_applets_are_reachable_through_symlinks() {
+            // /bin/seq → busybox:argv[0] の名前でアプレットが選ばれる
+            assert_eq!(boot::run_program("/bin/seq", &[b"seq", b"3"]), Ok(0));
+            assert_eq!(boot::run_program("/bin/true", &[b"true"]), Ok(0));
+            assert_eq!(boot::run_program("/bin/false", &[b"false"]), Ok(1));
+        }
+
+        #[test_case]
         fn busybox_shell_pipes_and_command_substitution_work() {
             let script = b"n=$(seq 1 100 | grep 7 | wc -l); echo \"lines with 7: $n\"; test $n -eq 19";
             let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];

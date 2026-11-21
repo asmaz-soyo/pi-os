@@ -400,6 +400,11 @@ fn unpack_tar(tar: &[u8], dest: &std::path::Path) -> Result<(), String> {
         let path = dest.join(name.trim_start_matches("./"));
         if h[156] == b'5' {
             std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+        } else if h[156] == b'2' {
+            // シンボリックリンク(mke2fs -d がそのまま ext2 のリンクにする)
+            std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+            let _ = std::fs::remove_file(&path);
+            std::os::unix::fs::symlink(cstr(&h[157..257]), &path).map_err(|e| e.to_string())?;
         } else {
             std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
             std::fs::write(&path, data).map_err(|e| e.to_string())?;
