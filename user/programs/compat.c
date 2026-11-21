@@ -41,6 +41,14 @@ static void show(const char *what, long ret) {
         printf("%s = %ld\n", what, ret);
 }
 
+/// fd を返す呼び出し:番号は出さない(親から受け継いだ fd があると、番号が環境で変わる)
+static void show_fd(const char *what, long ret) {
+    if (ret < 0)
+        show(what, ret);
+    else
+        printf("%s = fd\n", what);
+}
+
 int main(int argc, char **argv) {
     char dir[64];
     // 他と重ならない作業用ディレクトリ(名前は出さない)
@@ -56,7 +64,7 @@ int main(int argc, char **argv) {
     if (chdir(dir) != 0) return 1;
     show("open missing", open("missing", O_RDONLY));
     int fd = open("f", O_RDWR | O_CREAT | O_EXCL, 0644);
-    show("open create", fd);
+    show_fd("open create", fd);
     show("open excl", open("f", O_RDWR | O_CREAT | O_EXCL, 0644));
     show("write", write(fd, "hello, world\n", 13));
     show("lseek end", lseek(fd, 0, SEEK_END));
@@ -75,7 +83,7 @@ int main(int argc, char **argv) {
     show("close", close(fd));
     show("close again", close(fd));
     show("read bad fd", read(fd, buf, 1));
-    show("read only", (fd = open("f", O_RDONLY)));
+    show_fd("read only", (fd = open("f", O_RDONLY)));
     show("write to read-only fd", write(fd, "x", 1));
     close(fd);
     show("open dir for write", open(".", O_WRONLY));
