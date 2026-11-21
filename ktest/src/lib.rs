@@ -280,8 +280,10 @@ macro_rules! common_tests {
 
         #[test_case]
         fn a_realtime_task_wakes_on_time_despite_a_busy_task() {
-            // 5ms 周期で起き、遅れの最大が 1ms 以内(低い優先度のタスクが CPU を回していても)
-            let argv: [&[u8]; 3] = [b"jitter", b"rt", b"1000"];
+            // 5ms 周期で起き、遅れの最大がティックの半分(5ms)以内(低い優先度のタスクが CPU を
+            // 回していても)。目覚ましがなく、ティック(10ms)でしか起こせなければ、遅れはほぼ 10ms になる。
+            // 手元の QEMU ではふつう 0.3ms 以下だが、GitHub Actions の共有マシンでは 1.7ms になったことがある
+            let argv: [&[u8]; 3] = [b"jitter", b"rt", b"5000"];
             assert_eq!(boot::run_program("/bin/jitter", &argv), Ok(0));
         }
 
