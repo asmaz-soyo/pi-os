@@ -305,6 +305,12 @@ pub trait FileSystem: Send + Sync {
     /// `path` はこのファイルシステムの中の絶対パス(`/` で始まる)
     fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno>;
 
+    /// 見つけた名前を VFS の dentry キャッシュに覚えてよいか。名前が VFS を通らずに変わる
+    /// ファイルシステム(/proc のプロセス、/dev のデバイス)は false
+    fn cacheable(&self) -> bool {
+        false
+    }
+
     /// ディレクトリ `dir`(このファイルシステムの中のパス `dir_path`)の中の `name` を探す。
     /// ファイルシステムは、`dir` の実体から探せばルートからたどり直さずに済む
     fn lookup_child(
@@ -366,12 +372,22 @@ pub fn check_replace(old: FileKind, new: FileKind, new_empty: bool) -> Result<()
 /// マウントの表。長いマウントポイントから順に調べる。
 pub struct Vfs {
     mounts: Vec<(String, Arc<dyn FileSystem>)>,
+    /// dentry キャッシュ:リンクを含まない絶対パス → (実体, 種類)。見つかったものだけを覚える。
+    /// 名前を変える操作(作る、消す、動かす、リンク)は全部 Vfs を通るので、そこで古い項目を消す
+    dentries: crate::sync::SpinLock<Dentries>,
 }
+
+/// dentry キャッシュの中身:パス → (実体, 種類)
+type Dentries = alloc::collections::BTreeMap<String, (Arc<dyn File>, FileKind)>;
+
+/// dentry キャッシュに覚える数の上限(超えたら全部忘れて覚え直す)
+const DENTRY_LIMIT: usize = 1024;
 
 impl Vfs {
     pub fn new(root: Arc<dyn FileSystem>) -> Self {
         Self {
             mounts: alloc::vec![(String::from("/"), root)],
+            dentries: crate::sync::SpinLock::new(alloc::collections::BTreeMap::new()),
         }
     }
 
@@ -379,6 +395,15 @@ impl Vfs {
         self.mounts.push((String::from(at), fs));
         self.mounts
             .sort_by_key(|(p, _)| core::cmp::Reverse(p.len()));
+        self.dentries.lock().clear();
+    }
+
+    /// `path` と、その下のすべての名前をキャッシュから消す
+    fn forget(&self, path: &str) {
+        let below = alloc::format!("{}/", path.trim_end_matches('/'));
+        self.dentries
+            .lock()
+            .retain(|k, _| k != path && !k.starts_with(&below));
     }
 
     /// 絶対パスを、担当するファイルシステムとその中のパスに分ける。
@@ -443,10 +468,10 @@ impl Vfs {
             let last = todo.is_empty();
             if last && !follow_last {
                 let file = self.child(&cur, &mut cur_file, &comp, &next).ok();
-                return Ok((next, file));
+                return Ok((next, file.map(|(f, _)| f)));
             }
             match self.child(&cur, &mut cur_file, &comp, &next) {
-                Ok(f) if f.stat().kind == FileKind::Symlink => {
+                Ok((f, FileKind::Symlink)) => {
                     links += 1;
                     if links > MAX_LINKS {
                         return Err(Errno::ELOOP);
@@ -461,8 +486,8 @@ impl Vfs {
                         todo.push_front(String::from(c));
                     }
                 }
-                Ok(f) => {
-                    if !last && f.stat().kind != FileKind::Directory {
+                Ok((f, kind)) => {
+                    if !last && kind != FileKind::Directory {
                         return Err(Errno::ENOTDIR);
                     }
                     cur = next;
@@ -479,29 +504,44 @@ impl Vfs {
         Ok((cur, Some(file)))
     }
 
-    /// ディレクトリ `cur`(実体は `cur_file`)の中の `name`(絶対パスでは `next`)を探す
+    /// ディレクトリ `cur`(実体は `cur_file`)の中の `name`(絶対パスでは `next`)を探し、
+    /// 実体と種類を返す。dentry キャッシュにあればディスクを読まない
     fn child(
         &self,
         cur: &str,
         cur_file: &mut Option<Arc<dyn File>>,
         name: &str,
         next: &str,
-    ) -> Result<Arc<dyn File>, Errno> {
+    ) -> Result<(Arc<dyn File>, FileKind), Errno> {
+        if let Some(hit) = self.dentries.lock().get(next) {
+            return Ok(hit.clone());
+        }
         let (fs, inner) = self.resolve(next)?;
         let (parent_fs, parent_inner) = self.resolve(cur)?;
-        // マウントポイントをまたぐときや、親の実体がまだないときは、マウントの表から探す
-        if inner == "/" || !core::ptr::addr_eq(fs, parent_fs) {
-            return fs.lookup(inner);
-        }
-        let dir = match cur_file {
-            Some(d) => d.clone(),
-            None => {
-                let d = parent_fs.lookup(parent_inner)?;
-                *cur_file = Some(d.clone());
-                d
-            }
+        // マウントポイントをまたぐときは、マウントの表から探す
+        let file = if inner == "/" || !core::ptr::addr_eq(fs, parent_fs) {
+            fs.lookup(inner)?
+        } else {
+            let dir = match cur_file {
+                Some(d) => d.clone(),
+                None => {
+                    let d = parent_fs.lookup(parent_inner)?;
+                    *cur_file = Some(d.clone());
+                    d
+                }
+            };
+            fs.lookup_child(&dir, parent_inner, name)?
         };
-        fs.lookup_child(&dir, parent_inner, name)
+        // 種類は変わらないので、実体と一緒に覚える(たどるたびに inode を読まずに済む)
+        let kind = file.stat().kind;
+        if fs.cacheable() {
+            let mut d = self.dentries.lock();
+            if d.len() >= DENTRY_LIMIT {
+                d.clear();
+            }
+            d.insert(String::from(next), (file.clone(), kind));
+        }
+        Ok((file, kind))
     }
 
     /// 絶対パスの実体を探す(リンクは最後まで追う)。
@@ -518,12 +558,14 @@ impl Vfs {
     pub fn create(&self, path: &str, mode: u32) -> Result<Arc<dyn File>, Errno> {
         let path = self.resolve_path(path, true)?;
         let (fs, inner) = self.resolve(&path)?;
+        self.forget(&path);
         fs.create(inner, mode)
     }
 
     pub fn mkdir(&self, path: &str, mode: u32) -> Result<(), Errno> {
         let path = self.resolve_path(path, false)?;
         let (fs, inner) = self.resolve(&path)?;
+        self.forget(&path);
         fs.mkdir(inner, mode)
     }
 
@@ -531,7 +573,9 @@ impl Vfs {
     pub fn unlink(&self, path: &str, dir: bool) -> Result<(), Errno> {
         let path = self.resolve_path(path, false)?;
         let (fs, inner) = self.resolve(&path)?;
-        fs.unlink(inner, dir)
+        let r = fs.unlink(inner, dir);
+        self.forget(&path);
+        r
     }
 
     /// `path` に `target` を指すシンボリックリンクを作る
@@ -541,6 +585,7 @@ impl Vfs {
         if fs.lookup(inner).is_ok() {
             return Err(Errno::EEXIST);
         }
+        self.forget(&path);
         fs.symlink(inner, target)
     }
 
@@ -560,6 +605,7 @@ impl Vfs {
         if new_fs.lookup(new_inner).is_ok() {
             return Err(Errno::EEXIST);
         }
+        self.forget(new);
         old_fs.link(old_inner, new_inner)
     }
 
@@ -585,7 +631,10 @@ impl Vfs {
         if noreplace && new_fs.lookup(new_inner).is_ok() {
             return Err(Errno::EEXIST);
         }
-        old_fs.rename(old_inner, new_inner)
+        let r = old_fs.rename(old_inner, new_inner);
+        self.forget(old);
+        self.forget(new);
+        r
     }
 
     /// ディレクトリの中身。マウントポイントもその名前の項目として見せる。
@@ -661,5 +710,56 @@ mod tests {
         assert_eq!(Dummy.read(0, &mut buf), Err(Errno::EINVAL));
         assert_eq!(Dummy.write(0, b"x"), Err(Errno::EINVAL));
         assert!(!Dummy.is_tty());
+    }
+
+    /// 中身が外から変わるファイルシステム(/proc のプロセスのように)の代わり
+    struct Changing(crate::sync::SpinLock<bool>);
+
+    impl FileSystem for Changing {
+        fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
+            match (path, *self.0.lock()) {
+                ("/", _) => crate::fs::tmpfs::Tmpfs::new().lookup("/"),
+                ("/now", true) => crate::fs::tmpfs::Tmpfs::new().lookup("/"),
+                _ => Err(Errno::ENOENT),
+            }
+        }
+    }
+
+    fn tmp_vfs() -> Vfs {
+        let tmp = crate::fs::tmpfs::Tmpfs::new();
+        tmp.mkdir("/d", 0o755).unwrap();
+        tmp.create("/d/x", 0o644).unwrap();
+        tmp.create("/a", 0o644).unwrap();
+        Vfs::new(Arc::new(tmp))
+    }
+
+    #[test]
+    fn cached_names_are_forgotten_when_they_change() {
+        let vfs = tmp_vfs();
+        assert!(vfs.lookup("/a").is_ok());
+        assert!(vfs.lookup("/d/x").is_ok());
+        vfs.unlink("/a", false).unwrap();
+        assert_eq!(vfs.lookup("/a").err(), Some(Errno::ENOENT));
+        // ディレクトリを動かすと、中の名前も古いパスでは見つからない
+        vfs.rename("/d", "/e", false).unwrap();
+        assert_eq!(vfs.lookup("/d/x").err(), Some(Errno::ENOENT));
+        assert!(vfs.lookup("/e/x").is_ok());
+        // 同じ名前で作り直したら、新しいほうが見える
+        vfs.create("/a", 0o600).unwrap();
+        assert_eq!(vfs.lookup("/a").unwrap().stat().mode, 0o600);
+        vfs.symlink("/e", "/l").unwrap();
+        assert!(vfs.lookup("/l/x").is_ok());
+        vfs.unlink("/l", false).unwrap();
+        assert_eq!(vfs.lookup("/l/x").err(), Some(Errno::ENOENT));
+    }
+
+    #[test]
+    fn filesystems_that_change_by_themselves_are_not_cached() {
+        let fs = Arc::new(Changing(crate::sync::SpinLock::new(true)));
+        let mut vfs = tmp_vfs();
+        vfs.mount("/proc", fs.clone());
+        assert!(vfs.lookup("/proc/now").is_ok());
+        *fs.0.lock() = false; // プロセスが終わった
+        assert_eq!(vfs.lookup("/proc/now").err(), Some(Errno::ENOENT));
     }
 }

@@ -342,6 +342,11 @@ impl Fat32 {
 }
 
 impl FileSystem for Fat32 {
+    /// 名前は VFS を通してしか変わらないので、dentry キャッシュに覚えてよい
+    fn cacheable(&self) -> bool {
+        true
+    }
+
     fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
         let entry = self.inner.lookup(path)?;
         Ok(Arc::new(FatFile {

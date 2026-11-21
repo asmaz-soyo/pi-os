@@ -887,6 +887,11 @@ impl Ext2 {
 }
 
 impl FileSystem for Ext2 {
+    /// 名前は VFS を通してしか変わらないので、dentry キャッシュに覚えてよい
+    fn cacheable(&self) -> bool {
+        true
+    }
+
     /// すでに見つけたディレクトリ `dir` の中だけを探す(ルートからたどり直さない)
     fn lookup_child(
         &self,
@@ -1267,6 +1272,24 @@ mod tests {
         let n = reads.load(std::sync::atomic::Ordering::Relaxed);
         let depth = 9;
         assert!(n <= 8 * depth, "{n} sector reads for depth {depth}");
+    }
+
+    #[test]
+    fn a_path_found_once_is_found_again_without_reading_the_disk() {
+        let path = "a/b/c/d/e/f/g/h/file";
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let disk = Counting {
+            disk: RamDisk::from_bytes(&image(&[(path, b"deep")])),
+            reads: reads.clone(),
+        };
+        let vfs = crate::fs::vfs::Vfs::new(std::sync::Arc::new(
+            Ext2::new(shared(Box::new(disk))).unwrap(),
+        ));
+        let full = std::format!("/{path}");
+        vfs.lookup(&full).unwrap();
+        reads.store(0, std::sync::atomic::Ordering::Relaxed);
+        vfs.lookup(&full).unwrap();
+        assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 
     #[test]

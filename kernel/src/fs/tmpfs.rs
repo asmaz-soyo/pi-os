@@ -255,6 +255,11 @@ impl Default for Tmpfs {
 }
 
 impl FileSystem for Tmpfs {
+    /// 名前は VFS を通してしか変わらないので、dentry キャッシュに覚えてよい
+    fn cacheable(&self) -> bool {
+        true
+    }
+
     fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
         self.nodes.lock().get(path).cloned().ok_or(Errno::ENOENT)
     }

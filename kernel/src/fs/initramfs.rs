@@ -147,6 +147,11 @@ impl Initramfs {
 }
 
 impl FileSystem for Initramfs {
+    /// 名前は VFS を通してしか変わらないので、dentry キャッシュに覚えてよい
+    fn cacheable(&self) -> bool {
+        true
+    }
+
     fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
         self.nodes.get(path).cloned().ok_or(Errno::ENOENT)
     }
