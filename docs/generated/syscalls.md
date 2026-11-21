@@ -47,6 +47,7 @@
 | 120 | `sched_getscheduler` | 1 |
 | 123 | `sched_getaffinity` | 3 |
 | 124 | `sched_yield` | 0 |
+| 132 | `sigaltstack` | 2 |
 | 134 | `rt_sigaction` | 4 |
 | 135 | `rt_sigprocmask` | 4 |
 | 160 | `uname` | 1 |
@@ -69,4 +70,4 @@
 | 260 | `wait4` | 4 |
 | 278 | `getrandom` | 3 |
 
-合計 63 個
+合計 64 個

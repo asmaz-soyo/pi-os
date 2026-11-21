@@ -19,15 +19,19 @@ const CSIGNAL: u64 = 0xff;
 const CLONE_VM: u64 = 0x100;
 const CLONE_VFORK: u64 = 0x4000;
 
-/// clone(flags, …)。今は fork と vfork の形だけ(スレッドはまだ)。
-pub fn clone(p: &mut Process, flags: u64) -> Action {
+/// clone(flags, newsp, …)。今は fork と vfork の形だけ(スレッドはまだ)。
+/// `newsp` が 0 でなければ、子はそのスタックで動き出す。
+pub fn clone(p: &mut Process, flags: u64, newsp: u64) -> Action {
     // vfork(CLONE_VM | CLONE_VFORK)も、メモリを写す fork として扱う。
     // vfork の子は exec か _exit しかしない約束なので、写しても結果は同じ
     if flags & !(CSIGNAL | CLONE_VM | CLONE_VFORK) != 0 {
         return Action::Return(Errno::EINVAL.as_syscall_return());
     }
     match p.fork() {
-        Ok(child) => Action::Fork(Box::new(child)),
+        Ok(child) => Action::Fork {
+            child: Box::new(child),
+            sp: (newsp != 0).then_some(newsp),
+        },
         Err(e) => Action::Return(e.as_syscall_return()),
     }
 }

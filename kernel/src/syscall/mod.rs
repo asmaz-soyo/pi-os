@@ -54,6 +54,7 @@ pub mod nr {
     pub const NANOSLEEP: u64 = 101;
     pub const CLOCK_GETTIME: u64 = 113;
     pub const CLOCK_NANOSLEEP: u64 = 115;
+    pub const SIGALTSTACK: u64 = 132;
     pub const SCHED_SETSCHEDULER: u64 = 119;
     pub const SCHED_GETSCHEDULER: u64 = 120;
     pub const SCHED_GETAFFINITY: u64 = 123;
@@ -90,8 +91,12 @@ pub enum Action {
     Return(u64),
     /// プロセスを終了する(終了ステータス)
     Exit(i32),
-    /// 子プロセスを動かし始める(fork)。親には子の番号、子には 0 を返す
-    Fork(alloc::boxed::Box<Process>),
+    /// 子プロセスを動かし始める(fork)。親には子の番号、子には 0 を返す。
+    /// `sp` があれば、子はそのスタックで動き出す(clone の newsp)
+    Fork {
+        child: alloc::boxed::Box<Process>,
+        sp: Option<u64>,
+    },
     /// 新しいプログラムの入口から始める(execve)。ユーザー空間は差し替え済み
     Exec { entry: u64, sp: u64 },
 }
@@ -101,7 +106,7 @@ impl core::fmt::Debug for Action {
         match self {
             Self::Return(v) => write!(f, "Return({v:#x})"),
             Self::Exit(s) => write!(f, "Exit({s})"),
-            Self::Fork(_) => write!(f, "Fork(..)"),
+            Self::Fork { sp, .. } => write!(f, "Fork {{ sp: {sp:x?} }}"),
             Self::Exec { entry, sp } => write!(f, "Exec {{ entry: {entry:#x}, sp: {sp:#x} }}"),
         }
     }
@@ -226,6 +231,7 @@ table! {
         crate::sched::relax();
         Action::Return(0)
     };
+    nr::SIGALTSTACK, "sigaltstack", 2 => |p, a| result(misc::sigaltstack(p, a[1]));
     // シグナルはまだ配送しないので、設定は受け付けるだけ
     nr::RT_SIGACTION, "rt_sigaction", 4 => |p, a| Action::Return(0);
     nr::RT_SIGPROCMASK, "rt_sigprocmask", 4 => |p, a| Action::Return(0);
@@ -243,7 +249,7 @@ table! {
     nr::MUNMAP, "munmap", 2 => |p, a| result(mm::munmap(p, a[0], a[1]));
     // 断ると、libc は「新しく確保してコピー」に切り替える
     nr::MREMAP, "mremap", 5 => |p, a| Action::Return(crate::Errno::ENOMEM.as_syscall_return());
-    nr::CLONE, "clone", 5 => |p, a| proc::clone(p, a[0]);
+    nr::CLONE, "clone", 5 => |p, a| proc::clone(p, a[0], a[1]);
     nr::EXECVE, "execve", 3 => |p, a| proc::execve(p, a[0], a[1], a[2]);
     nr::MMAP, "mmap", 6 => |p, a| result(mm::mmap(p, a[0], a[1], a[2], a[3], a[4], a[5]));
     nr::MPROTECT, "mprotect", 3 => |p, a| result(mm::mprotect(p, a[0], a[1], a[2]));
@@ -296,7 +302,7 @@ pub fn dispatch(p: &mut Process, nr: u64, a: [u64; 6]) -> Action {
         match &action {
             &Action::Return(ret) => crate::println!("{}", trace_line(syscall, &a, ret)),
             Action::Exit(status) => crate::println!("[trace] {}({status}) = ?", syscall.name),
-            Action::Fork(_) => crate::println!("[trace] {}(…) = (child)", syscall.name),
+            Action::Fork { .. } => crate::println!("[trace] {}(…) = (child)", syscall.name),
             Action::Exec { .. } => crate::println!("[trace] {}(…) = (new program)", syscall.name),
         }
     }

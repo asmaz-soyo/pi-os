@@ -15,6 +15,7 @@ fn main() {
     println!("cargo:rerun-if-changed=programs");
     println!("cargo:rerun-if-changed=rootfs");
     println!("cargo:rerun-if-changed=third_party");
+    println!("cargo:rerun-if-changed=rust");
     println!("cargo:rerun-if-env-changed=ZIG");
 
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
@@ -27,6 +28,9 @@ fn main() {
     }
     let qjs = build_quickjs(&root.join("third_party/quickjs"), &out);
     files.push(("bin/qjs".to_string(), std::fs::read(qjs).unwrap()));
+    // Rust のプログラム(user/rust/<名前>)
+    let svcman = build_rust_program(&root, "svcman", &out);
+    files.push(("bin/svcman".to_string(), std::fs::read(svcman).unwrap()));
     let busybox = build_busybox(&root.join("third_party/busybox"), &out);
     files.push(("bin/busybox".to_string(), std::fs::read(busybox).unwrap()));
     collect(&root.join("rootfs"), "", &mut files);
@@ -122,6 +126,32 @@ fn build_quickjs(src: &Path, out: &Path) -> PathBuf {
     cmd.arg("-lm");
     run(cmd, "building qjs for aarch64-linux-musl");
     qjs
+}
+
+/// `rust/<name>` の Rust のプログラムを aarch64-unknown-linux-musl(静的リンク)でビルドする。
+/// リンカは Rust に付いてくる rust-lld を使う(musl の C ツールチェーンは要らない)。
+fn build_rust_program(root: &Path, name: &str, out: &Path) -> PathBuf {
+    const TARGET: &str = "aarch64-unknown-linux-musl";
+    let target_dir = out.join("rust");
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let mut cmd = Command::new(cargo);
+    cmd.current_dir(root.parent().unwrap())
+        .args(["build", "--release", "-q", "-p", name, "--target", TARGET])
+        .arg("--target-dir")
+        .arg(&target_dir)
+        .env("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER", "rust-lld")
+        // 外側のビルド(aarch64-unknown-none)の設定を持ち込まない
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_BUILD_TARGET");
+    let status = cmd
+        .status()
+        .unwrap_or_else(|e| panic!("building {name}: {e}"));
+    assert!(
+        status.success(),
+        "building {name} for {TARGET} failed (rustup target add {TARGET})"
+    );
+    target_dir.join(TARGET).join("release").join(name)
 }
 
 /// BusyBox を、tarball を展開して `pios.config`(機能を絞った設定)でビルドする。

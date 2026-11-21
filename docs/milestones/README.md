@@ -20,7 +20,8 @@
 | スケジューラ、fork、シェル、シバン | 完了 | `p2-shell` |
 | BusyBox(ash とコマンド)、パイプ | 完了 | `p2-busybox` |
 | システムコールの互換テスト(qemu-aarch64 と比べる) | 完了 | `p2-compat` |
-| tmpfs、timerfd、epoll、サービスマネージャ(C 製。Rust 版はツールチェーンの追加待ち) | 完了 | `p2-services` |
+| tmpfs、timerfd、epoll、サービスマネージャ | 完了 | `p2-services` |
+| サービスマネージャを Rust で(依存クレートなし) | 完了 | `p2-rust-svcman` |
 | GPIO 割り込みの fd、リアルタイム優先度、ジッタ計測 | 完了 | `p2-realtime` |
 | ブロック層(virtio-blk、MBR)、ext2 の読み書き、procfs | 完了 | `p2-ext2` |
 | FAT32 の読み込み(`/boot`) | 完了 | `p2-fat32` |

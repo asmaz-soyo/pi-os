@@ -144,9 +144,12 @@ fn new_user_space() -> Result<Box<dyn AddressSpace>, Errno> {
 }
 
 /// 子プロセスを、親のトラップフレームの写し(x0 = 0)から動かし始める。
-fn start_child(mut child: Process, frame: &TrapFrame) -> Result<u64, Errno> {
+fn start_child(mut child: Process, frame: &TrapFrame, sp: Option<u64>) -> Result<u64, Errno> {
     let mut child_frame = Box::new(frame.clone());
     child_frame.x[0] = 0; // 子には 0 を返す
+    if let Some(sp) = sp {
+        child_frame.sp_el0 = sp;
+    }
     let arg = Box::into_raw(child_frame) as usize;
     let Some(pid) = kernel::sched::spawn(user_task_entry, arg) else {
         // SAFETY: 渡せなかったので取り戻して捨てる
@@ -174,8 +177,8 @@ pub(crate) fn user_synchronous(frame: &mut TrapFrame) {
             match action {
                 Action::Return(value) => frame.x[0] = value,
                 Action::Exit(status) => finish(ExitStatus::Code(status)),
-                Action::Fork(child) => {
-                    frame.x[0] = match start_child(*child, frame) {
+                Action::Fork { child, sp } => {
+                    frame.x[0] = match start_child(*child, frame, sp) {
                         Ok(pid) => pid,
                         Err(e) => e.as_syscall_return(),
                     }

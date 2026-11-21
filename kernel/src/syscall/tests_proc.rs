@@ -10,7 +10,7 @@ const SIGCHLD: u64 = 17;
 
 fn fork(p: &mut crate::process::Process) -> crate::process::Process {
     match dispatch(p, nr::CLONE, [SIGCHLD, 0, 0, 0, 0, 0]) {
-        Action::Fork(child) => *child,
+        Action::Fork { child, sp: None } => *child,
         other => panic!("expected fork, got {other:?}"),
     }
 }
@@ -238,4 +238,21 @@ fn prctl_set_name_renames_the_process() {
         call(&mut p, nr::PRCTL, [9999, 0, 0, 0, 0, 0]),
         err(Errno::EINVAL)
     );
+}
+
+#[test]
+fn clone_with_a_new_stack_starts_the_child_on_it() {
+    // musl の posix_spawn(Rust の std::process::Command も使う)は
+    // clone(CLONE_VM | CLONE_VFORK | SIGCHLD, 新しいスタック) で子を作り、子はそのスタックで動き出す
+    const CLONE_VM: u64 = 0x100;
+    const CLONE_VFORK: u64 = 0x4000;
+    let (mut p, _) = process();
+    match dispatch(
+        &mut p,
+        nr::CLONE,
+        [CLONE_VM | CLONE_VFORK | SIGCHLD, 0x7000_0000, 0, 0, 0, 0],
+    ) {
+        Action::Fork { sp, .. } => assert_eq!(sp, Some(0x7000_0000)),
+        other => panic!("expected fork, got {other:?}"),
+    }
 }

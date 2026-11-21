@@ -104,6 +104,19 @@ pub fn prctl(p: &mut Process, option: u64, arg: u64) -> Result<u64, Errno> {
     }
 }
 
+/// sigaltstack(new, old):シグナル用の別のスタック。シグナルはまだ配送しないので、
+/// 新しい設定は受け付けるだけで、前の設定は「なし」(SS_DISABLE)を返す。
+pub fn sigaltstack(p: &mut Process, old: u64) -> Result<u64, Errno> {
+    const SS_DISABLE: u32 = 2;
+    if old != 0 {
+        // stack_t { void *ss_sp; int ss_flags; size_t ss_size; }(24 バイト)
+        let mut b = [0u8; 24];
+        b[8..12].copy_from_slice(&SS_DISABLE.to_le_bytes());
+        p.mem.copy_to_user(VirtAddr(old), &b)?;
+    }
+    Ok(0)
+}
+
 /// uname(buf):`struct utsname`(65 バイトの文字列 × 6)
 pub fn uname(p: &mut Process, buf: u64) -> Result<u64, Errno> {
     let fields: [&[u8]; 6] = [b"Pi-OS", b"pi", b"0.1.0", b"#1 Pi-OS", b"aarch64", b""];

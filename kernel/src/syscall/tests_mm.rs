@@ -391,3 +391,27 @@ fn sched_yield_returns_zero() {
     let (mut p, _) = process();
     assert_eq!(call(&mut p, nr::SCHED_YIELD, [0; 6]), 0);
 }
+
+#[test]
+fn sigaltstack_is_accepted_and_reports_no_stack() {
+    // Rust の標準ライブラリが起動時に呼ぶ(スタックあふれを知らせるシグナル用)。シグナルはまだ配送しない
+    const SS_DISABLE: u32 = 2;
+    let (mut p, _) = process();
+    put(&mut p, SCRATCH + 0x100, &[0xff; 24]);
+    assert_eq!(
+        call(
+            &mut p,
+            nr::SIGALTSTACK,
+            [SCRATCH, SCRATCH + 0x100, 0, 0, 0, 0]
+        ),
+        0
+    );
+    // stack_t { ss_sp, ss_flags, ss_size }
+    let old = get(&mut p, SCRATCH + 0x100, 24);
+    assert_eq!(old[..8], [0; 8]);
+    assert_eq!(
+        u32::from_le_bytes(old[8..12].try_into().unwrap()),
+        SS_DISABLE
+    );
+    assert_eq!(call(&mut p, nr::SIGALTSTACK, [0, 0, 0, 0, 0, 0]), 0);
+}
