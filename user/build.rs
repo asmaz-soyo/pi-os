@@ -457,10 +457,16 @@ fn build_busybox(dir: &Path, out: &Path) -> PathBuf {
             .arg(format!("AR={zig} ar"))
             // strip は CC の -s で済ませる(make の strip の段は busybox_unstripped を作った後)
             .arg("STRIP=true")
-            // busybox.links:アプレットの一覧(/bin/ls、/usr/bin/seq、…)
-            .args(["busybox_unstripped", "busybox.links"])
+            .arg("busybox_unstripped")
             .stdout(std::process::Stdio::null());
         run(cmd, "building BusyBox");
+        // busybox.links:アプレットの一覧(/bin/ls、/usr/bin/seq、…)。上と同じ make に並べると、
+        // -j で設定のヘッダ(autoconf.h)ができる前に作ろうとして失敗するので、後で別に作る
+        let mut cmd = Command::new("make");
+        cmd.current_dir(&src)
+            .arg("busybox.links")
+            .stdout(std::process::Stdio::null());
+        run(cmd, "listing BusyBox applets");
     }
     bin
 }
