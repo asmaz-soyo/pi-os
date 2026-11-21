@@ -18,3 +18,8 @@ default-members = [
 [workspace.package]
 edition = "2024"
 license = "MIT OR Apache-2.0"
+
+# smoltcp は最適化してビルドする(自分たちのコードはデバッグしやすいまま)。最適化なしだと
+# QEMU の上で 1 回の poll に数 ms かかり、その間リアルタイムのタスクが待たされた
+[profile.dev.package.smoltcp]
+opt-level = 2

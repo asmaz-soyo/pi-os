@@ -31,7 +31,9 @@ use alloc::vec::Vec;
 use hal::net::NetDev;
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::{tcp, udp};
-use smoltcp::wire::{IpAddress, IpCidr, IpEndpoint, IpListenEndpoint, Ipv4Address};
+use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
+/// アドレスの型(インターフェースの設定と問い合わせで使う。smoltcp のものをそのまま見せる)
+pub use smoltcp::wire::{IpCidr, Ipv4Address};
 
 const AF_INET: u16 = super::AF_INET as u16;
 /// 1 本のソケットの送り・受けのバッファの大きさ
@@ -89,13 +91,19 @@ impl Net {
 
     /// 届いたものを処理しきるまで poll し、閉じ終わったソケットを片付ける
     fn poll(&mut self) {
-        let now = crate::time::now_ns();
-        for stack in &mut self.stacks {
-            for _ in 0..32 {
-                if !stack.poll(now) {
-                    break;
-                }
+        for _ in 0..32 {
+            if !self.poll_once() {
+                break;
             }
+        }
+    }
+
+    /// すべてのインターフェースを 1 回ずつ poll し、閉じ終わったソケットを片付ける。何か変わったら true
+    fn poll_once(&mut self) -> bool {
+        let now = crate::time::now_ns();
+        let mut changed = false;
+        for stack in &mut self.stacks {
+            changed |= stack.poll(now);
         }
         let stacks = &mut self.stacks;
         self.closing.retain(|&h| {
@@ -109,6 +117,7 @@ impl Net {
             }
             !done
         });
+        changed
     }
 
     fn tcp(&mut self, h: H) -> &mut tcp::Socket<'static> {
@@ -228,7 +237,7 @@ enum Proto {
 static NET: SpinLock<Option<Net>> = SpinLock::new(None);
 
 /// インターフェースを足す。`addr` があればそのアドレスを、`gateway` があればデフォルトルートを設定する。
-/// 返すのはインターフェースの番号
+/// `addr` が None なら、アドレスなどは DHCP でもらう。返すのはインターフェースの番号
 pub fn attach(dev: Box<dyn NetDev>, addr: Option<IpCidr>, gateway: Option<Ipv4Address>) -> usize {
     let mut guard = NET.lock();
     let net = guard.get_or_insert_with(Net::new);
@@ -237,20 +246,38 @@ pub fn attach(dev: Box<dyn NetDev>, addr: Option<IpCidr>, gateway: Option<Ipv4Ad
     if let Some(gw) = gateway {
         let _ = stack.iface.routes_mut().add_default_ipv4_route(gw);
     }
+    if addr.is_none() {
+        stack.start_dhcp();
+    }
     net.stacks.push(stack);
     net.stacks.len() - 1
 }
 
-/// すべてのインターフェースを poll する(届いたパケットを処理し、再送などをする)。
-/// カーネルのスレッドが定期的に呼ぶ。返すのは、次に poll が要るまでの時間(ナノ秒、`max_ns` まで)
+/// すべてのインターフェースを 1 巡だけ poll する(届いたパケットを処理し、再送などをする)。
+/// カーネルのスレッドが定期的に呼ぶ。返すのは、次に poll が要るまでの時間(ナノ秒、`max_ns` まで。
+/// まだやることがあれば 0)。長く続けて走らないように、1 巡で止める
 pub fn poll_all(max_ns: u64) -> u64 {
-    with(|net| {
-        let now = crate::time::now_ns();
-        net.stacks
-            .iter_mut()
-            .filter_map(|s| s.poll_delay(now))
-            .fold(max_ns, u64::min)
-    })
+    let mut guard = NET.lock();
+    let Some(net) = guard.as_mut() else {
+        return max_ns;
+    };
+    if net.poll_once() {
+        return 0;
+    }
+    let now = crate::time::now_ns();
+    net.stacks
+        .iter_mut()
+        .filter_map(|s| s.poll_delay(now))
+        .fold(max_ns, u64::min)
+}
+
+/// インターフェース `iface` の DNS サーバー(DHCP で教えてもらったもの)
+pub fn dns_of(iface: usize) -> Vec<Ipv4Address> {
+    NET.lock()
+        .as_ref()
+        .and_then(|n| n.stacks.get(iface))
+        .map(|s| s.dns.clone())
+        .unwrap_or_default()
 }
 
 /// インターフェース `iface` の IPv4 アドレス

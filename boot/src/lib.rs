@@ -193,23 +193,20 @@ fn flusher(_: usize) {
 }
 
 /// eth0 をネットワークスタックにつなぐ。つないだら true。
-/// アドレスは今は QEMU のユーザーモードのネットワークの決まった値(DHCP にするまでの仮)
+/// アドレス、ゲートウェイ、DNS は DHCP でもらう(後ろの poll のスレッドが進める)
 fn bring_up_network() -> bool {
-    use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address};
     let Some(dev) = kernel::net::dev::take("eth0") else {
         return false;
     };
-    kernel::net::inet::attach(
-        dev,
-        Some(IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24)),
-        Some(Ipv4Address::new(10, 0, 2, 2)),
-    );
+    kernel::net::inet::attach(dev, None, None);
     true
 }
 
 /// だれもシステムコールで待っていないときに届いたパケットや、再送のタイマーのために、
 /// ネットワークを poll する。smoltcp が「次はいつ poll が要るか」を教えてくれるので、それまで眠る
-/// (急ぎがなければ 50ms。受信の割り込みを使うようになれば、届いたときに起こせる)
+/// (急ぎがなければ 50ms。受信の割り込みを使うようになれば、届いたときに起こせる)。
+/// カーネルのスレッドは途中で切り替わらないので、1 回起きたら 1 巡だけ poll する。まだやることが
+/// あれば 1ms 後に起き直す(その間にリアルタイムのタスクなどが動ける)
 fn net_poller(_: usize) {
     const MIN: u64 = 1_000_000;
     const MAX: u64 = 50_000_000;

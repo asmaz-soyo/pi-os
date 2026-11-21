@@ -30,7 +30,6 @@ dependencies = [
  "arch-aarch64",
  "hal",
  "kernel",
- "smoltcp",
  "spin",
  "userland",
  "virtio-blk",

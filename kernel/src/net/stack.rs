@@ -11,10 +11,11 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use hal::net::{LinkType, NetDev};
-use smoltcp::iface::{Config, Interface, SocketSet};
+use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
+use smoltcp::socket::dhcpv4;
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr};
+use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr, Ipv4Address, Ipv4Cidr};
 
 /// smoltcp の時刻(マイクロ秒)にする
 pub fn instant(now_ns: u64) -> Instant {
@@ -95,6 +96,10 @@ pub struct Stack {
     dev: Box<dyn NetDev>,
     pub iface: Interface,
     pub sockets: SocketSet<'static>,
+    /// DHCP のクライアント(アドレスを DHCP でもらうときだけ)
+    dhcp: Option<SocketHandle>,
+    /// DNS サーバー(DHCP で教えてもらったもの)
+    pub dns: Vec<Ipv4Address>,
 }
 
 impl Stack {
@@ -116,7 +121,35 @@ impl Stack {
             dev,
             iface,
             sockets: SocketSet::new(Vec::new()),
+            dhcp: None,
+            dns: Vec::new(),
         }
+    }
+
+    /// アドレスを DHCP でもらう(DHCP のクライアントのソケットを足す。続きは `poll` の中で進む)
+    pub fn start_dhcp(&mut self) {
+        self.dhcp = Some(self.sockets.add(dhcpv4::Socket::new()));
+    }
+
+    /// アドレス、デフォルトルート、DNS を設定する(None ならアドレスとルートを外す)
+    pub fn apply(
+        &mut self,
+        address: Option<Ipv4Cidr>,
+        router: Option<Ipv4Address>,
+        dns: &[Ipv4Address],
+    ) {
+        self.iface.update_ip_addrs(|addrs| {
+            addrs.clear();
+            if let Some(a) = address {
+                let _ = addrs.push(IpCidr::Ipv4(a));
+            }
+        });
+        let routes = self.iface.routes_mut();
+        routes.remove_default_ipv4_route();
+        if let Some(gw) = router {
+            let _ = routes.add_default_ipv4_route(gw);
+        }
+        self.dns = dns.to_vec();
     }
 
     /// 次に poll が要るまでの時間(ナノ秒)。急ぎのものがなければ None
@@ -138,6 +171,20 @@ impl Stack {
             &mut DevAdapter(&mut *self.dev),
             &mut self.sockets,
         );
+        // DHCP:アドレスをもらえた(か、失った)ら、インターフェースに当てる
+        if let Some(h) = self.dhcp {
+            let event = match self.sockets.get_mut::<dhcpv4::Socket>(h).poll() {
+                Some(dhcpv4::Event::Configured(c)) => {
+                    Some((Some(c.address), c.router, c.dns_servers.to_vec()))
+                }
+                Some(dhcpv4::Event::Deconfigured) => Some((None, None, Vec::new())),
+                None => None,
+            };
+            if let Some((address, router, dns)) = event {
+                self.apply(address, router, &dns);
+                return true;
+            }
+        }
         changed != smoltcp::iface::PollResult::None
     }
 }
@@ -154,6 +201,28 @@ mod tests {
             tcp::SocketBuffer::new(vec![0; 4096]),
             tcp::SocketBuffer::new(vec![0; 4096]),
         )
+    }
+
+    #[test]
+    fn a_dhcp_lease_sets_the_address_the_gateway_and_dns() {
+        use smoltcp::wire::{Ipv4Address, Ipv4Cidr};
+        let mut stack = Stack::new(Box::new(Loopback::new()), &[], 1, 0);
+        assert_eq!(stack.iface.ipv4_addr(), None);
+        let lease = Ipv4Cidr::new(Ipv4Address::new(10, 0, 2, 15), 24);
+        let gw = Ipv4Address::new(10, 0, 2, 2);
+        let dns = Ipv4Address::new(10, 0, 2, 3);
+        stack.apply(Some(lease), Some(gw), &[dns]);
+        assert_eq!(
+            stack.iface.ipv4_addr(),
+            Some(Ipv4Address::new(10, 0, 2, 15))
+        );
+        assert!(stack.has_default_route());
+        assert_eq!(stack.dns, [dns]);
+        // 借りたものを失った(期限切れなど)
+        stack.apply(None, None, &[]);
+        assert_eq!(stack.iface.ipv4_addr(), None);
+        assert!(!stack.has_default_route());
+        assert!(stack.dns.is_empty());
     }
 
     #[test]

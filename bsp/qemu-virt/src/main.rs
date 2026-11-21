@@ -148,8 +148,31 @@ mod tests {
         );
     }
 
+    /// eth0(インターフェース 1)が DHCP でアドレスをもらうまで待つ(3 秒まで)
+    fn wait_for_dhcp() -> Option<kernel::net::inet::Ipv4Address> {
+        for _ in 0..300 {
+            if let Some(a) = kernel::net::inet::ipv4_of(1) {
+                return Some(a);
+            }
+            kernel::sched::sleep_until(kernel::time::now_ns() + 10_000_000);
+        }
+        None
+    }
+
+    #[test_case]
+    fn eth0_gets_its_address_gateway_and_dns_by_dhcp() {
+        use kernel::net::inet::Ipv4Address;
+        // QEMU のユーザーモードのネットワークが配る値
+        assert_eq!(wait_for_dhcp(), Some(Ipv4Address::new(10, 0, 2, 15)));
+        assert_eq!(
+            kernel::net::inet::dns_of(1),
+            [Ipv4Address::new(10, 0, 2, 3)]
+        );
+    }
+
     #[test_case]
     fn tcp_reaches_the_outside_through_virtio_net() {
+        assert!(wait_for_dhcp().is_some());
         // QEMU の guestfwd で、10.0.2.100:7 への接続はホストの `cat` につながる(エコーサーバー)
         let script = b"test \"$(echo hello through virtio-net | nc 10.0.2.100 7)\" = \"hello through virtio-net\"";
         let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
