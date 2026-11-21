@@ -92,3 +92,56 @@ fn only_the_owner_or_root_may_chmod_and_only_root_may_chown() {
         err(Errno::EPERM)
     );
 }
+
+fn unlink(p: &mut Process, path: &[u8]) -> u64 {
+    let at = cstr(p, path);
+    call(p, nr::UNLINKAT, [AT_FDCWD, at, 0, 0, 0, 0])
+}
+
+fn rename(p: &mut Process, old: &[u8], new: &[u8]) -> u64 {
+    put(p, SCRATCH + 0x3000, &[old, b"\0"].concat());
+    put(p, SCRATCH + 0x3400, &[new, b"\0"].concat());
+    call(
+        p,
+        nr::RENAMEAT,
+        [AT_FDCWD, SCRATCH + 0x3000, AT_FDCWD, SCRATCH + 0x3400, 0, 0],
+    )
+}
+
+#[test]
+fn in_a_sticky_directory_only_owners_may_remove_names() {
+    // /tmp は 1777:誰でも作れるが、消したり動かしたりできるのは自分のものだけ
+    let (mut p, _) = process();
+    create(&mut p, b"/tmp/roots");
+    p.cred = crate::cred::Credentials::user(1000, 100);
+    create(&mut p, b"/tmp/mine");
+    assert_eq!(unlink(&mut p, b"/tmp/roots"), err(Errno::EPERM));
+    assert_eq!(
+        rename(&mut p, b"/tmp/roots", b"/tmp/stolen"),
+        err(Errno::EPERM)
+    );
+    // 他人のファイルを置き換えることもできない
+    assert_eq!(
+        rename(&mut p, b"/tmp/mine", b"/tmp/roots"),
+        err(Errno::EPERM)
+    );
+    // 自分のものは自由
+    assert_eq!(rename(&mut p, b"/tmp/mine", b"/tmp/mine2"), 0);
+    assert_eq!(unlink(&mut p, b"/tmp/mine2"), 0);
+    // root は何でもできる
+    p.cred = crate::cred::Credentials::root();
+    assert_eq!(unlink(&mut p, b"/tmp/roots"), 0);
+}
+
+#[test]
+fn the_owner_of_a_sticky_directory_may_remove_anything_in_it() {
+    let (mut p, _) = process();
+    p.cred = crate::cred::Credentials::user(1000, 100);
+    let d = cstr(&mut p, b"/tmp/share");
+    assert_eq!(call(&mut p, nr::MKDIRAT, [AT_FDCWD, d, 0o777, 0, 0, 0]), 0);
+    assert_eq!(chmod(&mut p, b"/tmp/share", 0o1777), 0);
+    p.cred = crate::cred::Credentials::user(2000, 200);
+    create(&mut p, b"/tmp/share/theirs");
+    p.cred = crate::cred::Credentials::user(1000, 100);
+    assert_eq!(unlink(&mut p, b"/tmp/share/theirs"), 0);
+}

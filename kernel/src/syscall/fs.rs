@@ -113,8 +113,25 @@ pub fn mkdirat(p: &mut Process, dirfd: u64, path: u64, mode: u64) -> Result<u64,
 /// unlinkat(dirfd, path, flags)
 pub fn unlinkat(p: &mut Process, dirfd: u64, path: u64, flags: u64) -> Result<u64, Errno> {
     let path = path_arg(p, dirfd, path)?;
+    may_remove(p, &path)?;
     p.vfs.unlink(&path, flags & AT_REMOVEDIR != 0)?;
     Ok(0)
+}
+
+/// `path` の名前を消す(動かす・置き換える)前の確かめ。親ディレクトリに書き込みとたどる権限が要る。
+/// 親にスティッキービット(0o1000、/tmp の 1777 など)があれば、消せるのはファイルの持ち主、
+/// ディレクトリの持ち主、root だけ(EPERM)
+fn may_remove(p: &Process, path: &str) -> Result<(), Errno> {
+    const S_ISVTX: u32 = 0o1000;
+    let dir = p.vfs.lookup(&vfs::normalize(path, ".."))?.stat();
+    p.cred.check(&dir, Access::WRITE | Access::EXEC)?;
+    if dir.mode & S_ISVTX != 0 && p.cred.euid != 0 {
+        let file = p.vfs.lookup_nofollow(path)?.stat();
+        if p.cred.euid != file.uid && p.cred.euid != dir.uid {
+            return Err(Errno::EPERM);
+        }
+    }
+    Ok(())
 }
 
 /// linkat(olddirfd, old, newdirfd, new, flags)。AT_SYMLINK_FOLLOW なら old のリンクを追う
@@ -154,9 +171,13 @@ pub fn renameat2(
     }
     let old = path_arg(p, olddirfd, old)?;
     let new = path_arg(p, newdirfd, new)?;
-    for path in [&old, &new] {
-        let dir = p.vfs.lookup(&vfs::normalize(path, ".."))?;
-        p.cred.check(&dir.stat(), Access::WRITE | Access::EXEC)?;
+    may_remove(p, &old)?;
+    let new_dir = p.vfs.lookup(&vfs::normalize(&new, ".."))?;
+    p.cred
+        .check(&new_dir.stat(), Access::WRITE | Access::EXEC)?;
+    if p.vfs.lookup_nofollow(&new).is_ok() {
+        // 置き換えられる側も、名前を消すのと同じ
+        may_remove(p, &new)?;
     }
     p.vfs.rename(&old, &new, flags & RENAME_NOREPLACE != 0)?;
     Ok(0)
