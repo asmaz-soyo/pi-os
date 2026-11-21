@@ -44,6 +44,8 @@ fn main() {
         "bin/micropython".to_string(),
         std::fs::read(micropython).unwrap(),
     ));
+    // CPython は大きいので initramfs には入れない(ディスクのルートに xtask が入れる)
+    build_cpython(&root.join("third_party/cpython"), &out);
     let busybox = build_busybox(&root.join("third_party/busybox"), &out);
     files.push(("bin/busybox".to_string(), std::fs::read(busybox).unwrap()));
     collect(&root.join("rootfs"), "", &mut files);
@@ -71,8 +73,22 @@ fn collect(dir: &Path, prefix: &str, files: &mut Vec<(String, Vec<u8>)>) {
     }
 }
 
+/// 使う zig。snap の zig は、入口(/snap/bin/zig)から呼ぶと snap-confine を通る。cargo(これも
+/// snap)の下で CPython の configure から呼ぶと、そこで何も言わずに失敗したので、snap の中の実体を直接使う
+fn zig_program() -> String {
+    if let Ok(z) = std::env::var("ZIG") {
+        return z;
+    }
+    let real = "/snap/zig/current/zig";
+    if Path::new(real).exists() {
+        real.to_string()
+    } else {
+        "zig".to_string()
+    }
+}
+
 fn zig(out: &Path) -> Command {
-    let zig = std::env::var("ZIG").unwrap_or_else(|_| "zig".to_string());
+    let zig = zig_program();
     let mut cmd = Command::new(zig);
     // zig のキャッシュはビルドディレクトリの中に置く
     cmd.env("ZIG_LOCAL_CACHE_DIR", out.join("zig-cache"));
@@ -167,6 +183,143 @@ fn build_rust_program(root: &Path, name: &str, out: &Path) -> PathBuf {
     target_dir.join(TARGET).join("release").join(name)
 }
 
+/// CPython をビルドし、ディスクに入れる木 `out/cpython-root/` を作る(README を参照)。
+fn build_cpython(dir: &Path, out: &Path) -> PathBuf {
+    const VERSION: &str = "Python-3.15.2";
+    const LIB: &str = "python3.15";
+    let root = out.join("cpython-root");
+    if root.join("usr/bin/python3").exists() {
+        return root;
+    }
+    let src = out.join(VERSION);
+    if !src.join("configure").exists() {
+        let mut cmd = Command::new("tar");
+        cmd.arg("-xJf")
+            .arg(dir.join(format!("{VERSION}.tar.xz")))
+            .arg("-C")
+            .arg(out);
+        run(cmd, "extracting CPython");
+    }
+    let jobs = std::env::var("NUM_JOBS").unwrap_or_else(|_| "4".to_string());
+    // configure と make は、cargo がビルドスクリプトに渡す環境(DEBUG=true、jobserver の
+    // CARGO_MAKEFLAGS など)を持ち込まないように、空の環境に PATH と HOME だけ渡して動かす
+    let clean = |cmd: &mut Command| {
+        cmd.env_clear();
+        for v in ["PATH", "HOME", "ZIG"] {
+            if let Some(val) = std::env::var_os(v) {
+                cmd.env(v, val);
+            }
+        }
+    };
+
+    // 1. ホスト用の Python(同じ版)
+    let host = out.join("cpython-host");
+    let host_python = host.join("install/bin/python3.15");
+    if !host_python.exists() {
+        std::fs::create_dir_all(&host).unwrap();
+        let mut cmd = Command::new(src.join("configure"));
+        clean(&mut cmd);
+        cmd.current_dir(&host)
+            .arg(format!("--prefix={}", host.join("install").display()))
+            .stdout(std::process::Stdio::null());
+        run(cmd, "configuring CPython for the host");
+        for target in ["all", "install"] {
+            let mut cmd = Command::new("make");
+            clean(&mut cmd);
+            cmd.current_dir(&host)
+                .arg(format!("-j{jobs}"))
+                .arg(target)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            run(cmd, "building CPython for the host");
+        }
+    }
+
+    // 2. aarch64-linux-musl の静的リンクの python
+    let cross = out.join("cpython-cross");
+    if !cross.join("python").exists() {
+        std::fs::create_dir_all(&cross).unwrap();
+        let zig = zig_program();
+        let mut cmd = Command::new(src.join("configure"));
+        clean(&mut cmd);
+        cmd.current_dir(&cross)
+            .env("ZIG_LOCAL_CACHE_DIR", out.join("zig-cache"))
+            .env("ZIG_GLOBAL_CACHE_DIR", out.join("zig-global-cache"))
+            .env("CONFIG_SITE", dir.join("config.site"))
+            // ホストのライブラリ(zstd など)を見つけて混ぜないように
+            .env("PKG_CONFIG", "false")
+            // 拡張モジュールを全部本体に組み込む(静的リンクでは .so を読み込めない)
+            .env("MODULE_BUILDTYPE", "static")
+            .args([
+                "--host=aarch64-linux-musl",
+                "--build=x86_64-linux-gnu",
+                "--prefix=/usr",
+            ])
+            .arg(format!("--with-build-python={}", host_python.display()))
+            .args(["--disable-shared", "--disable-ipv6", "--without-ensurepip"])
+            .arg("--disable-test-modules")
+            .arg(format!("CC={zig} cc -target aarch64-linux-musl"))
+            .arg(format!("CXX={zig} c++ -target aarch64-linux-musl"))
+            .arg(format!("AR={zig} ar"))
+            .arg(format!("RANLIB={zig} ranlib"))
+            .arg("READELF=readelf")
+            // zig は __DATE__ を使うとエラーにする(再現できるビルドのため)
+            .arg("CFLAGS=-Wno-error=date-time -g0")
+            .arg("LDFLAGS=-static -s")
+            .stdout(std::process::Stdio::null());
+        run(cmd, "configuring CPython for aarch64-linux-musl");
+        let mut cmd = Command::new("make");
+        clean(&mut cmd);
+        cmd.current_dir(&cross)
+            .env("ZIG_LOCAL_CACHE_DIR", out.join("zig-cache"))
+            .env("ZIG_GLOBAL_CACHE_DIR", out.join("zig-global-cache"))
+            .arg(format!("-j{jobs}"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        run(cmd, "building CPython for aarch64-linux-musl");
+    }
+
+    // 3. ディスクに入れる木
+    let stage = out.join("cpython-root.tmp");
+    let _ = std::fs::remove_dir_all(&stage);
+    let lib = stage.join("usr/lib").join(LIB);
+    std::fs::create_dir_all(stage.join("usr/bin")).unwrap();
+    std::fs::copy(cross.join("python"), stage.join("usr/bin/python3")).unwrap();
+    const SKIP: &[&str] = &[
+        "test",
+        "idlelib",
+        "tkinter",
+        "turtledemo",
+        "ensurepip",
+        "__pycache__",
+    ];
+    copy_dir(&src.join("Lib"), &lib, SKIP);
+    // configure が作った sysconfig のデータ(build/lib.linux-aarch64-3.15/)
+    let built = cross
+        .join("build")
+        .join(format!("lib.linux-aarch64-{}", &LIB[6..]));
+    copy_dir(&built, &lib.join("lib-dynload"), &[]);
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::rename(&stage, &root).unwrap();
+    root
+}
+
+/// ディレクトリを写す(`skip` の名前のディレクトリは除く)
+fn copy_dir(from: &Path, to: &Path, skip: &[&str]) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap().flatten() {
+        let name = e.file_name();
+        let path = e.path();
+        if path.is_dir() {
+            if !skip.contains(&name.to_str().unwrap_or("")) {
+                copy_dir(&path, &to.join(&name), skip);
+            }
+        } else {
+            std::fs::copy(&path, to.join(&name)).unwrap();
+        }
+    }
+}
+
 /// musl の共有ライブラリ libc.so(動的リンカを兼ねる)をビルドする。
 fn build_musl_ldso(dir: &Path, out: &Path) -> PathBuf {
     const VERSION: &str = "musl-1.2.6";
@@ -183,7 +336,7 @@ fn build_musl_ldso(dir: &Path, out: &Path) -> PathBuf {
             .arg(out);
         run(cmd, "extracting musl");
     }
-    let zig = std::env::var("ZIG").unwrap_or_else(|_| "zig".to_string());
+    let zig = zig_program();
     let mut cmd = Command::new("sh");
     cmd.current_dir(&src)
         .env("ZIG_LOCAL_CACHE_DIR", out.join("zig-cache"))
@@ -245,6 +398,7 @@ fn build_micropython(dir: &Path, out: &Path) -> PathBuf {
     let mut cmd = Command::new("make");
     cmd.current_dir(src.join("ports/unix"))
         .env_remove("DEBUG")
+        .env("ZIG", zig_program())
         .env("ZIG_LOCAL_CACHE_DIR", out.join("zig-cache"))
         .env("ZIG_GLOBAL_CACHE_DIR", out.join("zig-global-cache"))
         .arg(format!("-j{jobs}"))
@@ -282,7 +436,7 @@ fn build_busybox(dir: &Path, out: &Path) -> PathBuf {
         let _ = std::fs::remove_file(&bin);
     }
     if !bin.exists() {
-        let zig = std::env::var("ZIG").unwrap_or_else(|_| "zig".to_string());
+        let zig = zig_program();
         let jobs = std::env::var("NUM_JOBS").unwrap_or_else(|_| "4".to_string());
         let mut cmd = Command::new("make");
         cmd.current_dir(&src)

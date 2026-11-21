@@ -415,3 +415,25 @@ fn sigaltstack_is_accepted_and_reports_no_stack() {
     );
     assert_eq!(call(&mut p, nr::SIGALTSTACK, [0, 0, 0, 0, 0, 0]), 0);
 }
+
+#[test]
+fn sysinfo_reports_uptime_and_memory() {
+    // struct sysinfo:uptime(8)、loads[3](24)、totalram(8)、freeram(8)、… mem_unit(4、104 バイト目)
+    let (mut p, _) = process();
+    put(&mut p, SCRATCH, &[0xff; 112]);
+    assert_eq!(call(&mut p, nr::SYSINFO, [SCRATCH, 0, 0, 0, 0, 0]), 0);
+    let b = get(&mut p, SCRATCH, 112);
+    let word = |i: usize| u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+    assert!(word(0) < 1_000_000, "uptime in seconds");
+    // ホストのテストではページの割り当て器がないので 0。QEMU では実際の値
+    assert!(word(40) <= word(32), "freeram <= totalram");
+    assert_eq!(
+        u32::from_le_bytes(b[104..108].try_into().unwrap()),
+        1,
+        "mem_unit"
+    );
+    assert_eq!(
+        call(&mut p, nr::SYSINFO, [0, 0, 0, 0, 0, 0]),
+        err(Errno::EFAULT)
+    );
+}

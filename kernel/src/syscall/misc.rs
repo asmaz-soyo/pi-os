@@ -117,6 +117,21 @@ pub fn sigaltstack(p: &mut Process, old: u64) -> Result<u64, Errno> {
     Ok(0)
 }
 
+/// sysinfo(info):起動からの秒数と、メモリの量(`struct sysinfo`、112 バイト)
+pub fn sysinfo(p: &mut Process, info: u64) -> Result<u64, Errno> {
+    let (free, total) = crate::mm::frame_stats();
+    let page = hal::addr::PAGE_SIZE;
+    let mut b = [0u8; 112];
+    b[0..8].copy_from_slice(&(crate::time::now_ns() / 1_000_000_000).to_le_bytes());
+    b[32..40].copy_from_slice(&(total as u64 * page).to_le_bytes()); // totalram
+    b[40..48].copy_from_slice(&(free as u64 * page).to_le_bytes()); // freeram
+    let procs = crate::process::PROCESSES.infos().len() as u16;
+    b[80..82].copy_from_slice(&procs.to_le_bytes());
+    b[104..108].copy_from_slice(&1u32.to_le_bytes()); // mem_unit:上の値はバイト単位
+    p.mem.copy_to_user(VirtAddr(info), &b)?;
+    Ok(0)
+}
+
 /// uname(buf):`struct utsname`(65 バイトの文字列 × 6)
 pub fn uname(p: &mut Process, buf: u64) -> Result<u64, Errno> {
     let fields: [&[u8]; 6] = [b"Pi-OS", b"pi", b"0.1.0", b"#1 Pi-OS", b"aarch64", b""];

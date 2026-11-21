@@ -278,7 +278,7 @@ fn make_disk(path: &str, overlay: &[(&str, String)]) -> Result<(), String> {
     const BOOT_MIB: usize = 34; // FAT32 にはクラスタが 65525 個以上いる(1 クラスタ 512 バイトで約 33MiB)
     const BOOT_SECTORS: usize = BOOT_MIB * 2048;
     const EXT2_START: usize = BOOT_START + BOOT_SECTORS;
-    const EXT2_SECTORS: usize = 32 * 2048; // 32MiB(ユーザーランド全体が入る大きさ)
+    const EXT2_SECTORS: usize = 64 * 2048; // 64MiB(ユーザーランドと CPython が入る大きさ)
     let mut disk = vec![0u8; (EXT2_START + EXT2_SECTORS) * 512];
     let parts = [
         (0x0c, BOOT_START, BOOT_SECTORS),
@@ -310,10 +310,13 @@ fn make_disk(path: &str, overlay: &[(&str, String)]) -> Result<(), String> {
     std::fs::create_dir_all(full.parent().unwrap()).map_err(|e| e.to_string())?;
     let stage = full.with_extension("root");
     let _ = std::fs::remove_dir_all(&stage);
-    unpack_tar(
-        &std::fs::read(initramfs_tar()?).map_err(|e| e.to_string())?,
-        &stage,
-    )?;
+    let tar = initramfs_tar()?;
+    unpack_tar(&std::fs::read(&tar).map_err(|e| e.to_string())?, &stage)?;
+    // CPython(大きいので initramfs には入れず、ディスクにだけ入れる)
+    let cpython = tar.parent().unwrap().join("cpython-root");
+    if cpython.exists() {
+        copy_tree(&cpython, &stage)?;
+    }
     copy_tree(&root().join("user/diskroot"), &stage)?;
     for (rel, content) in overlay {
         std::fs::write(stage.join(rel), content).map_err(|e| e.to_string())?;
@@ -408,14 +411,17 @@ fn unpack_tar(tar: &[u8], dest: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-/// `src` の中身を `dest` に写す
+/// `src` の中身を `dest` に写す(ファイルのモード、つまり実行ビットも写す)
 fn copy_tree(src: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
-    let mut files = Vec::new();
-    collect_files(src, "", &mut files)?;
-    for (name, data) in files {
-        let path = dest.join(name);
-        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-        std::fs::write(path, data).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    for e in std::fs::read_dir(src).map_err(|e| format!("{}: {e}", src.display()))? {
+        let e = e.map_err(|e| e.to_string())?;
+        let to = dest.join(e.file_name());
+        if e.path().is_dir() {
+            copy_tree(&e.path(), &to)?;
+        } else {
+            std::fs::copy(e.path(), &to).map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
 }

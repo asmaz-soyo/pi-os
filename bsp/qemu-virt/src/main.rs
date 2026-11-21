@@ -115,6 +115,12 @@ mod tests {
     ktest::common_tests!();
 
     #[test_case]
+    fn cpython_runs_from_the_disk() {
+        let argv: [&[u8]; 2] = [b"python3", b"/usr/share/pi-os/hello_cpython.py"];
+        assert_eq!(boot::run_program("/usr/bin/python3", &argv), Ok(7));
+    }
+
+    #[test_case]
     fn the_fat32_partition_of_the_disk_is_mounted_on_boot() {
         assert_eq!(boot::run_program("/bin/bootread", &[b"bootread"]), Ok(0));
     }

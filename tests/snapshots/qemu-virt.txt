@@ -1,4 +1,4 @@
-virtio-blk: /dev/vda, 137216 sectors
+virtio-blk: /dev/vda, 202752 sectors
 Pi-OS booting on qemu-virt
 Hello from Pi-OS
 timer: 10 ticks at 100 Hz
@@ -26,6 +26,7 @@ hello.py
 lib
 proc
 tmp
+usr
 pi-os:/$ cat /proc/version
 Pi-OS version 0.1.0 (aarch64)
 pi-os:/$ qjs

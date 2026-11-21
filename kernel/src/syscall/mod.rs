@@ -64,6 +64,7 @@ pub mod nr {
     pub const UNAME: u64 = 160;
     pub const PRCTL: u64 = 167;
     pub const GETPID: u64 = 172;
+    pub const SYSINFO: u64 = 179;
     pub const GETUID: u64 = 174;
     pub const GETEUID: u64 = 175;
     pub const GETGID: u64 = 176;
@@ -245,6 +246,7 @@ table! {
     nr::GETGID, "getgid", 0 => |p, a| Action::Return(p.cred.gid as u64);
     nr::GETEGID, "getegid", 0 => |p, a| Action::Return(p.cred.egid as u64);
     nr::GETTID, "gettid", 0 => |p, a| Action::Return(1);
+    nr::SYSINFO, "sysinfo", 1 => |p, a| result(misc::sysinfo(p, a[0]));
     nr::BRK, "brk", 1 => |p, a| Action::Return(mm::brk(p, a[0]));
     nr::MUNMAP, "munmap", 2 => |p, a| result(mm::munmap(p, a[0], a[1]));
     // 断ると、libc は「新しく確保してコピー」に切り替える
