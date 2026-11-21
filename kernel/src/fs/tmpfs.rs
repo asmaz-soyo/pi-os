@@ -185,17 +185,19 @@ impl File for TmpLink {
     }
 }
 
-/// 名前付きパイプ:名前と持ち主だけ。中身(パイプ)は開いたときに pipe::open_fifo が用意する
-struct TmpFifo {
+/// 特別なファイル(名前付きパイプ、ソケット):名前と持ち主だけ。
+/// 中身は、パイプなら開いたときに pipe::open_fifo が、ソケットなら bind したソケットが持つ
+struct TmpNode {
+    kind: FileKind,
     meta: SpinLock<Meta>,
     ino: u64,
 }
 
-impl File for TmpFifo {
+impl File for TmpNode {
     meta_ops!();
 
     fn stat(&self) -> Stat {
-        Meta::stat(&self.meta, FileKind::Fifo, 0, self.ino)
+        Meta::stat(&self.meta, self.kind, 0, self.ino)
     }
 }
 
@@ -219,7 +221,7 @@ fn meta_of(f: &Arc<dyn File>) -> Option<&SpinLock<Meta>> {
         Some(&x.meta)
     } else if let Some(x) = any.downcast_ref::<TmpLink>() {
         Some(&x.meta)
-    } else if let Some(x) = any.downcast_ref::<TmpFifo>() {
+    } else if let Some(x) = any.downcast_ref::<TmpNode>() {
         Some(&x.meta)
     } else {
         any.downcast_ref::<TmpDir>().map(|x| &x.meta)
@@ -345,7 +347,7 @@ impl FileSystem for Tmpfs {
     }
 
     fn mknod(&self, path: &str, kind: FileKind, mode: u32) -> Result<(), Errno> {
-        if kind != FileKind::Fifo {
+        if !matches!(kind, FileKind::Fifo | FileKind::Socket) {
             return Err(Errno::EPERM);
         }
         let mut nodes = self.nodes.lock();
@@ -353,7 +355,8 @@ impl FileSystem for Tmpfs {
         let ino = self.next_ino.fetch_add(1, Ordering::Relaxed);
         nodes.insert(
             String::from(path),
-            Arc::new(TmpFifo {
+            Arc::new(TmpNode {
+                kind,
                 meta: Meta::new(mode),
                 ino,
             }),

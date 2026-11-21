@@ -88,7 +88,16 @@ pub mod nr {
     pub const GETEGID: u64 = 177;
     pub const GETPPID: u64 = 173;
     pub const GETTID: u64 = 178;
+    pub const SOCKET: u64 = 198;
     pub const SOCKETPAIR: u64 = 199;
+    pub const BIND: u64 = 200;
+    pub const LISTEN: u64 = 201;
+    pub const ACCEPT: u64 = 202;
+    pub const CONNECT: u64 = 203;
+    pub const GETSOCKNAME: u64 = 204;
+    pub const GETPEERNAME: u64 = 205;
+    pub const SHUTDOWN: u64 = 210;
+    pub const ACCEPT4: u64 = 242;
     pub const BRK: u64 = 214;
     pub const MUNMAP: u64 = 215;
     pub const MREMAP: u64 = 216;
@@ -289,7 +298,15 @@ table! {
     nr::GETEGID, "getegid", 0 => |p, a| Action::Return(p.cred.egid as u64);
     nr::GETTID, "gettid", 0 => |p, a| Action::Return(1);
     nr::SYSINFO, "sysinfo", 1 => |p, a| result(misc::sysinfo(p, a[0]));
+    nr::SOCKET, "socket", 3 => |p, a| result(net::socket(p, a[0], a[1], a[2]));
     nr::SOCKETPAIR, "socketpair", 4 => |p, a| result(net::socketpair(p, a[0], a[1], a[2], a[3]));
+    nr::BIND, "bind", 3 => |p, a| result(net::bind(p, a[0], a[1], a[2]));
+    nr::LISTEN, "listen", 2 => |p, a| result(net::listen(p, a[0], a[1]));
+    nr::ACCEPT, "accept", 3 => |p, a| result(net::accept4(p, a[0], a[1], a[2], 0));
+    nr::CONNECT, "connect", 3 => |p, a| result(net::connect(p, a[0], a[1], a[2]));
+    nr::GETSOCKNAME, "getsockname", 3 => |p, a| result(net::getsockname(p, a[0], a[1], a[2]));
+    nr::GETPEERNAME, "getpeername", 3 => |p, a| result(net::getpeername(p, a[0], a[1], a[2]));
+    nr::SHUTDOWN, "shutdown", 2 => |p, a| result(net::shutdown(p, a[0], a[1]));
     nr::BRK, "brk", 1 => |p, a| Action::Return(mm::brk(p, a[0]));
     nr::MUNMAP, "munmap", 2 => |p, a| result(mm::munmap(p, a[0], a[1]));
     // 断ると、libc は「新しく確保してコピー」に切り替える
@@ -300,6 +317,7 @@ table! {
     nr::MPROTECT, "mprotect", 3 => |p, a| result(mm::mprotect(p, a[0], a[1], a[2]));
     // 助言は無視してよい
     nr::MADVISE, "madvise", 3 => |p, a| Action::Return(0);
+    nr::ACCEPT4, "accept4", 4 => |p, a| result(net::accept4(p, a[0], a[1], a[2], a[3]));
     nr::WAIT4, "wait4", 4 => |p, a| result(proc::wait4(p, a[0] as i64, a[1], a[2]));
     nr::RENAMEAT2, "renameat2", 5
         => |p, a| result(fs::renameat2(p, a[0], a[1], a[2], a[3], a[4]));
@@ -384,6 +402,8 @@ mod tests_tmp;
 mod tests_tty;
 #[cfg(test)]
 mod tests_umask;
+#[cfg(test)]
+mod tests_unix;
 
 #[cfg(test)]
 pub(crate) mod tests {

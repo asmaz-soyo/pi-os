@@ -361,6 +361,7 @@ const S_IFREG: u16 = 0x8000;
 const S_IFDIR: u16 = 0x4000;
 const S_IFLNK: u16 = 0xa000;
 const S_IFIFO: u16 = 0x1000;
+const S_IFSOCK: u16 = 0xc000;
 /// これより短いリンクは、指す先を inode のブロック番号の欄(60 バイト)にそのまま入れる
 const FAST_LINK_MAX: usize = 60;
 const SB: u64 = 1024;
@@ -681,6 +682,7 @@ impl Inner {
             FileKind::Directory => 2,
             FileKind::Symlink => 7,
             FileKind::Fifo => 5,
+            FileKind::Socket => 6,
             _ => 1,
         };
         let bs = self.block_size as usize;
@@ -1030,6 +1032,7 @@ fn kind_of(mode: u16) -> FileKind {
         0x2000 => FileKind::CharDevice,
         0xa000 => FileKind::Symlink,
         0x1000 => FileKind::Fifo,
+        0xc000 => FileKind::Socket,
         _ => FileKind::Regular,
     }
 }
@@ -1458,9 +1461,11 @@ impl FileSystem for Ext2 {
     }
 
     fn mknod(&self, path: &str, kind: FileKind, mode: u32) -> Result<(), Errno> {
-        if kind != FileKind::Fifo {
-            return Err(Errno::EPERM);
-        }
+        let ftype = match kind {
+            FileKind::Fifo => S_IFIFO,
+            FileKind::Socket => S_IFSOCK,
+            _ => return Err(Errno::EPERM),
+        };
         let _meta = self.inner.meta.lock();
         self.inner.transaction(|| {
             let (parent, name) = split(path);
@@ -1473,13 +1478,13 @@ impl FileSystem for Ext2 {
             }
             let ino = self.inner.alloc_inode(false)?;
             let inode = Inode {
-                mode: S_IFIFO | (mode as u16 & 0o7777),
+                mode: ftype | (mode as u16 & 0o7777),
                 links: 1,
                 ..Inode::default()
             }
             .born();
             self.inner.write_inode(ino, &inode)?;
-            self.inner.add_entry(dir_ino, name, ino, FileKind::Fifo)
+            self.inner.add_entry(dir_ino, name, ino, kind)
         })
     }
 

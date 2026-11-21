@@ -76,7 +76,15 @@
 | 177 | `getegid` | 0 |
 | 178 | `gettid` | 0 |
 | 179 | `sysinfo` | 1 |
+| 198 | `socket` | 3 |
 | 199 | `socketpair` | 4 |
+| 200 | `bind` | 3 |
+| 201 | `listen` | 2 |
+| 202 | `accept` | 3 |
+| 203 | `connect` | 3 |
+| 204 | `getsockname` | 3 |
+| 205 | `getpeername` | 3 |
+| 210 | `shutdown` | 2 |
 | 214 | `brk` | 1 |
 | 215 | `munmap` | 2 |
 | 216 | `mremap` | 5 |
@@ -85,8 +93,9 @@
 | 222 | `mmap` | 6 |
 | 226 | `mprotect` | 3 |
 | 233 | `madvise` | 3 |
+| 242 | `accept4` | 4 |
 | 260 | `wait4` | 4 |
 | 276 | `renameat2` | 5 |
 | 278 | `getrandom` | 3 |
 
-合計 83 個
+合計 92 個

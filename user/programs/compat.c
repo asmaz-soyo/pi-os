@@ -4,11 +4,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -38,6 +40,12 @@ static const char *errname(int e) {
     case ESOCKTNOSUPPORT: return "ESOCKTNOSUPPORT";
     case EOPNOTSUPP: return "EOPNOTSUPP";
     case EAFNOSUPPORT: return "EAFNOSUPPORT";
+    case ENOTSOCK: return "ENOTSOCK";
+    case EADDRINUSE: return "EADDRINUSE";
+    case EISCONN: return "EISCONN";
+    case ENOTCONN: return "ENOTCONN";
+    case ECONNREFUSED: return "ECONNREFUSED";
+    case EAGAIN: return "EAGAIN";
     default: return "?";
     }
 }
@@ -242,6 +250,63 @@ int main(int argc, char **argv) {
     show("socketpair bad type", socketpair(AF_UNIX, 6, 0, sv));
     show("socketpair bad proto", socketpair(AF_UNIX, SOCK_STREAM, 7, sv));
     show("socketpair bad family", socketpair(99, SOCK_STREAM, 0, sv));
+
+    // 名前でつなぐソケット(AF_UNIX)
+    struct sockaddr_un sa = {.sun_family = AF_UNIX}, ca = {.sun_family = AF_UNIX};
+    strcpy(sa.sun_path, "srv");
+    int srv = socket(AF_UNIX, SOCK_STREAM, 0);
+    show_fd("socket", srv);
+    show("bind", bind(srv, (struct sockaddr *)&sa, sizeof sa));
+    show("bind again", bind(srv, (struct sockaddr *)&sa, sizeof sa));
+    struct stat sk;
+    stat("srv", &sk);
+    printf("bound is socket = %d\n", S_ISSOCK(sk.st_mode));
+    show("open socket file", open("srv", O_RDONLY));
+    int cli = socket(AF_UNIX, SOCK_STREAM, 0);
+    show("connect not listening", connect(cli, (struct sockaddr *)&sa, sizeof sa));
+    show("accept not listening", accept(srv, NULL, NULL));
+    show("listen", listen(srv, 4));
+    show("write unconnected", write(cli, "x", 1));
+    show("read unconnected", read(cli, buf, sizeof buf));
+    show("getpeername unconnected", getpeername(cli, (struct sockaddr *)&ca, &(socklen_t){sizeof ca}));
+    show("connect", connect(cli, (struct sockaddr *)&sa, sizeof sa));
+    show("connect again", connect(cli, (struct sockaddr *)&sa, sizeof sa));
+    socklen_t alen = sizeof ca;
+    int acc = accept(srv, (struct sockaddr *)&ca, &alen);
+    show_fd("accept", acc);
+    printf("peer len = %d, family = %d\n", (int)alen, ca.sun_family);
+    alen = sizeof ca;
+    show("getpeername", getpeername(cli, (struct sockaddr *)&ca, &alen));
+    printf("peer = %s, len = %d\n", ca.sun_path, (int)alen);
+    alen = sizeof ca;
+    show("getsockname", getsockname(acc, (struct sockaddr *)&ca, &alen));
+    printf("name = %s, len = %d\n", ca.sun_path, (int)alen);
+    show("write to server", write(cli, "hello", 5));
+    show("read at server", read(acc, buf, sizeof buf));
+    show("shutdown wr", shutdown(cli, SHUT_WR));
+    show("read after shutdown", read(acc, buf, sizeof buf));
+    show("write after shutdown", write(cli, "x", 1));
+    show("write back", write(acc, "ok", 2));
+    show("read back", read(cli, buf, sizeof buf));
+    show("bind in use", bind(socket(AF_UNIX, SOCK_STREAM, 0), (struct sockaddr *)&sa, sizeof sa));
+    show("bind not socket", bind(1, (struct sockaddr *)&sa, sizeof sa));
+    int nb = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    struct sockaddr_un ab = {.sun_family = AF_UNIX};
+    snprintf(ab.sun_path + 1, sizeof ab.sun_path - 1, "compat-%d", (int)getpid());
+    socklen_t ablen = offsetof(struct sockaddr_un, sun_path) + 1 + strlen(ab.sun_path + 1);
+    show("bind abstract", bind(nb, (struct sockaddr *)&ab, ablen));
+    show("listen abstract", listen(nb, 1));
+    show("accept nothing yet", accept(nb, NULL, NULL));
+    close(acc);
+    close(cli);
+    close(srv);
+    close(nb);
+    cli = socket(AF_UNIX, SOCK_STREAM, 0);
+    show("connect closed server", connect(cli, (struct sockaddr *)&sa, sizeof sa));
+    strcpy(sa.sun_path, "none");
+    show("connect missing", connect(cli, (struct sockaddr *)&sa, sizeof sa));
+    close(cli);
+    show("unlink srv", unlink("srv"));
 
     // プロセス
     pid_t c = fork();

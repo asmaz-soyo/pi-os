@@ -96,6 +96,10 @@ pub fn openat(p: &mut Process, dirfd: u64, path: u64, flags: u64, mode: u64) -> 
     if flags & O_TRUNC != 0 && st.kind == FileKind::Regular {
         file.truncate(0)?;
     }
+    // ソケットのファイルは開けない(connect でつなぐ)
+    if st.kind == FileKind::Socket {
+        return Err(Errno::ENXIO);
+    }
     // 名前付きパイプ:同じ FIFO を開いた人どうしをパイプでつなぐ
     let file = if st.kind == FileKind::Fifo {
         const O_NONBLOCK: u32 = 0o4000;
@@ -684,7 +688,7 @@ pub fn utimensat(
 /// 新しく作ったものを、作ったプロセスの持ち主(実効 uid と gid)にする
 /// 親ディレクトリに setgid(0o2000)があれば、グループは親のグループにし、
 /// 作ったものがディレクトリなら setgid も受け継がせる(共有ディレクトリ)
-fn own_new(p: &Process, file: &dyn vfs::File, path: &str) -> Result<(), Errno> {
+pub(super) fn own_new(p: &Process, file: &dyn vfs::File, path: &str) -> Result<(), Errno> {
     const S_ISGID: u32 = 0o2000;
     let parent = p.vfs.lookup(&vfs::normalize(path, ".."))?.stat();
     let shared = parent.mode & S_ISGID != 0;
@@ -699,18 +703,20 @@ fn own_new(p: &Process, file: &dyn vfs::File, path: &str) -> Result<(), Errno> {
     Ok(())
 }
 
-/// mknodat(dirfd, path, mode, dev):名前付きパイプ(S_IFIFO)と普通のファイル。
+/// mknodat(dirfd, path, mode, dev):名前付きパイプ(S_IFIFO)、ソケット(S_IFSOCK)、普通のファイル。
 /// デバイスファイルはまだ作れない(EPERM)
 pub fn mknodat(p: &mut Process, dirfd: u64, path: u64, mode: u64) -> Result<u64, Errno> {
     const S_IFMT: u64 = 0o170000;
     const S_IFIFO: u64 = 0o010000;
     const S_IFREG: u64 = 0o100000;
+    const S_IFSOCK: u64 = 0o140000;
     let path = path_arg(p, dirfd, path)?;
     let dir = p.vfs.lookup(&vfs::normalize(&path, ".."))?;
     p.cred.check(&dir.stat(), Access::WRITE | Access::EXEC)?;
     let perm = mode as u32 & 0o7777 & !p.umask;
     match mode & S_IFMT {
         S_IFIFO => p.vfs.mknod(&path, FileKind::Fifo, perm)?,
+        S_IFSOCK => p.vfs.mknod(&path, FileKind::Socket, perm)?,
         0 | S_IFREG => {
             if p.vfs.lookup_nofollow(&path).is_ok() {
                 return Err(Errno::EEXIST);

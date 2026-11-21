@@ -35,10 +35,15 @@ pub enum Errno {
     ENOSYS = 38,
     ENOTEMPTY = 39,
     ELOOP = 40,
+    ENOTSOCK = 88,
     EPROTONOSUPPORT = 93,
     ESOCKTNOSUPPORT = 94,
     EOPNOTSUPP = 95,
     EAFNOSUPPORT = 97,
+    EADDRINUSE = 98,
+    EISCONN = 106,
+    ENOTCONN = 107,
+    ECONNREFUSED = 111,
 }
 
 impl Errno {
@@ -82,10 +87,15 @@ pub fn name(errno: i32) -> Option<&'static str> {
         38 => "ENOSYS",
         39 => "ENOTEMPTY",
         40 => "ELOOP",
+        88 => "ENOTSOCK",
         93 => "EPROTONOSUPPORT",
         94 => "ESOCKTNOSUPPORT",
         95 => "EOPNOTSUPP",
         97 => "EAFNOSUPPORT",
+        98 => "EADDRINUSE",
+        106 => "EISCONN",
+        107 => "ENOTCONN",
+        111 => "ECONNREFUSED",
         _ => return None,
     })
 }
