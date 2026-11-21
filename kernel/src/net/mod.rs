@@ -10,6 +10,8 @@
 //! socketpair(...)      ─┘
 //! ```
 
+pub mod loopback;
+pub mod stack;
 pub mod unix;
 
 use crate::Errno;

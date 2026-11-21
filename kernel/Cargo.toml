@@ -7,6 +7,17 @@ publish = false
 
 [dependencies]
 hal = { path = "../hal" }
+# TCP/IP スタック(ネットワークの最初の実装。あとで自作の TCP と差し替えて比べる)
+smoltcp = { version = "0.14", default-features = false, features = [
+    "alloc",
+    "medium-ethernet",
+    "medium-ip",
+    "proto-ipv4",
+    "socket-tcp",
+    "socket-udp",
+    "proto-dhcpv4",
+    "socket-dhcpv4",
+] }
 spin = { version = "0.9", default-features = false, features = ["spin_mutex", "once"] }
 
 [dev-dependencies]

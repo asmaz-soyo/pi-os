@@ -9,6 +9,7 @@ pub mod console;
 pub mod irq;
 pub mod mmio;
 pub mod mmu;
+pub mod net;
 pub mod timer;
 
 #[cfg(any(test, feature = "mock"))]
