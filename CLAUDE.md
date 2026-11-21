@@ -49,5 +49,5 @@ Raspberry Pi 3B 向けの、Rust 製の学習用カーネル。設計と計画�
 ## 開発環境
 
 - 開発 PC は Ubuntu。QEMU(`qemu-system-aarch64 -M raspi3b` / `-M virt`)と `gdb-multiarch` を使う
-- カーネルは nightly Rust、ターゲットは `aarch64-unknown-none`
+- カーネルは nightly Rust、ターゲットは `aarch64-unknown-none`(ユーザー空間の Rust は `aarch64-unknown-linux-musl`。どちらも `rust-toolchain.toml` で入る)
 - ユーザー空間のプログラムは musl で静的リンクする(`zig cc -target aarch64-linux-musl`、Rust は `aarch64-unknown-linux-musl`)
