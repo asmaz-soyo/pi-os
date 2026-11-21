@@ -117,6 +117,27 @@ pub fn unlinkat(p: &mut Process, dirfd: u64, path: u64, flags: u64) -> Result<u6
     Ok(0)
 }
 
+/// linkat(olddirfd, old, newdirfd, new, flags)。AT_SYMLINK_FOLLOW なら old のリンクを追う
+pub fn linkat(
+    p: &mut Process,
+    olddirfd: u64,
+    old: u64,
+    newdirfd: u64,
+    new: u64,
+    flags: u64,
+) -> Result<u64, Errno> {
+    const AT_SYMLINK_FOLLOW: u64 = 0x400;
+    if flags & !AT_SYMLINK_FOLLOW != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let old = path_arg(p, olddirfd, old)?;
+    let new = path_arg(p, newdirfd, new)?;
+    let dir = p.vfs.lookup(&vfs::normalize(&new, ".."))?;
+    p.cred.check(&dir.stat(), Access::WRITE | Access::EXEC)?;
+    p.vfs.link(&old, &new, flags & AT_SYMLINK_FOLLOW != 0)?;
+    Ok(0)
+}
+
 /// renameat2(olddirfd, old, newdirfd, new, flags)。flags は RENAME_NOREPLACE だけ。
 /// 両方の親ディレクトリに、書き込みとたどる(実行)権限が要る。
 pub fn renameat2(
@@ -352,7 +373,7 @@ fn stat_bytes(st: &Stat) -> [u8; 128] {
         b[at + 8..at + 16].copy_from_slice(&(t.nsec as u64).to_le_bytes());
     }
     b[16..20].copy_from_slice(&(kind | st.mode).to_le_bytes()); // st_mode
-    b[20..24].copy_from_slice(&1u32.to_le_bytes()); // st_nlink
+    b[20..24].copy_from_slice(&st.nlink.max(1).to_le_bytes()); // st_nlink
     b[24..28].copy_from_slice(&st.uid.to_le_bytes()); // st_uid
     b[28..32].copy_from_slice(&st.gid.to_le_bytes()); // st_gid
     b[48..56].copy_from_slice(&st.size.to_le_bytes()); // st_size

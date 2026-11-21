@@ -64,6 +64,8 @@ pub struct Stat {
     /// 所有者
     pub uid: u32,
     pub gid: u32,
+    /// ハードリンクの数(名前がいくつあるか)。0 は「数えていない」で、1 として見せる
+    pub nlink: u32,
     /// 最後に読んだ時刻、中身を変えた時刻、属性(権限や持ち主)を変えた時刻
     pub atime: Timespec,
     pub mtime: Timespec,
@@ -327,6 +329,11 @@ pub trait FileSystem: Send + Sync {
         Err(Errno::EROFS)
     }
 
+    /// `new` を `old` と同じファイルの、もう 1 つの名前にする(ハードリンク)
+    fn link(&self, _old: &str, _new: &str) -> Result<(), Errno> {
+        Err(Errno::EROFS)
+    }
+
     /// `old` を `new` に移す(名前を変える)。`new` があれば置き換える。
     /// 同じパスや、自分の下への移動は呼ぶ側(`Vfs::rename`)が先に扱う。
     fn rename(&self, _old: &str, _new: &str) -> Result<(), Errno> {
@@ -479,6 +486,25 @@ impl Vfs {
             return Err(Errno::EEXIST);
         }
         fs.symlink(inner, target)
+    }
+
+    /// `new` を `old` のハードリンクにする。`follow` なら `old` が最後にリンクでも追う
+    pub fn link(&self, old: &str, new: &str, follow: bool) -> Result<(), Errno> {
+        let old = &self.resolve_path(old, follow)?;
+        let new = &self.resolve_path(new, false)?;
+        let (old_fs, old_inner) = self.resolve(old)?;
+        let (new_fs, new_inner) = self.resolve(new)?;
+        let file = old_fs.lookup(old_inner)?;
+        if !core::ptr::addr_eq(old_fs, new_fs) {
+            return Err(Errno::EXDEV);
+        }
+        if file.stat().kind == FileKind::Directory {
+            return Err(Errno::EPERM);
+        }
+        if new_fs.lookup(new_inner).is_ok() {
+            return Err(Errno::EEXIST);
+        }
+        old_fs.link(old_inner, new_inner)
     }
 
     /// `old` を `new` に移す。`noreplace` なら、`new` があるときは `EEXIST`。

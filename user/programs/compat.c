@@ -112,6 +112,18 @@ int main(int argc, char **argv) {
     show("rmdir rd2", rmdir("rd2"));
     show("unlink r2", unlink("r2"));
 
+    // ハードリンク
+    close(open("h1", O_CREAT | O_WRONLY, 0644));
+    show("link", link("h1", "h2"));
+    stat("h1", &st);
+    printf("nlink = %ld\n", (long)st.st_nlink);
+    show("link exists", link("h1", "h2"));
+    show("link missing", link("nope", "h3"));
+    show("unlink h1", unlink("h1"));
+    stat("h2", &st);
+    printf("nlink = %ld\n", (long)st.st_nlink);
+    show("unlink h2", unlink("h2"));
+
     // chmod
     close(open("cm", O_CREAT | O_WRONLY, 0644));
     show("chmod", chmod("cm", 0600));

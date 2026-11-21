@@ -16,6 +16,7 @@
 | 34 | `mkdirat` | 3 |
 | 35 | `unlinkat` | 3 |
 | 36 | `symlinkat` | 3 |
+| 37 | `linkat` | 5 |
 | 38 | `renameat` | 4 |
 | 46 | `ftruncate` | 2 |
 | 48 | `faccessat` | 3 |
@@ -79,4 +80,4 @@
 | 276 | `renameat2` | 5 |
 | 278 | `getrandom` | 3 |
 
-合計 73 個
+合計 74 個

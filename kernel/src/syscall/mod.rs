@@ -28,6 +28,7 @@ pub mod nr {
     pub const MKDIRAT: u64 = 34;
     pub const UNLINKAT: u64 = 35;
     pub const SYMLINKAT: u64 = 36;
+    pub const LINKAT: u64 = 37;
     pub const RENAMEAT: u64 = 38;
     pub const FTRUNCATE: u64 = 46;
     pub const FACCESSAT: u64 = 48;
@@ -200,6 +201,7 @@ table! {
     nr::MKDIRAT, "mkdirat", 3 => |p, a| result(fs::mkdirat(p, a[0], a[1], a[2]));
     nr::UNLINKAT, "unlinkat", 3 => |p, a| result(fs::unlinkat(p, a[0], a[1], a[2]));
     nr::SYMLINKAT, "symlinkat", 3 => |p, a| result(fs::symlinkat(p, a[0], a[1], a[2]));
+    nr::LINKAT, "linkat", 5 => |p, a| result(fs::linkat(p, a[0], a[1], a[2], a[3], a[4]));
     nr::RENAMEAT, "renameat", 4 => |p, a| result(fs::renameat2(p, a[0], a[1], a[2], a[3], 0));
     nr::FTRUNCATE, "ftruncate", 2 => |p, a| result(fs::ftruncate(p, a[0], a[1]));
     nr::FACCESSAT, "faccessat", 3 => |p, a| result(fs::faccessat(p, a[0], a[1], a[2]));
@@ -330,6 +332,8 @@ pub fn dispatch(p: &mut Process, nr: u64, a: [u64; 6]) -> Action {
 
 #[cfg(test)]
 mod tests_chmod;
+#[cfg(test)]
+mod tests_link;
 #[cfg(test)]
 mod tests_mm;
 #[cfg(test)]

@@ -18,6 +18,8 @@ struct Meta {
     mode: u32,
     uid: u32,
     gid: u32,
+    /// 名前の数(ハードリンク)
+    nlink: u32,
     atime: Timespec,
     mtime: Timespec,
     ctime: Timespec,
@@ -30,6 +32,7 @@ impl Meta {
             mode: mode & 0o7777,
             uid: 0,
             gid: 0,
+            nlink: 1,
             atime: now,
             mtime: now,
             ctime: now,
@@ -45,6 +48,7 @@ impl Meta {
             ino,
             uid: m.uid,
             gid: m.gid,
+            nlink: m.nlink,
             atime: m.atime,
             mtime: m.mtime,
             ctime: m.ctime,
@@ -63,6 +67,10 @@ impl Meta {
 /// chmod と chown(どのノードも同じ)
 macro_rules! meta_ops {
     () => {
+        fn as_any(&self) -> Option<&dyn core::any::Any> {
+            Some(self)
+        }
+
         fn set_mode(&self, mode: u32) -> Result<(), Errno> {
             let mut m = self.meta.lock();
             m.mode = mode & 0o7777;
@@ -190,6 +198,27 @@ fn parent(path: &str) -> &str {
     }
 }
 
+/// tmpfs のノードの `Meta`(リンク数を数えるため)
+fn meta_of(f: &Arc<dyn File>) -> Option<&SpinLock<Meta>> {
+    let any = f.as_any()?;
+    if let Some(x) = any.downcast_ref::<TmpFile>() {
+        Some(&x.meta)
+    } else if let Some(x) = any.downcast_ref::<TmpLink>() {
+        Some(&x.meta)
+    } else {
+        any.downcast_ref::<TmpDir>().map(|x| &x.meta)
+    }
+}
+
+/// 名前が 1 つ減った(ハードリンクの数を減らす)
+fn drop_name(f: &Arc<dyn File>) {
+    if let Some(m) = meta_of(f) {
+        let mut m = m.lock();
+        m.nlink = m.nlink.saturating_sub(1);
+        m.ctime = Timespec::now();
+    }
+}
+
 impl Tmpfs {
     pub fn new() -> Self {
         let mut nodes: BTreeMap<String, Arc<dyn File>> = BTreeMap::new();
@@ -270,7 +299,22 @@ impl FileSystem for Tmpfs {
                 return Err(Errno::ENOTEMPTY);
             }
         }
-        nodes.remove(path);
+        if let Some(f) = nodes.remove(path) {
+            drop_name(&f);
+        }
+        Ok(())
+    }
+
+    fn link(&self, old: &str, new: &str) -> Result<(), Errno> {
+        let mut nodes = self.nodes.lock();
+        let file = nodes.get(old).cloned().ok_or(Errno::ENOENT)?;
+        Self::check_new(&nodes, new)?;
+        if let Some(m) = meta_of(&file) {
+            let mut m = m.lock();
+            m.nlink += 1;
+            m.ctime = Timespec::now();
+        }
+        nodes.insert(String::from(new), file);
         Ok(())
     }
 
@@ -302,7 +346,9 @@ impl FileSystem for Tmpfs {
             let new_prefix = below(new);
             let empty = !nodes.keys().any(|k| k.starts_with(&new_prefix));
             crate::fs::vfs::check_replace(kind, target.stat().kind, empty)?;
-            nodes.remove(new);
+            if let Some(f) = nodes.remove(new) {
+                drop_name(&f);
+            }
         }
         // 自分と、ディレクトリなら中身すべての名前を付け替える(パスが鍵なので)
         let old_prefix = below(old);

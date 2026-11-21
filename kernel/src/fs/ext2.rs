@@ -732,6 +732,7 @@ impl File for Ext2File {
             ino: self.ino as u64,
             uid: inode.uid,
             gid: inode.gid,
+            nlink: inode.links as u32,
             atime: secs(inode.atime),
             mtime: secs(inode.mtime),
             ctime: secs(inode.ctime),
@@ -840,6 +841,12 @@ impl Ext2 {
             return Err(Errno::ENOTEMPTY);
         }
         self.inner.remove_entry(&dir, name)?;
+        if !is_dir && inode.links > 1 {
+            // ほかの名前(ハードリンク)が残っている:数を減らすだけ
+            inode.links -= 1;
+            inode.ctime = now_secs();
+            return self.inner.write_inode(ino, &inode);
+        }
         if inode.is_fast_link() {
             // ブロック番号の欄は指す先の文字列。ブロックとして返してはいけない
             inode.blocks = [0; 15];
@@ -940,6 +947,27 @@ impl FileSystem for Ext2 {
     fn unlink(&self, path: &str, want_dir: bool) -> Result<(), Errno> {
         let _meta = self.inner.meta.lock();
         self.unlink_locked(path, want_dir)
+    }
+
+    fn link(&self, old: &str, new: &str) -> Result<(), Errno> {
+        let _meta = self.inner.meta.lock();
+        let (ino, mut inode) = self.inner.lookup(old)?;
+        let kind = kind_of(inode.mode);
+        if kind == FileKind::Directory {
+            return Err(Errno::EPERM);
+        }
+        let (parent, name) = split(new);
+        let (dir_ino, dir) = self.inner.lookup(parent)?;
+        if kind_of(dir.mode) != FileKind::Directory {
+            return Err(Errno::ENOTDIR);
+        }
+        if self.inner.lookup(new).is_ok() {
+            return Err(Errno::EEXIST);
+        }
+        inode.links += 1;
+        inode.ctime = now_secs();
+        self.inner.write_inode(ino, &inode)?;
+        self.inner.add_entry(dir_ino, name, ino, kind)
     }
 
     fn symlink(&self, path: &str, target: &str) -> Result<(), Errno> {
@@ -1445,5 +1473,25 @@ mod write_tests {
         assert!(f.stat().mtime.sec >= now - 2);
         assert_eq!(f.stat().atime.sec, 1000);
         fsck(&disk);
+    }
+
+    #[test]
+    fn hard_links_share_the_inode_until_the_last_name_goes() {
+        let disk = blank();
+        let fs = Ext2::new(disk.clone()).unwrap();
+        fs.mkdir("/d", 0o755).unwrap();
+        fs.link("/keep.txt", "/d/again").unwrap();
+        let a = fs.lookup("/keep.txt").unwrap().stat();
+        let b = fs.lookup("/d/again").unwrap().stat();
+        assert_eq!((a.ino, a.nlink), (b.ino, 2));
+        fsck(&disk);
+        // 片方を消しても inode は残る(リンク数 1)
+        fs.unlink("/keep.txt", false).unwrap();
+        assert_eq!(read_all(&fs, "/d/again"), b"keep");
+        assert_eq!(fs.lookup("/d/again").unwrap().stat().nlink, 1);
+        fsck(&disk);
+        fs.unlink("/d/again", false).unwrap();
+        fsck(&disk);
+        assert_eq!(fs.link("/d", "/d2"), Err(Errno::EPERM));
     }
 }
