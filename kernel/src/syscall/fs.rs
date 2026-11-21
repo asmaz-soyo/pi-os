@@ -65,7 +65,7 @@ pub fn openat(p: &mut Process, dirfd: u64, path: u64, flags: u64, mode: u64) -> 
             if let Ok(dir) = p.vfs.lookup(&parent) {
                 p.cred.check(&dir.stat(), Access::WRITE | Access::EXEC)?;
             }
-            let file = p.vfs.create(&path, mode as u32 & 0o777)?;
+            let file = p.vfs.create(&path, mode as u32 & 0o7777 & !p.umask)?;
             own_new(p, &*file)?;
             file
         }
@@ -105,7 +105,7 @@ const AT_REMOVEDIR: u64 = 0x200;
 /// mkdirat(dirfd, path, mode)
 pub fn mkdirat(p: &mut Process, dirfd: u64, path: u64, mode: u64) -> Result<u64, Errno> {
     let path = path_arg(p, dirfd, path)?;
-    p.vfs.mkdir(&path, mode as u32 & 0o7777)?;
+    p.vfs.mkdir(&path, mode as u32 & 0o7777 & !p.umask)?;
     own_new(p, &*p.vfs.lookup_nofollow(&path)?)?;
     Ok(0)
 }

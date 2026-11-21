@@ -59,6 +59,7 @@
 | 134 | `rt_sigaction` | 4 |
 | 135 | `rt_sigprocmask` | 4 |
 | 160 | `uname` | 1 |
+| 166 | `umask` | 1 |
 | 167 | `prctl` | 5 |
 | 172 | `getpid` | 0 |
 | 173 | `getppid` | 0 |
@@ -80,4 +81,4 @@
 | 276 | `renameat2` | 5 |
 | 278 | `getrandom` | 3 |
 
-合計 74 個
+合計 75 個

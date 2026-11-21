@@ -72,6 +72,8 @@ pub struct Process {
     pub pending_kill: Option<i32>,
     /// リアルタイム優先度(0 = 通常 SCHED_OTHER、1〜99 = SCHED_FIFO)
     pub rt_priority: u8,
+    /// 作るときに消す権限のビット(umask)
+    pub umask: u32,
 }
 
 impl Process {
@@ -97,6 +99,7 @@ impl Process {
             cred: Credentials::root(),
             pending_kill: None,
             rt_priority: 0,
+            umask: 0o022,
         }
     }
 
@@ -119,6 +122,7 @@ impl Process {
             cred: self.cred.clone(),
             pending_kill: None,
             rt_priority: self.rt_priority,
+            umask: self.umask,
         })
     }
 }

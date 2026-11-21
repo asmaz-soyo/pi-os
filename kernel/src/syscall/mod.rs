@@ -70,6 +70,7 @@ pub mod nr {
     pub const RT_SIGACTION: u64 = 134;
     pub const RT_SIGPROCMASK: u64 = 135;
     pub const UNAME: u64 = 160;
+    pub const UMASK: u64 = 166;
     pub const PRCTL: u64 = 167;
     pub const GETPID: u64 = 172;
     pub const SYSINFO: u64 = 179;
@@ -254,6 +255,11 @@ table! {
     nr::RT_SIGACTION, "rt_sigaction", 4 => |p, a| Action::Return(0);
     nr::RT_SIGPROCMASK, "rt_sigprocmask", 4 => |p, a| Action::Return(0);
     nr::UNAME, "uname", 1 => |p, a| result(misc::uname(p, a[0]));
+    nr::UMASK, "umask", 1 => |p, a| {
+        let old = p.umask;
+        p.umask = a[0] as u32 & 0o777;
+        Action::Return(old as u64)
+    };
     nr::PRCTL, "prctl", 5 => |p, a| result(misc::prctl(p, a[0], a[1]));
     nr::GETPID, "getpid", 0 => |p, a| Action::Return(1);
     // 資格情報(ADR-0005)
@@ -352,6 +358,8 @@ mod tests_times;
 mod tests_tmp;
 #[cfg(test)]
 mod tests_tty;
+#[cfg(test)]
+mod tests_umask;
 
 #[cfg(test)]
 pub(crate) mod tests {
