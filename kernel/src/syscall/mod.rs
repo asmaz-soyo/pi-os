@@ -7,6 +7,7 @@
 mod fs;
 mod misc;
 mod mm;
+mod net;
 mod poll;
 mod proc;
 mod time;
@@ -87,6 +88,7 @@ pub mod nr {
     pub const GETEGID: u64 = 177;
     pub const GETPPID: u64 = 173;
     pub const GETTID: u64 = 178;
+    pub const SOCKETPAIR: u64 = 199;
     pub const BRK: u64 = 214;
     pub const MUNMAP: u64 = 215;
     pub const MREMAP: u64 = 216;
@@ -287,6 +289,7 @@ table! {
     nr::GETEGID, "getegid", 0 => |p, a| Action::Return(p.cred.egid as u64);
     nr::GETTID, "gettid", 0 => |p, a| Action::Return(1);
     nr::SYSINFO, "sysinfo", 1 => |p, a| result(misc::sysinfo(p, a[0]));
+    nr::SOCKETPAIR, "socketpair", 4 => |p, a| result(net::socketpair(p, a[0], a[1], a[2], a[3]));
     nr::BRK, "brk", 1 => |p, a| Action::Return(mm::brk(p, a[0]));
     nr::MUNMAP, "munmap", 2 => |p, a| result(mm::munmap(p, a[0], a[1]));
     // 断ると、libc は「新しく確保してコピー」に切り替える
@@ -367,6 +370,8 @@ mod tests_pipe;
 mod tests_proc;
 #[cfg(test)]
 mod tests_rename;
+#[cfg(test)]
+mod tests_socket;
 #[cfg(test)]
 mod tests_symlink;
 #[cfg(test)]

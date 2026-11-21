@@ -244,6 +244,7 @@ pub fn getdents64(p: &mut Process, fd: u64, buf: u64, count: u64) -> Result<u64,
             FileKind::CharDevice => 2,
             FileKind::Fifo => 1,
             FileKind::Symlink => 10,
+            FileKind::Socket => 12,
         };
         out.extend_from_slice(&e.ino.to_le_bytes());
         out.extend_from_slice(&((index + 1) as u64).to_le_bytes());
@@ -404,6 +405,7 @@ fn stat_bytes(st: &Stat) -> [u8; 128] {
         FileKind::CharDevice => 0o020000,
         FileKind::Fifo => 0o010000,
         FileKind::Symlink => 0o120000,
+        FileKind::Socket => 0o140000,
     };
     b[8..16].copy_from_slice(&st.ino.to_le_bytes()); // st_ino
     // st_atim、st_mtim、st_ctim(それぞれ秒 8 バイト + ナノ秒 8 バイト)

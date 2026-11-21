@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -33,6 +34,10 @@ static const char *errname(int e) {
     case ELOOP: return "ELOOP";
     case ENXIO: return "ENXIO";
     case ENOSYS: return "ENOSYS";
+    case EPROTONOSUPPORT: return "EPROTONOSUPPORT";
+    case ESOCKTNOSUPPORT: return "ESOCKTNOSUPPORT";
+    case EOPNOTSUPP: return "EOPNOTSUPP";
+    case EAFNOSUPPORT: return "EAFNOSUPPORT";
     default: return "?";
     }
 }
@@ -218,6 +223,25 @@ int main(int argc, char **argv) {
     close(p[0]);
     show("write pipe without reader", write(p[1], "x", 1));
     close(p[1]);
+
+    // ソケット(AF_UNIX)
+    int sv[2];
+    show("socketpair", socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+    show("write sock", write(sv[0], "ping", 4));
+    show("read sock", read(sv[1], buf, sizeof buf));
+    show("write sock back", write(sv[1], "pong!", 5));
+    show("read sock back", read(sv[0], buf, sizeof buf));
+    struct stat sst;
+    fstat(sv[0], &sst);
+    printf("is socket = %d\n", S_ISSOCK(sst.st_mode));
+    show("lseek sock", lseek(sv[0], 0, SEEK_SET));
+    close(sv[0]);
+    show("read sock eof", read(sv[1], buf, sizeof buf));
+    show("write sock closed", write(sv[1], "x", 1));
+    close(sv[1]);
+    show("socketpair bad type", socketpair(AF_UNIX, 6, 0, sv));
+    show("socketpair bad proto", socketpair(AF_UNIX, SOCK_STREAM, 7, sv));
+    show("socketpair bad family", socketpair(99, SOCK_STREAM, 0, sv));
 
     // プロセス
     pid_t c = fork();

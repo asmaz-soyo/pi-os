@@ -16,6 +16,7 @@ pub mod gpio;
 pub mod init;
 pub mod irq;
 pub mod mm;
+pub mod net;
 pub mod panic;
 pub mod process;
 pub mod sched;

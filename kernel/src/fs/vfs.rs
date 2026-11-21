@@ -34,6 +34,8 @@ pub enum FileKind {
     Fifo,
     /// シンボリックリンク(中身は別のパス)
     Symlink,
+    /// ソケット
+    Socket,
 }
 
 /// ファイルシステム全体の情報(statfs)

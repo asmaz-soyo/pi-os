@@ -58,11 +58,14 @@ impl WriteEnd {
 
 /// パイプを作り、(読む側, 書く側) を返す。
 pub fn new() -> (Arc<dyn File>, Arc<dyn File>) {
+    let (r, w) = ends();
+    (Arc::new(r), Arc::new(w))
+}
+
+/// パイプを作り、両端をそのままの型で返す(ほかの `File` の部品にするため。ソケットなど)
+pub fn ends() -> (ReadEnd, WriteEnd) {
     let pipe = Arc::new(Pipe::default());
-    (
-        Arc::new(ReadEnd::open(pipe.clone())),
-        Arc::new(WriteEnd::open(pipe)),
-    )
+    (ReadEnd::open(pipe.clone()), WriteEnd::open(pipe))
 }
 
 /// 名前付きパイプ(FIFO)の中身:(st_dev, inode 番号) → パイプ。開いている人がいる間だけ残る

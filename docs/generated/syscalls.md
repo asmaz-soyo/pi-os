@@ -76,6 +76,7 @@
 | 177 | `getegid` | 0 |
 | 178 | `gettid` | 0 |
 | 179 | `sysinfo` | 1 |
+| 199 | `socketpair` | 4 |
 | 214 | `brk` | 1 |
 | 215 | `munmap` | 2 |
 | 216 | `mremap` | 5 |
@@ -88,4 +89,4 @@
 | 276 | `renameat2` | 5 |
 | 278 | `getrandom` | 3 |
 
-合計 82 個
+合計 83 個
