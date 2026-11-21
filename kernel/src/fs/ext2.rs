@@ -198,6 +198,9 @@ impl Inner {
 
 const S_IFREG: u16 = 0x8000;
 const S_IFDIR: u16 = 0x4000;
+const S_IFLNK: u16 = 0xa000;
+/// これより短いリンクは、指す先を inode のブロック番号の欄(60 バイト)にそのまま入れる
+const FAST_LINK_MAX: usize = 60;
 const SB: u64 = 1024;
 
 /// 書き込みの処理(ビットマップでの割り当て、inode とディレクトリの更新)
@@ -490,10 +493,15 @@ impl Inner {
     }
 
     /// ディレクトリに項目を足す。入る隙間がなければブロックを足す
-    fn add_entry(&self, dir_ino: u32, name: &str, ino: u32, dir: bool) -> Result<(), Errno> {
+    fn add_entry(&self, dir_ino: u32, name: &str, ino: u32, kind: FileKind) -> Result<(), Errno> {
         let mut d = self.inode(dir_ino)?;
         let need = (8 + name.len()).div_ceil(4) * 4;
-        let ftype = if dir { 2 } else { 1 };
+        // 項目の種類:1 = ファイル、2 = ディレクトリ、7 = シンボリックリンク
+        let ftype = match kind {
+            FileKind::Directory => 2,
+            FileKind::Symlink => 7,
+            _ => 1,
+        };
         let bs = self.block_size as usize;
         let blocks = d.size / self.block_size;
         for index in 0..blocks {
@@ -611,6 +619,7 @@ fn kind_of(mode: u16) -> FileKind {
     match mode & 0xf000 {
         0x4000 => FileKind::Directory,
         0x2000 => FileKind::CharDevice,
+        0xa000 => FileKind::Symlink,
         _ => FileKind::Regular,
     }
 }
@@ -621,7 +630,31 @@ struct Ext2File {
     ino: u32,
 }
 
+impl Inode {
+    /// 短いシンボリックリンク:指す先が inode の中にあり、データブロックを持たない
+    fn is_fast_link(&self) -> bool {
+        kind_of(self.mode) == FileKind::Symlink && self.sectors == 0
+    }
+}
+
 impl File for Ext2File {
+    fn readlink(&self) -> Result<String, Errno> {
+        let inode = self.fs.inode(self.ino)?;
+        if kind_of(inode.mode) != FileKind::Symlink {
+            return Err(Errno::EINVAL);
+        }
+        let len = inode.size as usize;
+        let bytes = if inode.is_fast_link() {
+            let raw: Vec<u8> = inode.blocks.iter().flat_map(|b| b.to_le_bytes()).collect();
+            raw[..len.min(FAST_LINK_MAX)].to_vec()
+        } else {
+            let mut data = vec![0u8; len];
+            self.fs.read_file(&inode, 0, &mut data)?;
+            data
+        };
+        String::from_utf8(bytes).map_err(|_| Errno::EIO)
+    }
+
     fn stat(&self) -> Stat {
         let inode = self.fs.inode(self.ino).unwrap_or_default();
         Stat {
@@ -732,6 +765,10 @@ impl Ext2 {
             return Err(Errno::ENOTEMPTY);
         }
         self.inner.remove_entry(&dir, name)?;
+        if inode.is_fast_link() {
+            // ブロック番号の欄は指す先の文字列。ブロックとして返してはいけない
+            inode.blocks = [0; 15];
+        }
         self.inner.free_from(&mut inode, 0)?;
         inode.links = 0;
         inode.size = 0;
@@ -774,7 +811,8 @@ impl FileSystem for Ext2 {
             ..Inode::default()
         };
         self.inner.write_inode(ino, &inode)?;
-        self.inner.add_entry(dir_ino, name, ino, false)?;
+        self.inner
+            .add_entry(dir_ino, name, ino, FileKind::Regular)?;
         Ok(Arc::new(Ext2File {
             fs: self.inner.clone(),
             ino,
@@ -818,12 +856,44 @@ impl FileSystem for Ext2 {
         // 子の「..」が親を指すので、親のリンク数が 1 増える
         dir.links += 1;
         self.inner.write_inode(dir_ino, &dir)?;
-        self.inner.add_entry(dir_ino, name, ino, true)
+        self.inner
+            .add_entry(dir_ino, name, ino, FileKind::Directory)
     }
 
     fn unlink(&self, path: &str, want_dir: bool) -> Result<(), Errno> {
         let _meta = self.inner.meta.lock();
         self.unlink_locked(path, want_dir)
+    }
+
+    fn symlink(&self, path: &str, target: &str) -> Result<(), Errno> {
+        let _meta = self.inner.meta.lock();
+        let (parent, name) = split(path);
+        let (dir_ino, dir) = self.inner.lookup(parent)?;
+        if kind_of(dir.mode) != FileKind::Directory {
+            return Err(Errno::ENOTDIR);
+        }
+        if self.inner.lookup(path).is_ok() {
+            return Err(Errno::EEXIST);
+        }
+        let ino = self.inner.alloc_inode(false)?;
+        let mut inode = Inode {
+            mode: S_IFLNK | 0o777,
+            links: 1,
+            ..Inode::default()
+        };
+        if target.len() < FAST_LINK_MAX {
+            // 短いリンク:ブロック番号の欄に文字列を入れる
+            let mut raw = [0u8; FAST_LINK_MAX];
+            raw[..target.len()].copy_from_slice(target.as_bytes());
+            for (i, b) in inode.blocks.iter_mut().enumerate() {
+                *b = u32::from_le_bytes(raw[i * 4..i * 4 + 4].try_into().unwrap());
+            }
+            inode.size = target.len() as u64;
+        } else {
+            self.inner.write_file(&mut inode, 0, target.as_bytes())?;
+        }
+        self.inner.write_inode(ino, &inode)?;
+        self.inner.add_entry(dir_ino, name, ino, FileKind::Symlink)
     }
 
     fn rename(&self, old: &str, new: &str) -> Result<(), Errno> {
@@ -847,7 +917,7 @@ impl FileSystem for Ext2 {
             self.unlink_locked(new, target_kind == FileKind::Directory)?;
         }
         // 新しい名前を足してから、古い名前を消す(途中で止まっても、ファイルはどこかに残る)
-        self.inner.add_entry(new_dir_ino, new_name, ino, is_dir)?;
+        self.inner.add_entry(new_dir_ino, new_name, ino, kind)?;
         let old_dir = self.inner.inode(old_dir_ino)?;
         self.inner.remove_entry(&old_dir, old_name)?;
         if is_dir && old_dir_ino != new_dir_ino {
@@ -896,6 +966,11 @@ mod tests {
 
     /// 一時ディレクトリにファイルを並べ、mke2fs -d で ext2 のイメージを作る
     pub(super) fn image(files: &[(&str, &[u8])]) -> Vec<u8> {
+        image_with_links(files, &[])
+    }
+
+    /// ファイルと、シンボリックリンク(パス, 指す先)を入れたイメージ
+    pub(super) fn image_with_links(files: &[(&str, &[u8])], links: &[(&str, &str)]) -> Vec<u8> {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(std::format!("pios-ext2-{}-{n}", std::process::id()));
@@ -907,6 +982,9 @@ mod tests {
             std::fs::write(p, data).unwrap();
         }
         std::fs::create_dir_all(&root).unwrap();
+        for (path, target) in links {
+            std::os::unix::fs::symlink(target, root.join(path)).unwrap();
+        }
         let img = dir.join("fs.img");
         let status = std::process::Command::new("mke2fs")
             .args(["-q", "-F", "-t", "ext2", "-b", "1024", "-I", "128", "-d"])
@@ -970,6 +1048,32 @@ mod tests {
             "{names:?}"
         );
         assert!(!names.contains(&".".into()), "VFS adds . and .. itself");
+    }
+
+    #[test]
+    fn symlinks_made_by_mke2fs_are_read() {
+        let long = "x/".repeat(50) + "end"; // 103 バイト:ブロックに入る長いリンク
+        let fs = Ext2::new(shared(Box::new(RamDisk::from_bytes(&image_with_links(
+            &[("hello.txt", b"hi")],
+            &[("short", "hello.txt"), ("long", &long)],
+        )))))
+        .unwrap();
+        let short = fs.lookup("/short").unwrap();
+        assert_eq!(short.stat().kind, FileKind::Symlink);
+        assert_eq!(short.stat().size, 9);
+        assert_eq!(short.readlink().unwrap(), "hello.txt");
+        assert_eq!(fs.lookup("/long").unwrap().readlink().unwrap(), long);
+        let kinds: Vec<(String, FileKind)> = fs
+            .readdir("/")
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.name, e.kind))
+            .collect();
+        assert!(kinds.contains(&(String::from("short"), FileKind::Symlink)));
+        assert_eq!(
+            fs.lookup("/hello.txt").unwrap().readlink(),
+            Err(Errno::EINVAL)
+        );
     }
 
     #[test]
@@ -1193,6 +1297,30 @@ mod write_tests {
         assert_eq!(fs.rename("/d", "/full"), Err(Errno::ENOTEMPTY));
         assert_eq!(fs.rename("/nope", "/x"), Err(Errno::ENOENT));
         assert_eq!(fs.rename("/keep.txt", "/nodir/x"), Err(Errno::ENOENT));
+        fsck(&disk);
+    }
+
+    #[test]
+    fn symlinks_are_created_and_removed() {
+        let disk = blank();
+        let long = "/very/long/".repeat(10); // 110 バイト
+        {
+            let fs = Ext2::new(disk.clone()).unwrap();
+            fs.symlink("/short", "keep.txt").unwrap();
+            fs.symlink("/long", &long).unwrap();
+            fs.mkdir("/d", 0o755).unwrap();
+            fs.symlink("/d/up", "..").unwrap();
+        }
+        let fs = Ext2::new(disk.clone()).unwrap();
+        assert_eq!(fs.lookup("/short").unwrap().readlink().unwrap(), "keep.txt");
+        assert_eq!(fs.lookup("/long").unwrap().readlink().unwrap(), long);
+        assert_eq!(fs.lookup("/short").unwrap().stat().kind, FileKind::Symlink);
+        fsck(&disk);
+        // 短いリンクの中身(inode の中の文字列)をブロック番号と取り違えて返さないこと
+        fs.unlink("/short", false).unwrap();
+        fs.unlink("/long", false).unwrap();
+        fs.rename("/d/up", "/up").unwrap();
+        assert_eq!(fs.lookup("/up").unwrap().readlink().unwrap(), "..");
         fsck(&disk);
     }
 }
