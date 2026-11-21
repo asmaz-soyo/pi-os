@@ -54,6 +54,7 @@ pub mod nr {
     pub const TIMERFD_CREATE: u64 = 85;
     pub const TIMERFD_SETTIME: u64 = 86;
     pub const TIMERFD_GETTIME: u64 = 87;
+    pub const UTIMENSAT: u64 = 88;
     pub const EXIT: u64 = 93;
     pub const EXIT_GROUP: u64 = 94;
     pub const SET_TID_ADDRESS: u64 = 96;
@@ -227,6 +228,7 @@ table! {
     nr::TIMERFD_SETTIME, "timerfd_settime", 4
         => |p, a| result(time::timerfd_settime(p, a[0], a[1], a[2], a[3]));
     nr::TIMERFD_GETTIME, "timerfd_gettime", 2 => |p, a| result(time::timerfd_gettime(p, a[0], a[1]));
+    nr::UTIMENSAT, "utimensat", 4 => |p, a| result(fs::utimensat(p, a[0], a[1], a[2], a[3]));
     nr::EXIT, "exit", 1 => |p, a| Action::Exit(proc::exit_status(a[0]));
     nr::EXIT_GROUP, "exit_group", 1 => |p, a| Action::Exit(proc::exit_status(a[0]));
     // フェーズ1はプロセスもスレッドも1つ
@@ -340,6 +342,8 @@ mod tests_rename;
 mod tests_symlink;
 #[cfg(test)]
 mod tests_time;
+#[cfg(test)]
+mod tests_times;
 #[cfg(test)]
 mod tests_tmp;
 #[cfg(test)]

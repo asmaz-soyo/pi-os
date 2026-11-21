@@ -106,6 +106,7 @@ mod tests {
             ino: 1,
             uid,
             gid,
+            ..Default::default()
         }
     }
 

@@ -4,7 +4,7 @@
 //! 消したファイルも、開いている間は中身が残る(`Arc` で参照されているため)。
 
 use crate::Errno;
-use crate::fs::vfs::{DirEntry, File, FileKind, FileSystem, Stat};
+use crate::fs::vfs::{DirEntry, File, FileKind, FileSystem, Stat, Timespec};
 use crate::sync::SpinLock;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -18,14 +18,21 @@ struct Meta {
     mode: u32,
     uid: u32,
     gid: u32,
+    atime: Timespec,
+    mtime: Timespec,
+    ctime: Timespec,
 }
 
 impl Meta {
     fn new(mode: u32) -> SpinLock<Meta> {
+        let now = Timespec::now();
         SpinLock::new(Meta {
             mode: mode & 0o7777,
             uid: 0,
             gid: 0,
+            atime: now,
+            mtime: now,
+            ctime: now,
         })
     }
 
@@ -38,7 +45,18 @@ impl Meta {
             ino,
             uid: m.uid,
             gid: m.gid,
+            atime: m.atime,
+            mtime: m.mtime,
+            ctime: m.ctime,
         }
+    }
+
+    /// 中身を変えた(mtime と ctime を今に)
+    fn modified(meta: &SpinLock<Meta>) {
+        let now = Timespec::now();
+        let mut m = meta.lock();
+        m.mtime = now;
+        m.ctime = now;
     }
 }
 
@@ -46,7 +64,9 @@ impl Meta {
 macro_rules! meta_ops {
     () => {
         fn set_mode(&self, mode: u32) -> Result<(), Errno> {
-            self.meta.lock().mode = mode & 0o7777;
+            let mut m = self.meta.lock();
+            m.mode = mode & 0o7777;
+            m.ctime = Timespec::now();
             Ok(())
         }
 
@@ -54,6 +74,19 @@ macro_rules! meta_ops {
             let mut m = self.meta.lock();
             m.uid = uid;
             m.gid = gid;
+            m.ctime = Timespec::now();
+            Ok(())
+        }
+
+        fn set_times(&self, atime: Option<Timespec>, mtime: Option<Timespec>) -> Result<(), Errno> {
+            let mut m = self.meta.lock();
+            if let Some(t) = atime {
+                m.atime = t;
+            }
+            if let Some(t) = mtime {
+                m.mtime = t;
+            }
+            m.ctime = Timespec::now();
             Ok(())
         }
     };
@@ -88,11 +121,13 @@ impl File for TmpFile {
             data.resize(end, 0);
         }
         data[offset as usize..end].copy_from_slice(buf);
+        Meta::modified(&self.meta);
         Ok(buf.len())
     }
 
     fn truncate(&self, len: u64) -> Result<(), Errno> {
         self.data.lock().resize(len as usize, 0);
+        Meta::modified(&self.meta);
         Ok(())
     }
 }

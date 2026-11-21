@@ -75,6 +75,7 @@ impl File for TimerFd {
             ino: 0x2_0000,
             uid: 0,
             gid: 0,
+            ..Default::default()
         }
     }
 

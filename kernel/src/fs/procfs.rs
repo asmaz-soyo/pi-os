@@ -25,6 +25,7 @@ impl File for ProcFile {
             ino: 0x4_0000,
             uid: 0,
             gid: 0,
+            ..Default::default()
         }
     }
 
@@ -51,6 +52,7 @@ impl File for ProcDir {
             ino: 0x4_0001,
             uid: 0,
             gid: 0,
+            ..Default::default()
         }
     }
 

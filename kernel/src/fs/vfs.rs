@@ -24,8 +24,9 @@ pub const O_TRUNC: u32 = 0o1000;
 /// AArch64 の値(x86 の 0o200000 とは違う。x86 の値を使っていたのを互換テストで見つけた)
 pub const O_DIRECTORY: u32 = 0o40000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FileKind {
+    #[default]
     Regular,
     Directory,
     CharDevice,
@@ -35,7 +36,25 @@ pub enum FileKind {
     Symlink,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 時刻(1970 年からの秒とナノ秒)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Timespec {
+    pub sec: i64,
+    pub nsec: u32,
+}
+
+impl Timespec {
+    /// 今の時刻(CLOCK_REALTIME と同じ:起動時の時刻 + 起動からの時間)
+    pub fn now() -> Self {
+        let ns = crate::time::now_ns();
+        Self {
+            sec: (crate::time::BOOT_EPOCH + ns / 1_000_000_000) as i64,
+            nsec: (ns % 1_000_000_000) as u32,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Stat {
     pub kind: FileKind,
     /// パーミッション(下位 9 ビット)
@@ -45,6 +64,10 @@ pub struct Stat {
     /// 所有者
     pub uid: u32,
     pub gid: u32,
+    /// 最後に読んだ時刻、中身を変えた時刻、属性(権限や持ち主)を変えた時刻
+    pub atime: Timespec,
+    pub mtime: Timespec,
+    pub ctime: Timespec,
 }
 
 /// ファイルの実体。読み書きは位置を引数で受け取る(位置は `OpenFile` が持つ)。
@@ -100,6 +123,11 @@ pub trait File: Send + Sync {
 
     /// 持ち主を変える
     fn set_owner(&self, _uid: u32, _gid: u32) -> Result<(), Errno> {
+        Err(Errno::EROFS)
+    }
+
+    /// 最後に読んだ時刻と、中身を変えた時刻を設定する(None は変えない)
+    fn set_times(&self, _atime: Option<Timespec>, _mtime: Option<Timespec>) -> Result<(), Errno> {
         Err(Errno::EROFS)
     }
 
@@ -526,6 +554,7 @@ mod tests {
                 ino: 1,
                 uid: 0,
                 gid: 0,
+                ..Default::default()
             }
         }
     }

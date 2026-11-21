@@ -34,6 +34,7 @@ fn stat() -> Stat {
         ino: 0x3_0000,
         uid: 0,
         gid: 0,
+        ..Default::default()
     }
 }
 

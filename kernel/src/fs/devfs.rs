@@ -46,6 +46,7 @@ impl File for ConsoleFile {
             ino: 0x1_0001,
             uid: 0,
             gid: 0,
+            ..Default::default()
         }
     }
 
@@ -99,6 +100,7 @@ impl File for NullFile {
             ino: 0x1_0002,
             uid: 0,
             gid: 0,
+            ..Default::default()
         }
     }
 
@@ -122,6 +124,7 @@ impl File for DevDir {
             ino: 0x1_0000,
             uid: 0,
             gid: 0,
+            ..Default::default()
         }
     }
 }

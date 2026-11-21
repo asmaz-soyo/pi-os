@@ -43,6 +43,7 @@
 | 85 | `timerfd_create` | 2 |
 | 86 | `timerfd_settime` | 4 |
 | 87 | `timerfd_gettime` | 2 |
+| 88 | `utimensat` | 4 |
 | 93 | `exit` | 1 |
 | 94 | `exit_group` | 1 |
 | 96 | `set_tid_address` | 1 |
@@ -78,4 +79,4 @@
 | 276 | `renameat2` | 5 |
 | 278 | `getrandom` | 3 |
 
-合計 72 個
+合計 73 個

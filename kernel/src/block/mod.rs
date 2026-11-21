@@ -113,6 +113,7 @@ impl File for BlockFile {
             ino: 0x5_0000,
             uid: 0,
             gid: 0,
+            ..Default::default()
         }
     }
 

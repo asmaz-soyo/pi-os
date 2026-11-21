@@ -24,6 +24,7 @@ impl File for RamFile {
             ino: self.ino,
             uid: self.uid,
             gid: self.gid,
+            ..Default::default()
         }
     }
 
@@ -62,6 +63,7 @@ impl File for RamLink {
             ino: self.ino,
             uid: 0,
             gid: 0,
+            ..Default::default()
         }
     }
 
@@ -83,6 +85,7 @@ impl File for RamDir {
             ino: self.ino,
             uid: 0,
             gid: 0,
+            ..Default::default()
         }
     }
 

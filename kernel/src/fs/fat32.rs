@@ -276,6 +276,7 @@ impl File for FatFile {
             ino: self.entry.cluster as u64,
             uid: 0,
             gid: 0,
+            ..Default::default()
         }
     }
 

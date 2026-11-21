@@ -61,6 +61,7 @@ impl File for GpioFile {
             ino: 0x6_0000 + self.line as u64,
             uid: 0,
             gid: 0,
+            ..Default::default()
         }
     }
 

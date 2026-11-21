@@ -346,6 +346,11 @@ fn stat_bytes(st: &Stat) -> [u8; 128] {
         FileKind::Symlink => 0o120000,
     };
     b[8..16].copy_from_slice(&st.ino.to_le_bytes()); // st_ino
+    // st_atim、st_mtim、st_ctim(それぞれ秒 8 バイト + ナノ秒 8 バイト)
+    for (at, t) in [(72, st.atime), (88, st.mtime), (104, st.ctime)] {
+        b[at..at + 8].copy_from_slice(&t.sec.to_le_bytes());
+        b[at + 8..at + 16].copy_from_slice(&(t.nsec as u64).to_le_bytes());
+    }
     b[16..20].copy_from_slice(&(kind | st.mode).to_le_bytes()); // st_mode
     b[20..24].copy_from_slice(&1u32.to_le_bytes()); // st_nlink
     b[24..28].copy_from_slice(&st.uid.to_le_bytes()); // st_uid
@@ -502,6 +507,64 @@ pub fn fchownat(
 pub fn fchown(p: &mut Process, fd: u64, uid: u64, gid: u64) -> Result<u64, Errno> {
     let file = p.fds.get(fd)?.file.clone();
     change_owner(p, &*file, uid, gid)
+}
+
+/// utimensat(dirfd, path, times, flags)。path が NULL なら dirfd のファイル(futimens)。
+/// times が NULL なら両方とも今。ナノ秒が UTIME_NOW なら今、UTIME_OMIT なら変えない。
+/// 時刻を指定できるのは持ち主か root。今にするだけなら、書き込める人もよい。
+pub fn utimensat(
+    p: &mut Process,
+    dirfd: u64,
+    path: u64,
+    times: u64,
+    flags: u64,
+) -> Result<u64, Errno> {
+    const UTIME_NOW: u64 = 0x3fff_ffff;
+    const UTIME_OMIT: u64 = 0x3fff_fffe;
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    let file = if path == 0 {
+        p.fds.get(dirfd)?.file.clone()
+    } else {
+        let path = path_arg(p, dirfd, path)?;
+        if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            p.vfs.lookup_nofollow(&path)?
+        } else {
+            p.vfs.lookup(&path)?
+        }
+    };
+    let now = vfs::Timespec::now();
+    let mut set = [Some(now), Some(now)];
+    let mut explicit = false;
+    if times != 0 {
+        let mut b = [0u8; 32];
+        p.mem.copy_from_user(VirtAddr(times), &mut b)?;
+        for (i, slot) in set.iter_mut().enumerate() {
+            let sec = i64::from_le_bytes(b[i * 16..i * 16 + 8].try_into().unwrap());
+            let nsec = u64::from_le_bytes(b[i * 16 + 8..i * 16 + 16].try_into().unwrap());
+            *slot = match nsec {
+                UTIME_NOW => Some(now),
+                UTIME_OMIT => None,
+                n if n < 1_000_000_000 => {
+                    explicit = true;
+                    Some(vfs::Timespec {
+                        sec,
+                        nsec: n as u32,
+                    })
+                }
+                _ => return Err(Errno::EINVAL),
+            };
+        }
+    }
+    let st = file.stat();
+    let owner = p.cred.euid == 0 || p.cred.euid == st.uid;
+    if !owner {
+        if explicit {
+            return Err(Errno::EPERM);
+        }
+        p.cred.check(&st, Access::WRITE)?;
+    }
+    file.set_times(set[0], set[1])?;
+    Ok(0)
 }
 
 /// 新しく作ったものを、作ったプロセスの持ち主(実効 uid と gid)にする

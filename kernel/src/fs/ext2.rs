@@ -48,6 +48,31 @@ struct Inode {
     sectors: u32,
     dtime: u32,
     blocks: [u32; 15],
+    /// 時刻(1970 年からの秒):最後に読んだ、属性を変えた、中身を変えた
+    atime: u32,
+    ctime: u32,
+    mtime: u32,
+}
+
+fn secs(s: u32) -> crate::fs::vfs::Timespec {
+    crate::fs::vfs::Timespec {
+        sec: s as i64,
+        nsec: 0,
+    }
+}
+
+/// 今の時刻(秒)。inode の時刻の欄は 32 ビット
+fn now_secs() -> u32 {
+    crate::fs::vfs::Timespec::now().sec as u32
+}
+
+impl Inode {
+    /// 作ったときの時刻を入れる
+    fn born(mut self) -> Self {
+        let now = now_secs();
+        (self.atime, self.ctime, self.mtime) = (now, now, now);
+        self
+    }
 }
 
 fn le16(b: &[u8], off: usize) -> u16 {
@@ -105,6 +130,9 @@ impl Inner {
             sectors: le32(&raw, 28),
             dtime: le32(&raw, 20),
             blocks,
+            atime: le32(&raw, 8),
+            ctime: le32(&raw, 12),
+            mtime: le32(&raw, 16),
         })
     }
 
@@ -337,6 +365,9 @@ impl Inner {
         raw[0..2].copy_from_slice(&inode.mode.to_le_bytes());
         raw[2..4].copy_from_slice(&(inode.uid as u16).to_le_bytes());
         raw[4..8].copy_from_slice(&(inode.size as u32).to_le_bytes());
+        raw[8..12].copy_from_slice(&inode.atime.to_le_bytes());
+        raw[12..16].copy_from_slice(&inode.ctime.to_le_bytes());
+        raw[16..20].copy_from_slice(&inode.mtime.to_le_bytes());
         raw[20..24].copy_from_slice(&inode.dtime.to_le_bytes());
         raw[24..26].copy_from_slice(&(inode.gid as u16).to_le_bytes());
         raw[26..28].copy_from_slice(&inode.links.to_le_bytes());
@@ -645,6 +676,7 @@ impl File for Ext2File {
         let _meta = self.fs.meta.lock();
         let mut inode = self.fs.inode(self.ino)?;
         inode.mode = (inode.mode & 0xf000) | (mode as u16 & 0o7777);
+        inode.ctime = now_secs();
         self.fs.write_inode(self.ino, &inode)
     }
 
@@ -653,6 +685,24 @@ impl File for Ext2File {
         let mut inode = self.fs.inode(self.ino)?;
         inode.uid = uid;
         inode.gid = gid;
+        inode.ctime = now_secs();
+        self.fs.write_inode(self.ino, &inode)
+    }
+
+    fn set_times(
+        &self,
+        atime: Option<crate::fs::vfs::Timespec>,
+        mtime: Option<crate::fs::vfs::Timespec>,
+    ) -> Result<(), Errno> {
+        let _meta = self.fs.meta.lock();
+        let mut inode = self.fs.inode(self.ino)?;
+        if let Some(t) = atime {
+            inode.atime = t.sec as u32;
+        }
+        if let Some(t) = mtime {
+            inode.mtime = t.sec as u32;
+        }
+        inode.ctime = now_secs();
         self.fs.write_inode(self.ino, &inode)
     }
 
@@ -682,6 +732,9 @@ impl File for Ext2File {
             ino: self.ino as u64,
             uid: inode.uid,
             gid: inode.gid,
+            atime: secs(inode.atime),
+            mtime: secs(inode.mtime),
+            ctime: secs(inode.ctime),
         }
     }
 
@@ -700,13 +753,17 @@ impl File for Ext2File {
             return Err(Errno::EISDIR);
         }
         let n = self.fs.write_file(&mut inode, offset, buf)?;
+        (inode.mtime, inode.ctime) = (now_secs(), now_secs());
         self.fs.write_inode(self.ino, &inode)?;
         Ok(n)
     }
 
     fn truncate(&self, len: u64) -> Result<(), Errno> {
         let _meta = self.fs.meta.lock();
-        self.fs.truncate(self.ino, len)
+        self.fs.truncate(self.ino, len)?;
+        let mut inode = self.fs.inode(self.ino)?;
+        (inode.mtime, inode.ctime) = (now_secs(), now_secs());
+        self.fs.write_inode(self.ino, &inode)
     }
 }
 
@@ -827,7 +884,8 @@ impl FileSystem for Ext2 {
             mode: S_IFREG | (mode as u16 & 0o7777),
             links: 1,
             ..Inode::default()
-        };
+        }
+        .born();
         self.inner.write_inode(ino, &inode)?;
         self.inner
             .add_entry(dir_ino, name, ino, FileKind::Regular)?;
@@ -852,7 +910,8 @@ impl FileSystem for Ext2 {
             mode: S_IFDIR | (mode as u16 & 0o7777),
             links: 2, // 親の項目と、自分の「.」
             ..Inode::default()
-        };
+        }
+        .born();
         let block = self.inner.alloc_for(&mut inode)?;
         inode.blocks[0] = block;
         inode.size = self.inner.block_size;
@@ -898,7 +957,8 @@ impl FileSystem for Ext2 {
             mode: S_IFLNK | 0o777,
             links: 1,
             ..Inode::default()
-        };
+        }
+        .born();
         if target.len() < FAST_LINK_MAX {
             // 短いリンク:ブロック番号の欄に文字列を入れる
             let mut raw = [0u8; FAST_LINK_MAX];
@@ -1356,6 +1416,34 @@ mod write_tests {
         let st = fs.lookup("/keep.txt").unwrap().stat();
         assert_eq!((st.mode, st.uid, st.gid), (0o4750, 70000, 100));
         assert_eq!(st.kind, FileKind::Regular);
+        fsck(&disk);
+    }
+
+    #[test]
+    fn times_are_kept_in_the_inode() {
+        use crate::fs::vfs::Timespec;
+        let disk = blank();
+        let now = Timespec::now().sec;
+        {
+            let fs = Ext2::new(disk.clone()).unwrap();
+            let f = fs.create("/t", 0o644).unwrap();
+            let st = f.stat();
+            assert!(st.mtime.sec >= now - 2 && st.ctime.sec >= now - 2, "{st:?}");
+            fs.mkdir("/d", 0o755).unwrap();
+            assert!(fs.lookup("/d").unwrap().stat().mtime.sec >= now - 2);
+            f.set_times(
+                Some(Timespec { sec: 1000, nsec: 0 }),
+                Some(Timespec { sec: 2000, nsec: 0 }),
+            )
+            .unwrap();
+        }
+        let fs = Ext2::new(disk.clone()).unwrap();
+        let f = fs.lookup("/t").unwrap();
+        assert_eq!((f.stat().atime.sec, f.stat().mtime.sec), (1000, 2000));
+        // 書くと mtime が今になる
+        f.write(0, b"x").unwrap();
+        assert!(f.stat().mtime.sec >= now - 2);
+        assert_eq!(f.stat().atime.sec, 1000);
         fsck(&disk);
     }
 }
