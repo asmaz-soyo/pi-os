@@ -141,6 +141,11 @@ impl Devfs {
 }
 
 impl FileSystem for Devfs {
+    /// 種類:devtmpfs(tmpfs と同じ番号)
+    fn statfs(&self) -> Result<crate::fs::vfs::StatFs, crate::Errno> {
+        Ok(crate::fs::vfs::StatFs::of_kind(0x0102_1994))
+    }
+
     fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
         match path {
             "/" => Ok(Arc::new(DevDir)),

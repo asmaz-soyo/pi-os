@@ -373,3 +373,61 @@ fn fcntl_reports_and_changes_o_append() {
         "without O_APPEND, writes go to the offset"
     );
 }
+
+/// statfs の結果:(種類, ブロックの大きさ, ファイル名の最大長)
+fn statfs_of(p: &mut crate::process::Process, path_: &[u8]) -> Result<(u64, u64, u64), u64> {
+    let at = path(p, path_);
+    let r = call(p, nr::STATFS, [at, SCRATCH + 0x800, 0, 0, 0, 0]);
+    if r != 0 {
+        return Err(r);
+    }
+    let b = get(p, SCRATCH + 0x800, 120);
+    let w = |i: usize| u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+    Ok((w(0), w(8), w(64)))
+}
+
+#[test]
+fn statfs_names_the_filesystem_type() {
+    const TMPFS_MAGIC: u64 = 0x0102_1994;
+    const RAMFS_MAGIC: u64 = 0x8584_58f6;
+    let (mut p, _) = process();
+    assert_eq!(statfs_of(&mut p, b"/tmp").unwrap().0, TMPFS_MAGIC);
+    let (kind, bsize, namelen) = statfs_of(&mut p, b"/etc/motd").unwrap();
+    assert_eq!(kind, RAMFS_MAGIC);
+    assert!(bsize > 0);
+    assert_eq!(namelen, 255);
+    let fd = open(&mut p, b"/tmp", O_DIRECTORY);
+    assert_eq!(
+        call(&mut p, nr::FSTATFS, [fd, SCRATCH + 0x800, 0, 0, 0, 0]),
+        0
+    );
+    assert_eq!(statfs_of(&mut p, b"/nope"), Err(err(Errno::ENOENT)));
+}
+
+fn st_dev(p: &mut crate::process::Process, path_: &[u8]) -> u64 {
+    let at = path(p, path_);
+    assert_eq!(
+        call(p, nr::NEWFSTATAT, [AT_FDCWD, at, SCRATCH + 0x400, 0, 0, 0]),
+        0
+    );
+    u64::from_le_bytes(get(p, SCRATCH + 0x400, 8).try_into().unwrap())
+}
+
+#[test]
+fn each_mounted_filesystem_has_its_own_st_dev() {
+    // df や find -xdev は、st_dev でどのファイルシステムかを見分ける
+    let (mut p, _) = process();
+    open(&mut p, b"/tmp/x", O_CREAT | O_WRONLY);
+    assert_eq!(st_dev(&mut p, b"/tmp"), st_dev(&mut p, b"/tmp/x"));
+    assert_ne!(st_dev(&mut p, b"/tmp"), st_dev(&mut p, b"/etc"));
+    assert_ne!(st_dev(&mut p, b"/dev"), st_dev(&mut p, b"/"));
+    assert_eq!(st_dev(&mut p, b"/etc/motd"), st_dev(&mut p, b"/"));
+    // fstat も同じ
+    let fd = open(&mut p, b"/tmp/x", 0);
+    assert_eq!(
+        call(&mut p, nr::FSTAT, [fd, SCRATCH + 0x400, 0, 0, 0, 0]),
+        0
+    );
+    let dev = u64::from_le_bytes(get(&mut p, SCRATCH + 0x400, 8).try_into().unwrap());
+    assert_eq!(dev, st_dev(&mut p, b"/tmp"));
+}

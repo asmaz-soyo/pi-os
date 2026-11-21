@@ -311,18 +311,31 @@ fn vfs() -> (Arc<Vfs>, Arc<dyn File>) {
             Some(i) => {
                 let (dev, _, fs) = mounts.remove(i);
                 kernel::println!("ext2: {dev} mounted on /");
+                kernel::fs::record_mount(&dev, "/", "ext2");
                 Vfs::new(fs)
             }
-            None => Vfs::new(Arc::new(
-                Initramfs::new(userland::INITRAMFS).expect("initramfs is a valid tar"),
-            )),
+            None => {
+                kernel::fs::record_mount("rootfs", "/", "rootfs");
+                Vfs::new(Arc::new(
+                    Initramfs::new(userland::INITRAMFS).expect("initramfs is a valid tar"),
+                ))
+            }
         };
         vfs.mount("/dev", Arc::new(Devfs::new(console.clone())));
         vfs.mount("/tmp", Arc::new(kernel::fs::tmpfs::Tmpfs::new()));
         vfs.mount("/proc", Arc::new(kernel::fs::procfs::Procfs::new()));
+        // /proc/mounts に見せる記録(df などが読む)
+        kernel::fs::record_mount("devtmpfs", "/dev", "devtmpfs");
+        kernel::fs::record_mount("tmpfs", "/tmp", "tmpfs");
+        kernel::fs::record_mount("proc", "/proc", "proc");
         for (dev, at, fs) in mounts {
-            let kind = if at == "/boot" { "fat32" } else { "ext2" };
+            let (kind, fstype) = if at == "/boot" {
+                ("fat32", "vfat")
+            } else {
+                ("ext2", "ext2")
+            };
             kernel::println!("{kind}: {dev} mounted on {at}");
+            kernel::fs::record_mount(&dev, at, fstype);
             vfs.mount(at, fs);
         }
         (Arc::new(vfs), console)

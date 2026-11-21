@@ -18,6 +18,8 @@
 | 36 | `symlinkat` | 3 |
 | 37 | `linkat` | 5 |
 | 38 | `renameat` | 4 |
+| 43 | `statfs` | 2 |
+| 44 | `fstatfs` | 2 |
 | 46 | `ftruncate` | 2 |
 | 48 | `faccessat` | 3 |
 | 49 | `chdir` | 1 |
@@ -84,4 +86,4 @@
 | 276 | `renameat2` | 5 |
 | 278 | `getrandom` | 3 |
 
-合計 78 個
+合計 80 個

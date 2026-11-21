@@ -36,6 +36,39 @@ pub enum FileKind {
     Symlink,
 }
 
+/// ファイルシステム全体の情報(statfs)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatFs {
+    /// 種類(Linux と同じマジック番号:ext2 は 0xEF53 など)
+    pub kind: u64,
+    pub block_size: u64,
+    /// ブロックの数:全体、空き、一般ユーザーが使える空き
+    pub blocks: u64,
+    pub free_blocks: u64,
+    pub avail_blocks: u64,
+    /// inode(ファイル)の数:全体、空き
+    pub files: u64,
+    pub free_files: u64,
+    /// ファイル名の最大の長さ
+    pub name_max: u64,
+}
+
+impl StatFs {
+    /// 大きさを数えないファイルシステム(メモリの上のものなど)
+    pub const fn of_kind(kind: u64) -> Self {
+        Self {
+            kind,
+            block_size: 4096,
+            blocks: 0,
+            free_blocks: 0,
+            avail_blocks: 0,
+            files: 0,
+            free_files: 0,
+            name_max: 255,
+        }
+    }
+}
+
 /// 時刻(1970 年からの秒とナノ秒)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Timespec {
@@ -318,6 +351,11 @@ pub trait FileSystem: Send + Sync {
     /// `path` はこのファイルシステムの中の絶対パス(`/` で始まる)
     fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno>;
 
+    /// ファイルシステム全体の情報(statfs)
+    fn statfs(&self) -> Result<StatFs, Errno> {
+        Ok(StatFs::of_kind(0))
+    }
+
     /// まだ本来の場所に書いていないもの(ジャーナルにコミットしただけのもの)を書く
     fn sync(&self) -> Result<(), Errno> {
         Ok(())
@@ -414,6 +452,33 @@ impl Vfs {
         self.mounts
             .sort_by_key(|(p, _)| core::cmp::Reverse(p.len()));
         self.dentries.lock().clear();
+    }
+
+    /// `path` のあるファイルシステムの番号(stat の st_dev)。マウントごとに違う
+    /// `follow`:最後の要素がリンクなら追う
+    pub fn device_of(&self, path: &str, follow: bool) -> Result<u64, Errno> {
+        let path = self.resolve_path(path, follow)?;
+        let (fs, _) = self.resolve(&path)?;
+        let index = self
+            .mounts
+            .iter()
+            .position(|(_, m)| core::ptr::addr_eq(Arc::as_ptr(m), fs as *const dyn FileSystem))
+            .ok_or(Errno::ENOENT)?;
+        // マウントの表は長い順に並べ替えるので、番号はマウント先の名前から作る(並べ替えで変わらない)
+        let at = &self.mounts[index].0;
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in at.bytes() {
+            h = (h ^ b as u64).wrapping_mul(0x100_0000_01b3);
+        }
+        Ok(h & 0xffff_ffff)
+    }
+
+    /// `path` のあるファイルシステムの情報(リンクは追う)
+    pub fn statfs(&self, path: &str) -> Result<StatFs, Errno> {
+        let path = self.resolve_path(path, true)?;
+        self.lookup(&path)?;
+        let (fs, _) = self.resolve(&path)?;
+        fs.statfs()
     }
 
     /// マウントしているすべてのファイルシステムを sync する

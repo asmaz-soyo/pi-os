@@ -255,6 +255,11 @@ impl Default for Tmpfs {
 }
 
 impl FileSystem for Tmpfs {
+    /// 種類:tmpfs
+    fn statfs(&self) -> Result<crate::fs::vfs::StatFs, crate::Errno> {
+        Ok(crate::fs::vfs::StatFs::of_kind(0x0102_1994))
+    }
+
     /// 名前は VFS を通してしか変わらないので、dentry キャッシュに覚えてよい
     fn cacheable(&self) -> bool {
         true

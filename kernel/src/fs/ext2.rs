@@ -1282,6 +1282,24 @@ impl Ext2 {
 }
 
 impl FileSystem for Ext2 {
+    /// スーパーブロックの数(inode とブロックの全体と空き、予約されたブロック)
+    fn statfs(&self) -> Result<crate::fs::vfs::StatFs, Errno> {
+        let mut sb = [0u8; 20];
+        self.inner.read_bytes(1024, &mut sb)?;
+        let free = le32(&sb, 12) as u64;
+        Ok(crate::fs::vfs::StatFs {
+            kind: MAGIC as u64,
+            block_size: self.inner.block_size,
+            blocks: le32(&sb, 4) as u64,
+            free_blocks: free,
+            // root のために予約されたブロックは、一般ユーザーは使えない
+            avail_blocks: free.saturating_sub(le32(&sb, 8) as u64),
+            files: le32(&sb, 0) as u64,
+            free_files: le32(&sb, 16) as u64,
+            name_max: 255,
+        })
+    }
+
     /// ジャーナルにコミットしただけのものを、本来の場所まで書く
     fn sync(&self) -> Result<(), Errno> {
         let _meta = self.inner.meta.lock();
@@ -2451,6 +2469,25 @@ mod write_tests {
         let fs = Ext2::new(disk.clone()).unwrap();
         assert_eq!(read_all(&fs, "/d/f"), b"journaled");
         fs.sync().unwrap();
+        fsck(&disk);
+    }
+
+    #[test]
+    fn statfs_reports_the_superblock_counts() {
+        let disk = blank();
+        let fs = Ext2::new(disk.clone()).unwrap();
+        let before = fs.statfs().unwrap();
+        assert_eq!(before.kind, 0xef53);
+        assert_eq!(before.block_size, 1024);
+        assert!(before.free_blocks < before.blocks && before.free_files < before.files);
+        fs.create("/ten", 0o644)
+            .unwrap()
+            .write(0, &[1u8; 10 * 1024])
+            .unwrap();
+        let after = fs.statfs().unwrap();
+        assert_eq!(after.free_blocks, before.free_blocks - 10);
+        assert_eq!(after.free_files, before.free_files - 1);
+        // ここで数えている空きは、e2fsck が確かめるスーパーブロックの値と同じ
         fsck(&disk);
     }
 }

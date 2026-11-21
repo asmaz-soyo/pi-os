@@ -87,6 +87,15 @@ fn meminfo() -> String {
     )
 }
 
+/// /proc/mounts:「デバイス マウント先 種類 オプション 0 0」
+fn mounts() -> String {
+    let mut text = String::new();
+    for (source, target, kind) in crate::fs::mounts() {
+        text.push_str(&format!("{source} {target} {kind} rw 0 0\n"));
+    }
+    text
+}
+
 fn status(pid: crate::process::Pid, ppid: crate::process::Pid, name: &str) -> String {
     format!("Name:\t{name}\nState:\tR (running)\nPid:\t{pid}\nPPid:\t{ppid}\nUid:\t0\t0\t0\t0\n")
 }
@@ -133,12 +142,18 @@ fn entry(name: &str, kind: FileKind) -> DirEntry {
 }
 
 impl FileSystem for Procfs {
+    /// 種類:proc
+    fn statfs(&self) -> Result<crate::fs::vfs::StatFs, crate::Errno> {
+        Ok(crate::fs::vfs::StatFs::of_kind(0x9fa0))
+    }
+
     fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
         let path = resolve_self(path);
         match path.as_str() {
             "/" | "/pios" => Ok(Arc::new(ProcDir)),
             "/uptime" => file(uptime()),
             "/meminfo" => file(meminfo()),
+            "/mounts" => file(mounts()),
             "/version" => file(String::from("Pi-OS version 0.1.0 (aarch64)\n")),
             "/pios/unimplemented" => file(unimplemented()),
             other => {
@@ -161,7 +176,7 @@ impl FileSystem for Procfs {
         let path = resolve_self(path);
         match path.as_str() {
             "/" => {
-                let mut entries: Vec<DirEntry> = ["meminfo", "uptime", "version"]
+                let mut entries: Vec<DirEntry> = ["meminfo", "mounts", "uptime", "version"]
                     .iter()
                     .map(|n| entry(n, FileKind::Regular))
                     .collect();
@@ -198,6 +213,18 @@ mod tests {
         let mut buf = [0u8; 4096];
         let n = f.read(0, &mut buf).unwrap();
         String::from_utf8(buf[..n].to_vec()).unwrap()
+    }
+
+    #[test]
+    fn mounts_lists_what_is_mounted_in_linux_format() {
+        crate::fs::record_mount("/dev/vda2", "/", "ext3");
+        crate::fs::record_mount("proc", "/proc", "proc");
+        let fs = Procfs::new();
+        let text = read_all(&fs, "/mounts");
+        // 「デバイス マウント先 種類 オプション 0 0」
+        assert!(text.contains("/dev/vda2 / ext3 rw 0 0\n"), "{text}");
+        assert!(text.contains("proc /proc proc rw 0 0\n"), "{text}");
+        assert!(fs.readdir("/").unwrap().iter().any(|e| e.name == "mounts"));
     }
 
     #[test]

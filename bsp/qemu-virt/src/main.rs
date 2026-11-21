@@ -115,6 +115,15 @@ mod tests {
     ktest::common_tests!();
 
     #[test_case]
+    fn df_reports_the_disk() {
+        // statfs:ルート(ext3)と /boot(FAT32)の大きさ
+        assert_eq!(
+            boot::run_program("/bin/df", &[b"df", b"/", b"/boot"]),
+            Ok(0)
+        );
+    }
+
+    #[test_case]
     fn cpython_runs_from_the_disk() {
         let argv: [&[u8]; 2] = [b"python3", b"/usr/share/pi-os/hello_cpython.py"];
         assert_eq!(boot::run_program("/usr/bin/python3", &argv), Ok(7));

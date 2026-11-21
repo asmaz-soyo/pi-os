@@ -147,6 +147,11 @@ impl Initramfs {
 }
 
 impl FileSystem for Initramfs {
+    /// 種類:ramfs(initramfs)
+    fn statfs(&self) -> Result<crate::fs::vfs::StatFs, crate::Errno> {
+        Ok(crate::fs::vfs::StatFs::of_kind(0x8584_58f6))
+    }
+
     /// 名前は VFS を通してしか変わらないので、dentry キャッシュに覚えてよい
     fn cacheable(&self) -> bool {
         true

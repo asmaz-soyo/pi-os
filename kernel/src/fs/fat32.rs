@@ -35,6 +35,8 @@ struct Inner {
     data_start: u64,
     root_cluster: u32,
     clusters: u32,
+    /// FSInfo のセクタ(空きクラスタの数が書いてある)
+    fsinfo: u64,
 }
 
 /// ディレクトリの中の 1 項目
@@ -336,12 +338,32 @@ impl Fat32 {
                 data_start: data_sector * bytes_per_sector,
                 root_cluster: le32(&bs, 44),
                 clusters: ((total - data_sector) / sectors_per_cluster) as u32,
+                fsinfo: le16(&bs, 48) as u64,
             }),
         })
     }
 }
 
 impl FileSystem for Fat32 {
+    /// 種類:MSDOS(FAT)。空きは FSInfo のセクタの値(0xFFFFFFFF なら「分からない」で 0)
+    fn statfs(&self) -> Result<crate::fs::vfs::StatFs, Errno> {
+        let mut info = [0u8; BLOCK_SIZE];
+        self.inner
+            .read_bytes(self.inner.fsinfo * BLOCK_SIZE as u64, &mut info)?;
+        let free = match (le32(&info, 0), le32(&info, 488)) {
+            // FSInfo の印("RRaA")と、空きの数
+            (0x4161_5252, n) if n != u32::MAX && n <= self.inner.clusters => n as u64,
+            _ => 0,
+        };
+        Ok(crate::fs::vfs::StatFs {
+            block_size: self.inner.cluster_size,
+            blocks: self.inner.clusters as u64,
+            free_blocks: free,
+            avail_blocks: free,
+            ..crate::fs::vfs::StatFs::of_kind(0x4d44)
+        })
+    }
+
     /// 名前は VFS を通してしか変わらないので、dentry キャッシュに覚えてよい
     fn cacheable(&self) -> bool {
         true
@@ -478,6 +500,14 @@ mod tests {
             .map(|e| e.name)
             .collect();
         assert_eq!(sub, ["a.dtbo"]);
+    }
+
+    #[test]
+    fn statfs_reads_the_free_count_from_fsinfo() {
+        let fs = mount(&[("CONFIG.TXT", b"x")]);
+        let st = fs.statfs().unwrap();
+        assert_eq!(st.kind, 0x4d44);
+        assert!(st.free_blocks > 0 && st.free_blocks < st.blocks, "{st:?}");
     }
 
     #[test]

@@ -410,8 +410,17 @@ fn stat_bytes(st: &Stat) -> [u8; 128] {
 
 /// fstat(fd, statbuf)
 pub fn fstat(p: &mut Process, fd: u64, buf: u64) -> Result<u64, Errno> {
-    let st = p.fds.get(fd)?.file.stat();
-    p.mem.copy_to_user(VirtAddr(buf), &stat_bytes(&st))?;
+    let f = p.fds.get(fd)?;
+    let mut b = stat_bytes(&f.file.stat());
+    // st_dev:開いたときのパスのファイルシステム(パイプなどパスのないものは 0)
+    if let Some(dev) = f
+        .path
+        .as_ref()
+        .and_then(|path| p.vfs.device_of(path, true).ok())
+    {
+        b[0..8].copy_from_slice(&dev.to_le_bytes());
+    }
+    p.mem.copy_to_user(VirtAddr(buf), &b)?;
     Ok(0)
 }
 
@@ -432,13 +441,16 @@ pub fn newfstatat(
     }
     const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
     let path = path_arg(p, dirfd, path)?;
-    let file = if flags & AT_SYMLINK_NOFOLLOW != 0 {
-        p.vfs.lookup_nofollow(&path)?
-    } else {
+    let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
+    let file = if follow {
         p.vfs.lookup(&path)?
+    } else {
+        p.vfs.lookup_nofollow(&path)?
     };
-    p.mem
-        .copy_to_user(VirtAddr(buf), &stat_bytes(&file.stat()))?;
+    let mut b = stat_bytes(&file.stat());
+    // st_dev:どのファイルシステムか(df や find -xdev が見分けに使う)
+    b[0..8].copy_from_slice(&p.vfs.device_of(&path, follow)?.to_le_bytes());
+    p.mem.copy_to_user(VirtAddr(buf), &b)?;
     Ok(0)
 }
 
@@ -515,6 +527,46 @@ fn change_owner(p: &Process, file: &dyn vfs::File, uid: u64, gid: u64) -> Result
     let st = file.stat();
     let pick = |v: u64, old: u32| if v as u32 == u32::MAX { old } else { v as u32 };
     file.set_owner(pick(uid, st.uid), pick(gid, st.gid))?;
+    Ok(0)
+}
+
+/// `struct statfs`(120 バイト)
+fn statfs_bytes(st: &vfs::StatFs) -> [u8; 120] {
+    let mut b = [0u8; 120];
+    let fields = [
+        st.kind,
+        st.block_size,
+        st.blocks,
+        st.free_blocks,
+        st.avail_blocks,
+        st.files,
+        st.free_files,
+        0, // f_fsid
+        st.name_max,
+        st.block_size, // f_frsize
+    ];
+    for (i, v) in fields.iter().enumerate() {
+        b[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+    }
+    b
+}
+
+/// statfs(path, buf)
+pub fn statfs(p: &mut Process, path: u64, buf: u64) -> Result<u64, Errno> {
+    let path = path_arg(p, AT_FDCWD as u64, path)?;
+    let st = p.vfs.statfs(&path)?;
+    p.mem.copy_to_user(VirtAddr(buf), &statfs_bytes(&st))?;
+    Ok(0)
+}
+
+/// fstatfs(fd, buf):fd を開いたときのパスで調べる(パスのないもの:パイプなどは種類 0)
+pub fn fstatfs(p: &mut Process, fd: u64, buf: u64) -> Result<u64, Errno> {
+    let f = p.fds.get(fd)?;
+    let st = match &f.path {
+        Some(path) => p.vfs.statfs(path)?,
+        None => vfs::StatFs::of_kind(0),
+    };
+    p.mem.copy_to_user(VirtAddr(buf), &statfs_bytes(&st))?;
     Ok(0)
 }
 

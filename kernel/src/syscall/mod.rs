@@ -30,6 +30,8 @@ pub mod nr {
     pub const SYMLINKAT: u64 = 36;
     pub const LINKAT: u64 = 37;
     pub const RENAMEAT: u64 = 38;
+    pub const STATFS: u64 = 43;
+    pub const FSTATFS: u64 = 44;
     pub const FTRUNCATE: u64 = 46;
     pub const FACCESSAT: u64 = 48;
     pub const CHDIR: u64 = 49;
@@ -207,6 +209,8 @@ table! {
     nr::SYMLINKAT, "symlinkat", 3 => |p, a| result(fs::symlinkat(p, a[0], a[1], a[2]));
     nr::LINKAT, "linkat", 5 => |p, a| result(fs::linkat(p, a[0], a[1], a[2], a[3], a[4]));
     nr::RENAMEAT, "renameat", 4 => |p, a| result(fs::renameat2(p, a[0], a[1], a[2], a[3], 0));
+    nr::STATFS, "statfs", 2 => |p, a| result(fs::statfs(p, a[0], a[1]));
+    nr::FSTATFS, "fstatfs", 2 => |p, a| result(fs::fstatfs(p, a[0], a[1]));
     nr::FTRUNCATE, "ftruncate", 2 => |p, a| result(fs::ftruncate(p, a[0], a[1]));
     nr::FACCESSAT, "faccessat", 3 => |p, a| result(fs::faccessat(p, a[0], a[1], a[2]));
     nr::CHDIR, "chdir", 1 => |p, a| result(fs::chdir(p, a[0]));
