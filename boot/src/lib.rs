@@ -191,7 +191,13 @@ fn probe_virtio<B: Board>() {
             Some(dev) => {
                 let name = alloc::format!("vd{}", next as char);
                 kernel::println!("virtio-blk: /dev/{name}, {} sectors", dev.capacity());
-                kernel::block::register(&name, kernel::block::shared(alloc::boxed::Box::new(dev)));
+                // 最近読んだ 256 セクタ(128KB)をメモリに残す(書き込みはそのままディスクへ)
+                let cached =
+                    kernel::block::cache::CachedDevice::new(alloc::boxed::Box::new(dev), 256);
+                kernel::block::register(
+                    &name,
+                    kernel::block::shared(alloc::boxed::Box::new(cached)),
+                );
                 next += 1;
             }
             None => {

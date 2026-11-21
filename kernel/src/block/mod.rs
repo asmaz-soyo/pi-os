@@ -2,6 +2,7 @@
 //!
 //! ドライバが作ったブロックデバイスを名前(`vda` など)で登録しておき、devfs が `/dev/<名前>` として見せる。
 
+pub mod cache;
 pub mod mbr;
 pub mod ramdisk;
 
