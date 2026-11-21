@@ -186,6 +186,42 @@ fn generate_docs(path: &str, check: bool) -> Result<(), String> {
 ///
 /// セクタ 0 は MBR、セクタ 1 は目印の文字列、LBA 2048 から ext2 のパーティション
 /// (`user/diskroot/` の中身を `mke2fs -d` で入れる)。
+/// 互換テストの最後に Pi-OS で動かす:ext2 のルートにファイルを書く
+const PERSIST_SCRIPT: &str = "seq 1 500 > /compat-persist.txt\n";
+
+/// Pi-OS が終わったあとのディスクの p2(ext2)を取り出し、e2fsck できれいで、
+/// `PERSIST_SCRIPT` が書いたファイルがあることを確かめる(write-back のキャッシュを、終わるときに書いたか)
+fn check_persisted() -> Result<(), String> {
+    let disk = std::fs::read(root().join(xtask::VIRT_DISK)).map_err(|e| e.to_string())?;
+    // MBR の 2 つ目のパーティション(開始位置と大きさ)
+    let entry = &disk[446 + 16..462 + 16];
+    let start = u32::from_le_bytes(entry[8..12].try_into().unwrap()) as usize * 512;
+    let len = u32::from_le_bytes(entry[12..16].try_into().unwrap()) as usize * 512;
+    let part = root().join("target/compat-p2.img");
+    std::fs::write(&part, &disk[start..start + len]).map_err(|e| e.to_string())?;
+    let fsck = Command::new("e2fsck")
+        .arg("-fn")
+        .arg(&part)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !fsck.status.success() {
+        return Err(format!(
+            "e2fsck:\n{}",
+            String::from_utf8_lossy(&fsck.stdout)
+        ));
+    }
+    let cat = Command::new("debugfs")
+        .args(["-R", "cat /compat-persist.txt"])
+        .arg(&part)
+        .output()
+        .map_err(|e| e.to_string())?;
+    let want: String = (1..=500).map(|i| format!("{i}\n")).collect();
+    if String::from_utf8_lossy(&cat.stdout) != want {
+        return Err("/compat-persist.txt is missing or wrong".to_string());
+    }
+    Ok(())
+}
+
 /// 互換テスト:それぞれのケースを Linux(qemu-aarch64)で動かし、次に Pi-OS で
 /// (init を互換テスト用のスクリプトに差し替えたディスクで)まとめて動かして、出力と終了コードを比べる
 fn compat(cases: &[(String, Vec<String>)], cmd: &Cmd) -> Result<(), String> {
@@ -222,7 +258,8 @@ fn compat(cases: &[(String, Vec<String>)], cmd: &Cmd) -> Result<(), String> {
                 "etc/init.rc",
                 "/bin/busybox sh /etc/compat.sh\n".to_string(),
             ),
-            ("etc/compat.sh", script),
+            // 最後に ext2(ルート)に書く:終わるときにキャッシュがディスクに書かれたかを、後で確かめる
+            ("etc/compat.sh", script + PERSIST_SCRIPT),
         ],
     )?;
     let out = Command::new(&cmd.program)
@@ -232,6 +269,7 @@ fn compat(cases: &[(String, Vec<String>)], cmd: &Cmd) -> Result<(), String> {
         .output()
         .map_err(|e| e.to_string())?;
     let pios = xtask::split_compat_output(&String::from_utf8_lossy(&out.stdout));
+    let persisted = check_persisted();
 
     let mut failed = 0;
     for (i, (prog, args)) in cases.iter().enumerate() {
@@ -260,11 +298,15 @@ fn compat(cases: &[(String, Vec<String>)], cmd: &Cmd) -> Result<(), String> {
             }
         }
     }
+    match &persisted {
+        Ok(()) => println!("ok   writes reached the disk (e2fsck clean)"),
+        Err(e) => {
+            println!("FAIL writes did not reach the disk: {e}");
+            failed += 1;
+        }
+    }
     if failed > 0 {
-        Err(format!(
-            "compat: {failed} of {} case(s) differ",
-            cases.len()
-        ))
+        Err(format!("compat: {failed} check(s) failed"))
     } else {
         println!("compat: all {} case(s) match Linux", cases.len());
         Ok(())

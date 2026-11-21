@@ -29,6 +29,15 @@ pub fn register(name: &str, dev: SharedDisk) {
     DISKS.lock().push((String::from(name), dev));
 }
 
+/// 登録したすべてのディスクの、まだ書いていないもの(write-back のキャッシュ)を書く
+pub fn sync_all() -> Result<(), crate::Errno> {
+    let disks: Vec<SharedDisk> = DISKS.lock().iter().map(|(_, d)| d.clone()).collect();
+    for d in disks {
+        d.lock().flush().map_err(|_| crate::Errno::EIO)?;
+    }
+    Ok(())
+}
+
 pub fn find(name: &str) -> Option<SharedDisk> {
     DISKS
         .lock()
@@ -83,6 +92,10 @@ impl BlockDevice for PartitionDevice {
     ) -> Result<(), hal::block::BlockError> {
         let lba = self.map(lba)?;
         self.disk.lock().write_block(lba, buf)
+    }
+
+    fn flush(&mut self) -> Result<(), hal::block::BlockError> {
+        self.disk.lock().flush()
     }
 }
 

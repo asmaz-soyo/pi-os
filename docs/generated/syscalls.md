@@ -41,6 +41,9 @@
 | 78 | `readlinkat` | 4 |
 | 79 | `newfstatat` | 4 |
 | 80 | `fstat` | 2 |
+| 81 | `sync` | 0 |
+| 82 | `fsync` | 1 |
+| 83 | `fdatasync` | 1 |
 | 85 | `timerfd_create` | 2 |
 | 86 | `timerfd_settime` | 4 |
 | 87 | `timerfd_gettime` | 2 |
@@ -81,4 +84,4 @@
 | 276 | `renameat2` | 5 |
 | 278 | `getrandom` | 3 |
 
-合計 75 個
+合計 78 個

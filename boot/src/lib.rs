@@ -191,9 +191,12 @@ fn probe_virtio<B: Board>() {
             Some(dev) => {
                 let name = alloc::format!("vd{}", next as char);
                 kernel::println!("virtio-blk: /dev/{name}, {} sectors", dev.capacity());
-                // 最近読んだ 256 セクタ(128KB)をメモリに残す(書き込みはそのままディスクへ)
-                let cached =
-                    kernel::block::cache::CachedDevice::new(alloc::boxed::Box::new(dev), 256);
+                // 最近使った 256 セクタ(128KB)をメモリに残す。書き込みは sync するときと、
+                // そのセクタを捨てるときにディスクへ(write-back)
+                let cached = kernel::block::cache::CachedDevice::write_back(
+                    alloc::boxed::Box::new(dev),
+                    256,
+                );
                 kernel::block::register(
                     &name,
                     kernel::block::shared(alloc::boxed::Box::new(cached)),
@@ -277,6 +280,14 @@ pub fn panic(info: &core::panic::PanicInfo) -> ! {
 ///
 /// QEMU 用のビルド(`semihosting` feature)ならセミホスティングで終了コードを返す。
 /// 実機にはその仕組みがないので、メッセージを出して止まる。
+/// ディスクに書いていないものを書いてから、終了する(パニックではない、ふつうの終わり方)。
+pub fn shutdown(code: u32) -> ! {
+    if let Err(e) = kernel::block::sync_all() {
+        kernel::println!("sync failed: {e:?}");
+    }
+    exit(code)
+}
+
 pub fn exit(code: u32) -> ! {
     if cfg!(feature = "semihosting") {
         arch_aarch64::semihosting::exit(code)

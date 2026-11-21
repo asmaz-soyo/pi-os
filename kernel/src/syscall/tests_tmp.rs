@@ -298,3 +298,16 @@ fn a_bad_directory_fd_is_ebadf_or_enotdir() {
         err(Errno::EBADF)
     );
 }
+
+#[test]
+fn sync_and_fsync_succeed_on_open_files() {
+    let (mut p, _) = process();
+    let fd = open(&mut p, b"/tmp/s", O_CREAT | O_WRONLY);
+    assert_eq!(call(&mut p, nr::SYNC, [0; 6]), 0);
+    assert_eq!(call(&mut p, nr::FSYNC, [fd, 0, 0, 0, 0, 0]), 0);
+    assert_eq!(call(&mut p, nr::FDATASYNC, [fd, 0, 0, 0, 0, 0]), 0);
+    assert_eq!(
+        call(&mut p, nr::FSYNC, [99, 0, 0, 0, 0, 0]),
+        err(Errno::EBADF)
+    );
+}

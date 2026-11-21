@@ -11,6 +11,10 @@ pub trait BlockDevice: Send {
     fn read_block(&mut self, lba: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlockError>;
     /// `buf` をブロック `lba` に書く
     fn write_block(&mut self, lba: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlockError>;
+    /// まだディスクに書いていないもの(キャッシュの中など)を書く
+    fn flush(&mut self) -> Result<(), BlockError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

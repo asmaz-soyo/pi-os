@@ -51,6 +51,9 @@ pub mod nr {
     pub const PPOLL: u64 = 73;
     pub const READLINKAT: u64 = 78;
     pub const NEWFSTATAT: u64 = 79;
+    pub const SYNC: u64 = 81;
+    pub const FSYNC: u64 = 82;
+    pub const FDATASYNC: u64 = 83;
     pub const FSTAT: u64 = 80;
     pub const TIMERFD_CREATE: u64 = 85;
     pub const TIMERFD_SETTIME: u64 = 86;
@@ -227,6 +230,12 @@ table! {
     nr::READLINKAT, "readlinkat", 4 => |p, a| result(fs::readlinkat(p, a[0], a[1], a[2], a[3]));
     nr::NEWFSTATAT, "newfstatat", 4 => |p, a| result(fs::newfstatat(p, a[0], a[1], a[2], a[3]));
     nr::FSTAT, "fstat", 2 => |p, a| result(fs::fstat(p, a[0], a[1]));
+    // sync:キャッシュに残っている書き込みを、すべてのディスクに書く
+    nr::SYNC, "sync", 0 => |p, a| result(crate::block::sync_all().map(|_| 0));
+    // fsync / fdatasync:今はファイルごとではなく、すべてのディスクを書く
+    nr::FSYNC, "fsync", 1 => |p, a| result(p.fds.get(a[0]).and_then(|_| crate::block::sync_all()).map(|_| 0));
+    nr::FDATASYNC, "fdatasync", 1
+        => |p, a| result(p.fds.get(a[0]).and_then(|_| crate::block::sync_all()).map(|_| 0));
     nr::TIMERFD_CREATE, "timerfd_create", 2 => |p, a| result(time::timerfd_create(p));
     nr::TIMERFD_SETTIME, "timerfd_settime", 4
         => |p, a| result(time::timerfd_settime(p, a[0], a[1], a[2], a[3]));
