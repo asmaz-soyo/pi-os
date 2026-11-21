@@ -560,6 +560,16 @@ impl Inner {
             let mid = self.slot(inode, inode.blocks[13], i / per)?;
             return self.slot(inode, mid, i % per);
         }
+        // 3 段の間接(1KB のブロックなら、約 64MB から先)
+        let i = i - per * per;
+        if i < per * per * per {
+            if inode.blocks[14] == 0 {
+                inode.blocks[14] = self.alloc_for(inode)?;
+            }
+            let top = self.slot(inode, inode.blocks[14], i / (per * per))?;
+            let mid = self.slot(inode, top, (i / per) % per)?;
+            return self.slot(inode, mid, i % per);
+        }
         Err(Errno::EFBIG)
     }
 
@@ -578,6 +588,46 @@ impl Inner {
     }
 
     /// `keep` 番目以降のブロックを返す(間接ブロックも、中が空になれば返す)
+    /// 間接ブロック `table`(`depth` 段:1 なら中身はデータのブロックの番号)が受け持つ範囲のうち、
+    /// 相対位置 `keep` から先のブロックを返す。`keep` が 0 なら `table` 自身も返す
+    fn free_indirect(
+        &self,
+        inode: &mut Inode,
+        table: u32,
+        depth: u32,
+        keep: u64,
+    ) -> Result<(), Errno> {
+        let per = self.block_size / 4;
+        let unit = (self.block_size / 512) as u32;
+        // 1 つの項目が受け持つブロックの数
+        let span = per.pow(depth - 1);
+        for i in 0..per {
+            let start = i * span;
+            if start + span <= keep {
+                continue; // まるごと残す
+            }
+            let b = self.read_u32(table, i)?;
+            if b == 0 {
+                continue;
+            }
+            let child_keep = keep.saturating_sub(start);
+            if depth == 1 {
+                self.free_block(b)?;
+                inode.sectors -= unit;
+            } else {
+                self.free_indirect(inode, b, depth - 1, child_keep)?;
+            }
+            if depth == 1 || child_keep == 0 {
+                self.write_bytes(table as u64 * self.block_size + i * 4, &[0; 4])?;
+            }
+        }
+        if keep == 0 {
+            self.free_block(table)?;
+            inode.sectors -= unit;
+        }
+        Ok(())
+    }
+
     fn free_from(&self, inode: &mut Inode, keep: u64) -> Result<(), Errno> {
         let per = self.block_size / 4;
         let unit = (self.block_size / 512) as u32;
@@ -588,50 +638,15 @@ impl Inner {
                 inode.sectors -= unit;
             }
         }
-        // 1 段の間接:ファイルのブロック 12 から per 個
-        if inode.blocks[12] != 0 {
-            let first = keep.saturating_sub(12);
-            for i in first..per {
-                let b = self.read_u32(inode.blocks[12], i)?;
-                if b != 0 {
-                    self.free_block(b)?;
-                    self.write_bytes(inode.blocks[12] as u64 * self.block_size + i * 4, &[0; 4])?;
-                    inode.sectors -= unit;
+        // 1 段、2 段、3 段の間接:ファイルのブロック 12、12 + per、12 + per + per² から
+        let starts = [12, 12 + per, 12 + per + per * per];
+        for (slot, depth) in [(12usize, 1u32), (13, 2), (14, 3)] {
+            if inode.blocks[slot] != 0 {
+                let rel = keep.saturating_sub(starts[slot - 12]);
+                self.free_indirect(inode, inode.blocks[slot], depth, rel)?;
+                if rel == 0 {
+                    inode.blocks[slot] = 0;
                 }
-            }
-            if first == 0 {
-                self.free_block(inode.blocks[12])?;
-                inode.blocks[12] = 0;
-                inode.sectors -= unit;
-            }
-        }
-        // 2 段の間接:ファイルのブロック 12 + per から
-        if inode.blocks[13] != 0 {
-            let first = keep.saturating_sub(12 + per);
-            for m in 0..per {
-                let mid = self.read_u32(inode.blocks[13], m)?;
-                if mid == 0 {
-                    continue;
-                }
-                let start = first.saturating_sub(m * per).min(per);
-                for i in start..per {
-                    let b = self.read_u32(mid, i)?;
-                    if b != 0 {
-                        self.free_block(b)?;
-                        self.write_bytes(mid as u64 * self.block_size + i * 4, &[0; 4])?;
-                        inode.sectors -= unit;
-                    }
-                }
-                if start == 0 {
-                    self.free_block(mid)?;
-                    self.write_bytes(inode.blocks[13] as u64 * self.block_size + m * 4, &[0; 4])?;
-                    inode.sectors -= unit;
-                }
-            }
-            if first == 0 {
-                self.free_block(inode.blocks[13])?;
-                inode.blocks[13] = 0;
-                inode.sectors -= unit;
             }
         }
         Ok(())
@@ -2538,6 +2553,28 @@ mod write_tests {
         );
         fsck(&disk);
         fs.unlink("/q", false).unwrap();
+        fsck(&disk);
+    }
+
+    #[test]
+    fn files_beyond_64_mib_use_the_triple_indirect_block() {
+        // 1KB のブロックでは、直接 12 + 1 段 256 + 2 段 65536 ブロック(約 64MB)の先は 3 段の間接
+        let disk = blank();
+        let fs = Ext2::new(disk.clone()).unwrap();
+        let f = fs.create("/huge", 0o644).unwrap();
+        let far = 70 * 1024 * 1024u64; // 70MB の位置(間は穴:ブロックを使わない)
+        assert_eq!(f.write(far, b"the end"), Ok(7));
+        assert_eq!(f.stat().size, far + 7);
+        let mut buf = [0u8; 7];
+        assert_eq!(f.read(far, &mut buf), Ok(7));
+        assert_eq!(&buf, b"the end");
+        // 穴は 0 として読める
+        assert_eq!(f.read(far - 7, &mut buf), Ok(7));
+        assert_eq!(buf, [0; 7]);
+        fsck(&disk);
+        // 切り詰めると、3 段の間接ブロックも全部返す
+        f.truncate(0).unwrap();
+        assert_eq!(f.stat().size, 0);
         fsck(&disk);
     }
 }
