@@ -226,7 +226,10 @@ fn user_task_entry(arg: usize) {
 }
 
 /// プログラム `image` を `argv` で新しいプロセスとして動かし始める。
-pub fn spawn_user(image: &[u8], argv: &[&[u8]]) -> Result<kernel::process::Pid, Errno> {
+pub fn spawn_user(
+    image: &(impl kernel::exec::Image + ?Sized),
+    argv: &[&[u8]],
+) -> Result<kernel::process::Pid, Errno> {
     let space = Box::new(UserSpace::new()?);
     let mut mem = UserMemory::new(space, &KERNEL_PHYS);
     let seed = arch_aarch64::cpu::counter();
@@ -365,8 +368,8 @@ pub fn spawn_program(path: &str, argv: &[&[u8]]) -> Result<kernel::process::Pid,
     let file = vfs().0.lookup(path)?;
     // init は root として動く(ADR-0005)。root でも実行ビットのないファイルは実行できない
     kernel::cred::Credentials::root().check(&file.stat(), kernel::cred::Access::EXEC)?;
-    let image = kernel::exec::read_image(&*file)?;
-    spawn_user(&image, argv)
+    // ファイルから少しずつ読み込む(全体をカーネルのヒープに置かない)
+    spawn_user(&*file, argv)
 }
 
 /// プログラム `path` を実行し、終了ステータスを返す。

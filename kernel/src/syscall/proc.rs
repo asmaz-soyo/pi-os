@@ -84,8 +84,10 @@ fn exec_inner(p: &mut Process, path: u64, argv: u64, envp: u64) -> Result<(u64, 
         if file.stat().kind != crate::fs::vfs::FileKind::Regular {
             return Err(Errno::EACCES);
         }
-        let bytes = crate::exec::read_image(&*file)?;
-        match shebang(&bytes) {
+        // 先頭の 1 行だけを見る(シバンの行は 256 バイトまで)
+        let mut head = [0u8; 256];
+        let n = file.read(0, &mut head)?;
+        match shebang(&head[..n]) {
             Some((interp, arg)) => {
                 let mut new_argv = alloc::vec![interp.clone().into_bytes()];
                 if let Some(arg) = arg {
@@ -97,7 +99,7 @@ fn exec_inner(p: &mut Process, path: u64, argv: u64, envp: u64) -> Result<(u64, 
                 path = interp;
             }
             None => {
-                image = Some(bytes);
+                image = Some(file);
                 break;
             }
         }
@@ -109,7 +111,8 @@ fn exec_inner(p: &mut Process, path: u64, argv: u64, envp: u64) -> Result<(u64, 
     let envp_refs: Vec<&[u8]> = envp.iter().map(Vec::as_slice).collect();
     let mut random = [0u8; 16];
     super::misc::fill_random(&mut random);
-    let loaded = crate::exec::load(&mut mem, &image, &argv_refs, &envp_refs, random)?;
+    // ファイルから少しずつ読んで読み込む(全体をカーネルのヒープに置かない)
+    let loaded = crate::exec::load(&mut mem, &*image, &argv_refs, &envp_refs, random)?;
     p.mem = mem;
     p.fds.close_on_exec();
     p.name = String::from(path.rsplit('/').next().unwrap_or(&path));

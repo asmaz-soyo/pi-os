@@ -31,12 +31,13 @@ const PHDR_SIZE: usize = 56;
 
 /// メモリに置く1つの区画。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Segment<'a> {
+pub struct Segment {
     pub vaddr: u64,
-    /// メモリ上の大きさ。`data` より大きければ、残りは 0 で埋める(.bss)
+    /// メモリ上の大きさ。`filesz` より大きければ、残りは 0 で埋める(.bss)
     pub memsz: u64,
-    /// ファイルから写す中身
-    pub data: &'a [u8],
+    /// ファイルのこの位置から `filesz` バイトを写す
+    pub offset: u64,
+    pub filesz: u64,
     pub flags: MapFlags,
 }
 
@@ -93,8 +94,18 @@ fn flags_of(pf: u32) -> MapFlags {
     }
 }
 
-/// 実行ファイルを検証して読み取る。動かせないものは `ENOEXEC`。
-pub fn parse(bytes: &[u8]) -> Result<Elf<'_>, Errno> {
+/// プログラムヘッダの終わりまでのバイト数(ELF ヘッダだけから分かる)。
+/// 実行ファイルの先頭をこれだけ読めば `parse` できる。
+pub fn headers_len(ehdr: &[u8]) -> Option<usize> {
+    let phoff = u64_at(ehdr, 32)? as usize;
+    let phent = u16_at(ehdr, 54)? as usize;
+    let phnum = u16_at(ehdr, 56)? as usize;
+    phoff.checked_add(phent.checked_mul(phnum)?)
+}
+
+/// 実行ファイルを検証して読み取る。`bytes` はファイルの先頭(少なくともプログラムヘッダの終わりまで)、
+/// `file_size` はファイル全体の大きさ。動かせないものは `ENOEXEC`。
+pub fn parse(bytes: &[u8], file_size: u64) -> Result<Elf<'_>, Errno> {
     let bad = Errno::ENOEXEC;
     if bytes.len() < EHDR_SIZE || &bytes[0..4] != b"\x7fELF" {
         return Err(bad);
@@ -126,7 +137,7 @@ pub fn parse(bytes: &[u8]) -> Result<Elf<'_>, Errno> {
             PT_LOAD => {
                 let file_end = ph.offset.checked_add(ph.filesz).ok_or(bad)?;
                 let mem_end = ph.vaddr.checked_add(ph.memsz).ok_or(bad)?;
-                if file_end > bytes.len() as u64 || ph.filesz > ph.memsz || mem_end > USER_END {
+                if file_end > file_size || ph.filesz > ph.memsz || mem_end > USER_END {
                     return Err(bad);
                 }
                 // このセグメントがプログラムヘッダを含んでいれば、その仮想アドレスを覚えておく
@@ -150,14 +161,15 @@ pub fn parse(bytes: &[u8]) -> Result<Elf<'_>, Errno> {
 
 impl<'a> Elf<'a> {
     /// 読み込むセグメント(PT_LOAD)の一覧。
-    pub fn segments(&self) -> impl Iterator<Item = Segment<'a>> + '_ {
+    pub fn segments(&self) -> impl Iterator<Item = Segment> + '_ {
         (0..self.phnum)
             .filter_map(|i| phdr_at(self.bytes, self.phoff + i * self.phent))
             .filter(|ph| ph.kind == PT_LOAD)
             .map(|ph| Segment {
                 vaddr: ph.vaddr,
                 memsz: ph.memsz,
-                data: &self.bytes[ph.offset as usize..(ph.offset + ph.filesz) as usize],
+                offset: ph.offset,
+                filesz: ph.filesz,
                 flags: flags_of(ph.flags),
             })
     }
@@ -185,12 +197,15 @@ mod tests {
                 (PT_LOAD, PF_R, 0x42_0000, b"ro", 2),
             ],
         );
-        let elf = parse(&bytes).unwrap();
+        let elf = parse(&bytes, bytes.len() as u64).unwrap();
         assert_eq!(elf.entry, 0x40_1000);
         let segs: Vec<_> = elf.segments().collect();
         assert_eq!(segs.len(), 3);
         assert_eq!(segs[0].vaddr, 0x40_0000);
-        assert_eq!(segs[0].data, b"code");
+        assert_eq!(
+            &bytes[segs[0].offset as usize..][..segs[0].filesz as usize],
+            b"code"
+        );
         assert_eq!(segs[0].flags, MapFlags::USER_RX);
         assert_eq!(segs[1].memsz, 0x2000);
         assert_eq!(segs[1].flags, MapFlags::USER_RW);
@@ -201,7 +216,7 @@ mod tests {
     fn program_header_location_is_reported_for_the_aux_vector() {
         // ファイルの先頭(ヘッダ込み)を読み込む PT_LOAD があれば、AT_PHDR はその中の位置になる
         let bytes = build(EM_AARCH64, &[(PT_LOAD, RX, 0x40_0000, b"x", 1)]);
-        let elf = parse(&bytes).unwrap();
+        let elf = parse(&bytes, bytes.len() as u64).unwrap();
         assert_eq!(elf.phnum, 1);
         assert_eq!(elf.phent, 56);
         // 最初のセグメントのファイル上の位置は 64 + 56 = 120 なので、ヘッダは含まれない
@@ -210,32 +225,48 @@ mod tests {
 
     #[test]
     fn rejects_non_elf_and_foreign_machines() {
-        assert_eq!(parse(b"not an elf at all").err(), Some(Errno::ENOEXEC));
+        assert_eq!(parse(b"not an elf at all", 17).err(), Some(Errno::ENOEXEC));
         let x86 = build(62, &[(PT_LOAD, RX, 0x40_0000, b"x", 1)]);
-        assert_eq!(parse(&x86).err(), Some(Errno::ENOEXEC));
+        assert_eq!(parse(&x86, x86.len() as u64).err(), Some(Errno::ENOEXEC));
         let mut elf32 = build(EM_AARCH64, &[]);
         elf32[4] = 1;
-        assert_eq!(parse(&elf32).err(), Some(Errno::ENOEXEC));
+        assert_eq!(
+            parse(&elf32, elf32.len() as u64).err(),
+            Some(Errno::ENOEXEC)
+        );
     }
 
     #[test]
     fn rejects_truncated_files() {
         let bytes = build(EM_AARCH64, &[(PT_LOAD, RX, 0x40_0000, b"code", 4)]);
-        assert_eq!(parse(&bytes[..100]).err(), Some(Errno::ENOEXEC));
-        assert_eq!(parse(&bytes[..bytes.len() - 1]).err(), Some(Errno::ENOEXEC));
+        assert_eq!(parse(&bytes[..100], 100).err(), Some(Errno::ENOEXEC));
+        assert_eq!(
+            parse(&bytes, bytes.len() as u64 - 1).err(),
+            Some(Errno::ENOEXEC)
+        );
     }
 
     #[test]
     fn rejects_dynamically_linked_programs() {
         let bytes = build(EM_AARCH64, &[(PT_INTERP, PF_R, 0, b"/lib/ld.so", 10)]);
-        assert_eq!(parse(&bytes).err(), Some(Errno::ENOEXEC));
+        assert_eq!(
+            parse(&bytes, bytes.len() as u64).err(),
+            Some(Errno::ENOEXEC)
+        );
     }
 
     #[test]
     fn rejects_segments_outside_user_space() {
         let bytes = build(EM_AARCH64, &[(PT_LOAD, RW, 0xffff_0000_0000_0000, b"x", 1)]);
-        assert_eq!(parse(&bytes).err(), Some(Errno::ENOEXEC));
+        assert_eq!(
+            parse(&bytes, bytes.len() as u64).err(),
+            Some(Errno::ENOEXEC)
+        );
         let bytes = build(EM_AARCH64, &[(PT_LOAD, RW, 0x40_0000, b"xx", 1)]);
-        assert_eq!(parse(&bytes).err(), Some(Errno::ENOEXEC), "filesz > memsz");
+        assert_eq!(
+            parse(&bytes, bytes.len() as u64).err(),
+            Some(Errno::ENOEXEC),
+            "filesz > memsz"
+        );
     }
 }

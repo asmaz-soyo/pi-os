@@ -62,14 +62,70 @@ pub fn read_image(
     Ok(alloc::borrow::Cow::Owned(buf))
 }
 
+/// 実行ファイル:好きな位置から読めるもの。中身を全部メモリに置かなくても読み込める
+/// (大きなプログラムを、カーネルのヒープに丸ごと読まずに済む)。
+pub trait Image {
+    fn size(&self) -> u64;
+    /// `offset` から `buf` に読み、読めたバイト数を返す(終わりなら 0)
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Errno>;
+}
+
+impl Image for [u8] {
+    fn size(&self) -> u64 {
+        self.len() as u64
+    }
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        let start = (offset as usize).min(self.len());
+        let n = buf.len().min(self.len() - start);
+        buf[..n].copy_from_slice(&self[start..start + n]);
+        Ok(n)
+    }
+}
+
+impl Image for dyn crate::fs::vfs::File {
+    fn size(&self) -> u64 {
+        self.stat().size
+    }
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        self.read(offset, buf)
+    }
+}
+
+/// `offset` から `buf` を埋めるまで読む(足りなければ ENOEXEC)
+fn read_exact(image: &(impl Image + ?Sized), offset: u64, buf: &mut [u8]) -> Result<(), Errno> {
+    let mut done = 0;
+    while done < buf.len() {
+        match image.read_at(offset + done as u64, &mut buf[done..])? {
+            0 => return Err(Errno::ENOEXEC),
+            n => done += n,
+        }
+    }
+    Ok(())
+}
+
+/// 一度に読む大きさ(1 ページ)
+const CHUNK: usize = 4096;
+
 pub fn load(
     mem: &mut UserMemory,
-    image: &[u8],
+    image: &(impl Image + ?Sized),
     argv: &[&[u8]],
     envp: &[&[u8]],
     random: [u8; 16],
 ) -> Result<Loaded, Errno> {
-    let elf = elf::parse(image)?;
+    // ELF ヘッダとプログラムヘッダだけを読む
+    let size = image.size();
+    let mut head = alloc::vec![0u8; (size as usize).min(64)];
+    read_exact(image, 0, &mut head)?;
+    let len = elf::headers_len(&head).ok_or(Errno::ENOEXEC)?;
+    if len as u64 > size || len > 64 * 1024 {
+        return Err(Errno::ENOEXEC);
+    }
+    if len > head.len() {
+        head.resize(len, 0);
+        read_exact(image, 64, &mut head[64..])?;
+    }
+    let elf = elf::parse(&head, size)?;
     let mut brk = 0;
     for seg in elf.segments() {
         // 1つのページを2つのセグメントが共有することがある。書き込める方の権限でまとめる
@@ -79,7 +135,15 @@ pub fn load(
             seg.flags
         };
         mem.map_zeroed(VirtAddr(seg.vaddr), seg.memsz, flags)?;
-        mem.load(VirtAddr(seg.vaddr), seg.data)?;
+        // 中身はファイルから 1 ページずつ写す
+        let mut chunk = [0u8; CHUNK];
+        let mut done = 0;
+        while done < seg.filesz {
+            let n = (seg.filesz - done).min(CHUNK as u64) as usize;
+            read_exact(image, seg.offset + done, &mut chunk[..n])?;
+            mem.load(VirtAddr(seg.vaddr + done), &chunk[..n])?;
+            done += n as u64;
+        }
         brk = brk.max(VirtAddr(seg.vaddr + seg.memsz).align_up().0);
     }
     mem.map_zeroed(
@@ -195,7 +259,7 @@ mod tests {
     #[test]
     fn loads_segments_and_zero_fills_bss() {
         let (mut mem, _) = memory();
-        let loaded = load(&mut mem, &sample(), &[b"prog"], &[], [7; 16]).unwrap();
+        let loaded = load(&mut mem, sample().as_slice(), &[b"prog"], &[], [7; 16]).unwrap();
         assert_eq!(loaded.entry, 0x40_1000);
         let mut buf = [0u8; 4];
         mem.copy_from_user(VirtAddr(0x40_0000), &mut buf).unwrap();
@@ -211,7 +275,7 @@ mod tests {
     #[test]
     fn code_pages_are_not_writable_by_the_user() {
         let (mut mem, _) = memory();
-        load(&mut mem, &sample(), &[b"prog"], &[], [0; 16]).unwrap();
+        load(&mut mem, sample().as_slice(), &[b"prog"], &[], [0; 16]).unwrap();
         assert_eq!(
             mem.copy_to_user(VirtAddr(0x40_0000), b"x"),
             Err(Errno::EFAULT)
@@ -223,7 +287,7 @@ mod tests {
         let (mut mem, _) = memory();
         let loaded = load(
             &mut mem,
-            &sample(),
+            sample().as_slice(),
             &[b"qjs", b"hello.js"],
             &[b"HOME=/"],
             [9; 16],
@@ -267,9 +331,49 @@ mod tests {
     fn invalid_images_are_rejected_without_mapping_anything() {
         let (mut mem, phys) = memory();
         assert_eq!(
-            load(&mut mem, b"garbage", &[], &[], [0; 16]).err(),
+            load(&mut mem, &b"garbage"[..], &[], &[], [0; 16]).err(),
             Some(Errno::ENOEXEC)
         );
         assert_eq!(phys.live_frames(), 0);
+    }
+
+    /// 読まれた長さの最大を覚える実行ファイル
+    struct Counting {
+        bytes: std::vec::Vec<u8>,
+        largest: core::cell::Cell<usize>,
+    }
+
+    impl Image for Counting {
+        fn size(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+            self.largest.set(self.largest.get().max(buf.len()));
+            self.bytes.as_slice().read_at(offset, buf)
+        }
+    }
+
+    #[test]
+    fn big_segments_are_copied_in_pieces_not_read_whole() {
+        // 64KiB のデータを持つプログラムでも、カーネルは 1 ページずつしか読まない
+        let data: std::vec::Vec<u8> = (0..65536u32).map(|i| (i % 251) as u8).collect();
+        let image = Counting {
+            bytes: build(
+                EM_AARCH64,
+                &[(PT_LOAD, PF_R | PF_W, 0x40_0000, &data, 65536)],
+            ),
+            largest: core::cell::Cell::new(0),
+        };
+        let (mut mem, _) = memory();
+        load(&mut mem, &image, &[b"big"], &[], [0; 16]).unwrap();
+        assert!(
+            image.largest.get() <= 4096,
+            "read {} bytes at once",
+            image.largest.get()
+        );
+        let mut buf = [0u8; 16];
+        mem.copy_from_user(VirtAddr(0x40_0000 + 60000), &mut buf)
+            .unwrap();
+        assert_eq!(&buf[..], &data[60000..60016]);
     }
 }
