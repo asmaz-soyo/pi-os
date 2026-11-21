@@ -11,6 +11,8 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -46,6 +48,8 @@ static const char *errname(int e) {
     case ENOTCONN: return "ENOTCONN";
     case ECONNREFUSED: return "ECONNREFUSED";
     case EAGAIN: return "EAGAIN";
+    case EADDRNOTAVAIL: return "EADDRNOTAVAIL";
+    case ECONNRESET: return "ECONNRESET";
     default: return "?";
     }
 }
@@ -307,6 +311,43 @@ int main(int argc, char **argv) {
     show("connect missing", connect(cli, (struct sockaddr *)&sa, sizeof sa));
     close(cli);
     show("unlink srv", unlink("srv"));
+
+    // TCP(ループバック)。ポート番号は環境で変わるので出さない
+    struct sockaddr_in in = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    int ts = socket(AF_INET, SOCK_STREAM, 0);
+    show_fd("tcp socket", ts);
+    show("tcp bind port 0", bind(ts, (struct sockaddr *)&in, sizeof in));
+    socklen_t inlen = sizeof in;
+    getsockname(ts, (struct sockaddr *)&in, &inlen);
+    printf("tcp bound len = %d, port given = %d\n", (int)inlen, in.sin_port != 0);
+    show("tcp bind again", bind(ts, (struct sockaddr *)&in, sizeof in));
+    show("tcp listen", listen(ts, 4));
+    int tc = socket(AF_INET, SOCK_STREAM, 0);
+    show("tcp write unconnected", write(tc, "x", 1));
+    show("tcp connect", connect(tc, (struct sockaddr *)&in, sizeof in));
+    show("tcp connect again", connect(tc, (struct sockaddr *)&in, sizeof in));
+    struct sockaddr_in peer;
+    socklen_t plen = sizeof peer;
+    int ta = accept(ts, (struct sockaddr *)&peer, &plen);
+    show_fd("tcp accept", ta);
+    printf("tcp peer len = %d, family = %d, loopback = %d\n", (int)plen, peer.sin_family,
+           peer.sin_addr.s_addr == htonl(INADDR_LOOPBACK));
+    show("tcp write", write(tc, "hello tcp", 9));
+    show("tcp read", read(ta, buf, sizeof buf));
+    show("tcp shutdown wr", shutdown(tc, SHUT_WR));
+    show("tcp read eof", read(ta, buf, sizeof buf));
+    show("tcp write back", write(ta, "ok", 2));
+    show("tcp read back", read(tc, buf, sizeof buf));
+    struct sockaddr_in far = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(0x0a090807)};
+    show("tcp bind not local", bind(socket(AF_INET, SOCK_STREAM, 0), (struct sockaddr *)&far, sizeof far));
+    show("tcp bind short", bind(socket(AF_INET, SOCK_STREAM, 0), (struct sockaddr *)&in, 4));
+    close(ta);
+    close(tc);
+    close(ts);
+    tc = socket(AF_INET, SOCK_STREAM, 0);
+    show("tcp connect closed port", connect(tc, (struct sockaddr *)&in, sizeof in));
+    close(tc);
+    show("socketpair inet", socketpair(AF_INET, SOCK_STREAM, 0, sv));
 
     // プロセス
     pid_t c = fork();

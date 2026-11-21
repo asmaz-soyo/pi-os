@@ -379,6 +379,8 @@ mod tests_chmod;
 #[cfg(test)]
 mod tests_fifo;
 #[cfg(test)]
+mod tests_inet;
+#[cfg(test)]
 mod tests_link;
 #[cfg(test)]
 mod tests_mm;

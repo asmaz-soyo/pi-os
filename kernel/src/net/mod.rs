@@ -10,6 +10,7 @@
 //! socketpair(...)      ─┘
 //! ```
 
+pub mod inet;
 pub mod loopback;
 pub mod stack;
 pub mod unix;
@@ -98,7 +99,7 @@ pub trait Namespace {
 }
 
 /// 最初から入っているファミリー
-static BUILTIN: [(u32, &dyn ProtocolFamily); 1] = [(AF_UNIX, &unix::Unix)];
+static BUILTIN: [(u32, &dyn ProtocolFamily); 2] = [(AF_UNIX, &unix::Unix), (AF_INET, &inet::Inet)];
 
 /// あとから登録したファミリー(ネットワークスタックが起動時に足す)。
 /// 実装はずっと生きているので `'static` で持つ(動的に作るなら `Box::leak` する)

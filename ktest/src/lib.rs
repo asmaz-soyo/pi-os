@@ -279,6 +279,18 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn two_processes_talk_over_tcp_on_loopback() {
+            // サーバー(nc -l)を後ろで動かし、クライアントがつながるまで試し直す
+            // (シェルの wait は rt_sigsuspend を使うのでまだ使えない。受け取ったファイルができるまで待つ)
+            let script = b"nc -l -p 7300 < /dev/null > /tmp/got & \
+                for i in $(seq 20); do echo hello over tcp | nc 127.0.0.1 7300 && break; done; \
+                for i in $(seq 1000); do test -s /tmp/got && break; done; \
+                test \"$(cat /tmp/got)\" = \"hello over tcp\"";
+            let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
+            assert_eq!(boot::run_program("/bin/busybox", &argv), Ok(0));
+        }
+
+        #[test_case]
         fn dynamically_linked_programs_run_through_ld_musl() {
             assert_eq!(boot::run_program("/bin/dynhello", &[b"dynhello"]), Ok(0));
         }

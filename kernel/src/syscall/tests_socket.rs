@@ -81,14 +81,14 @@ fn unknown_families_and_types_are_rejected() {
         call(&mut p, nr::SOCKETPAIR, [99, SOCK_STREAM, 0, SCRATCH, 0, 0]),
         err(Errno::EAFNOSUPPORT)
     );
-    // AF_INET はまだない
+    // AF_INET に socketpair はない(Linux と同じ)
     assert_eq!(
         call(
             &mut p,
             nr::SOCKETPAIR,
             [AF_INET, SOCK_STREAM, 0, SCRATCH, 0, 0]
         ),
-        err(Errno::EAFNOSUPPORT)
+        err(Errno::EOPNOTSUPP)
     );
     assert_eq!(
         call(&mut p, nr::SOCKETPAIR, [AF_UNIX, 20, 0, SCRATCH, 0, 0]),
