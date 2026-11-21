@@ -66,7 +66,7 @@ pub fn openat(p: &mut Process, dirfd: u64, path: u64, flags: u64, mode: u64) -> 
                 p.cred.check(&dir.stat(), Access::WRITE | Access::EXEC)?;
             }
             let file = p.vfs.create(&path, mode as u32 & 0o7777 & !p.umask)?;
-            own_new(p, &*file)?;
+            own_new(p, &*file, &path)?;
             file
         }
         Err(e) => return Err(e),
@@ -106,7 +106,7 @@ const AT_REMOVEDIR: u64 = 0x200;
 pub fn mkdirat(p: &mut Process, dirfd: u64, path: u64, mode: u64) -> Result<u64, Errno> {
     let path = path_arg(p, dirfd, path)?;
     p.vfs.mkdir(&path, mode as u32 & 0o7777 & !p.umask)?;
-    own_new(p, &*p.vfs.lookup_nofollow(&path)?)?;
+    own_new(p, &*p.vfs.lookup_nofollow(&path)?, &path)?;
     Ok(0)
 }
 
@@ -610,9 +610,19 @@ pub fn utimensat(
 }
 
 /// 新しく作ったものを、作ったプロセスの持ち主(実効 uid と gid)にする
-fn own_new(p: &Process, file: &dyn vfs::File) -> Result<(), Errno> {
-    if p.cred.euid != 0 || p.cred.egid != 0 {
-        file.set_owner(p.cred.euid, p.cred.egid)?;
+/// 親ディレクトリに setgid(0o2000)があれば、グループは親のグループにし、
+/// 作ったものがディレクトリなら setgid も受け継がせる(共有ディレクトリ)
+fn own_new(p: &Process, file: &dyn vfs::File, path: &str) -> Result<(), Errno> {
+    const S_ISGID: u32 = 0o2000;
+    let parent = p.vfs.lookup(&vfs::normalize(path, ".."))?.stat();
+    let shared = parent.mode & S_ISGID != 0;
+    let gid = if shared { parent.gid } else { p.cred.egid };
+    let st = file.stat();
+    if (st.uid, st.gid) != (p.cred.euid, gid) {
+        file.set_owner(p.cred.euid, gid)?;
+    }
+    if shared && st.kind == FileKind::Directory {
+        file.set_mode(st.mode | S_ISGID)?;
     }
     Ok(())
 }
@@ -629,7 +639,7 @@ pub fn symlinkat(p: &mut Process, target: u64, dirfd: u64, link: u64) -> Result<
     let dir = p.vfs.lookup(&vfs::normalize(&link, ".."))?;
     p.cred.check(&dir.stat(), Access::WRITE | Access::EXEC)?;
     p.vfs.symlink(&target, &link)?;
-    own_new(p, &*p.vfs.lookup_nofollow(&link)?)?;
+    own_new(p, &*p.vfs.lookup_nofollow(&link)?, &link)?;
     Ok(0)
 }
 

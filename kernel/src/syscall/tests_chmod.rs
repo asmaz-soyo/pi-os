@@ -145,3 +145,29 @@ fn the_owner_of_a_sticky_directory_may_remove_anything_in_it() {
     p.cred = crate::cred::Credentials::user(1000, 100);
     assert_eq!(unlink(&mut p, b"/tmp/share/theirs"), 0);
 }
+
+#[test]
+fn a_setgid_directory_passes_its_group_down() {
+    // 共有ディレクトリ:グループ 50 で setgid(2775)。中に作ったものはグループ 50 になる
+    let (mut p, _) = process();
+    let d = cstr(&mut p, b"/tmp/team");
+    assert_eq!(call(&mut p, nr::MKDIRAT, [AT_FDCWD, d, 0o777, 0, 0, 0]), 0);
+    assert_eq!(chown(&mut p, b"/tmp/team", 0, 50), 0);
+    assert_eq!(chmod(&mut p, b"/tmp/team", 0o2777), 0);
+    p.cred = crate::cred::Credentials::user(1000, 100);
+    create(&mut p, b"/tmp/team/notes");
+    assert_eq!(owner_and_mode(&mut p, b"/tmp/team/notes").1, 1000);
+    assert_eq!(owner_and_mode(&mut p, b"/tmp/team/notes").2, 50);
+    // 中のディレクトリも同じグループになり、setgid を受け継ぐ
+    let sub = cstr(&mut p, b"/tmp/team/sub");
+    assert_eq!(
+        call(&mut p, nr::MKDIRAT, [AT_FDCWD, sub, 0o755, 0, 0, 0]),
+        0
+    );
+    let (mode, _, gid) = owner_and_mode(&mut p, b"/tmp/team/sub");
+    assert_eq!(gid, 50);
+    assert_eq!(mode & 0o2000, 0o2000);
+    // ふつうのディレクトリでは、作った人のグループ
+    create(&mut p, b"/tmp/plain");
+    assert_eq!(owner_and_mode(&mut p, b"/tmp/plain").2, 100);
+}
