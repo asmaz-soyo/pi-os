@@ -159,9 +159,14 @@ macro_rules! common_tests {
 
         #[test_case]
         fn running_a_process_returns_all_its_frames() {
+            // 終わったタスクのカーネルスタックは、次にスケジューラが動いたときに返す。
+            // ほかのタスク(後ろで書き出すスレッドなど)がいつ動くかで返す時期がずれないよう、
+            // 測る前にスケジューラを一度通して、返し待ちを片付ける
             boot::run_program("/bin/exit42", &[b"exit42"]).unwrap();
+            kernel::sched::relax();
             let before = kernel::mm::frame_stats().0;
             boot::run_program("/bin/exit42", &[b"exit42"]).unwrap();
+            kernel::sched::relax();
             assert_eq!(kernel::mm::frame_stats().0, before);
         }
 

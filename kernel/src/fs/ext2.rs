@@ -143,6 +143,23 @@ impl Inner {
         Ok(())
     }
 
+    /// ファイルの中身を書く(data=ordered)。ジャーナルを通さず、本来の場所に直接書く。
+    /// トランザクションのメタデータがコミットされるより先にディスクに届くので、コミット済みの
+    /// メタデータが指す中身は必ずディスクにある。このブロックがトランザクションの表にあれば
+    /// (確保したときに 0 で埋めた、など)、表の中身と合わせて表から外す(外さないと、あとの
+    /// チェックポイントで中身を 0 で上書きしてしまう)
+    fn write_data(&self, block: u64, within: usize, data: &[u8]) -> Result<(), Errno> {
+        let bs = self.block_size;
+        let pending = self.tx.lock().as_mut().and_then(|t| t.remove(&block));
+        match pending {
+            Some(mut whole) => {
+                whole[within..within + data.len()].copy_from_slice(data);
+                self.raw_write(block * bs, &whole)
+            }
+            None => self.raw_write(block * bs + within as u64, data),
+        }
+    }
+
     /// ディスクから直接読む
     fn raw_read(&self, offset: u64, buf: &mut [u8]) -> Result<(), Errno> {
         let mut disk = self.disk.lock();
@@ -511,10 +528,7 @@ impl Inner {
             let within = pos % self.block_size;
             let n = ((self.block_size - within) as usize).min(data.len() - done);
             let block = self.block_for_write(inode, pos / self.block_size)?;
-            self.write_bytes(
-                block as u64 * self.block_size + within,
-                &data[done..done + n],
-            )?;
+            self.write_data(block as u64, within as usize, &data[done..done + n])?;
             done += n;
         }
         inode.size = inode.size.max(offset + data.len() as u64);
@@ -2224,5 +2238,44 @@ mod write_tests {
             drop(fs);
             fsck(&disk);
         }
+    }
+
+    #[test]
+    fn file_contents_are_written_once_not_through_the_journal() {
+        // data=ordered:ファイルの中身は本来の場所に 1 回だけ書く。ジャーナルにはメタデータだけ
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+        let fresh = {
+            let d = ext3_with_journal(&[]);
+            let mut v = Vec::new();
+            let mut sec = [0u8; BLOCK_SIZE];
+            let mut g = d.lock();
+            for lba in 0..g.block_count() {
+                g.read_block(lba, &mut sec).unwrap();
+                v.extend_from_slice(&sec);
+            }
+            v
+        };
+        let written = Arc::new(AtomicUsize::new(0));
+        let disk = Arc::new(crate::sync::SpinLock::new(RamDisk::from_bytes(&fresh)));
+        let dev = Crashing {
+            disk: disk.clone(),
+            budget: Arc::new(AtomicUsize::new(usize::MAX)),
+            written: written.clone(),
+        };
+        let fs = Ext2::new(shared(Box::new(dev))).unwrap();
+        let f = fs.create("/big", 0o644).unwrap();
+        written.store(0, Relaxed);
+        let data: Vec<u8> = (0..200 * 1024u32).map(|i| (i % 253) as u8).collect();
+        f.write(0, &data).unwrap();
+        let sectors = data.len() / BLOCK_SIZE;
+        let n = written.load(Relaxed);
+        assert!(
+            n < sectors * 13 / 10,
+            "{n} sector writes for {sectors} sectors of data"
+        );
+        drop(fs);
+        let fs = Ext2::new(shared(Box::new(RamDisk::from_bytes(&bytes_of(&disk))))).unwrap();
+        assert_eq!(read_all(&fs, "/big"), data);
     }
 }
