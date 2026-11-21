@@ -1,4 +1,4 @@
-//! AF_INET:IPv4 の TCP ソケット(中身は smoltcp)。今はループバック(127.0.0.0/8)だけ。
+//! AF_INET:IPv4 の TCP と UDP のソケット(中身は smoltcp)。今はループバック(127.0.0.0/8)だけ。
 //!
 //! Linux のソケットと smoltcp のソケットは、待ち受けの考え方が違う。
 //! - Linux:listen した 1 本のソケットが、何本もの接続を受ける(accept のたびに新しい fd)
@@ -11,7 +11,9 @@
 //! (ループバックは、送った側か受ける側のどちらかが必ず待っているので、これで回る)。
 
 use super::stack::Stack;
-use super::{Namespace, ProtocolFamily, SOCK_STREAM, Shutdown, Socket, split_type};
+use super::{
+    Namespace, Options, ProtocolFamily, SOCK_DGRAM, SOCK_STREAM, Shutdown, Socket, split_type,
+};
 use crate::Errno;
 use crate::fs::vfs::{File, FileKind, Stat};
 use crate::sync::SpinLock;
@@ -21,7 +23,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use smoltcp::iface::SocketHandle;
-use smoltcp::socket::tcp;
+use smoltcp::socket::{tcp, udp};
 use smoltcp::wire::{IpAddress, IpCidr, IpEndpoint, IpListenEndpoint, Ipv4Address};
 
 const AF_INET: u16 = super::AF_INET as u16;
@@ -35,8 +37,8 @@ const EPHEMERAL: core::ops::RangeInclusive<u16> = 49152..=65535;
 /// ネットワーク全体(今はループバックだけ)
 struct Net {
     lo: Stack,
-    /// 使っているポート
-    ports: BTreeSet<u16>,
+    /// 使っているポート(TCP と UDP は別々)
+    ports: BTreeSet<(Proto, u16)>,
     next_port: u16,
     /// 閉じた(close した)が、FIN のやりとりが残っているソケット
     closing: Vec<SocketHandle>,
@@ -85,7 +87,7 @@ impl Net {
     }
 
     /// 空いているポートを 1 つ振る
-    fn ephemeral(&mut self) -> Result<u16, Errno> {
+    fn ephemeral(&mut self, proto: Proto) -> Result<u16, Errno> {
         for _ in EPHEMERAL {
             let port = self.next_port;
             self.next_port = if port == *EPHEMERAL.end() {
@@ -93,7 +95,7 @@ impl Net {
             } else {
                 port + 1
             };
-            if self.ports.insert(port) {
+            if self.ports.insert((proto, port)) {
                 return Ok(port);
             }
         }
@@ -122,6 +124,13 @@ impl Net {
         .map_err(|_| Errno::EINVAL)?;
         Ok(self.lo.sockets.add(s))
     }
+}
+
+/// ポートの持ち主のプロトコル
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Proto {
+    Tcp,
+    Udp,
 }
 
 static NET: SpinLock<Option<Net>> = SpinLock::new(None);
@@ -157,16 +166,20 @@ pub struct Inet;
 impl ProtocolFamily for Inet {
     fn socket(&self, ty: u32, protocol: u32) -> Result<Arc<dyn File>, Errno> {
         const IPPROTO_TCP: u32 = 6;
+        const IPPROTO_UDP: u32 = 17;
         let (kind, _) = split_type(ty)?;
-        if kind != SOCK_STREAM {
-            return Err(Errno::ESOCKTNOSUPPORT);
+        match (kind, protocol) {
+            (SOCK_STREAM, 0 | IPPROTO_TCP) => Ok(Arc::new(InetSocket {
+                state: SpinLock::new(State::Idle { local: None }),
+                options: Options::default(),
+            })),
+            (SOCK_DGRAM, 0 | IPPROTO_UDP) => Ok(Arc::new(UdpSocket {
+                state: SpinLock::new(UdpState::default()),
+                options: Options::default(),
+            })),
+            (SOCK_STREAM | SOCK_DGRAM, _) => Err(Errno::EPROTONOSUPPORT),
+            _ => Err(Errno::ESOCKTNOSUPPORT),
         }
-        if protocol != 0 && protocol != IPPROTO_TCP {
-            return Err(Errno::EPROTONOSUPPORT);
-        }
-        Ok(Arc::new(InetSocket {
-            state: SpinLock::new(State::Idle { local: None }),
-        }))
     }
 }
 
@@ -223,6 +236,7 @@ enum State {
 
 pub struct InetSocket {
     state: SpinLock<State>,
+    options: Options,
 }
 
 impl InetSocket {
@@ -248,6 +262,14 @@ fn ready(net: &mut Net, pending: &[SocketHandle]) -> Option<usize> {
 }
 
 impl Socket for InetSocket {
+    fn sock_type(&self) -> u32 {
+        SOCK_STREAM
+    }
+
+    fn options(&self) -> &Options {
+        &self.options
+    }
+
     fn bind(&self, _ns: &mut dyn Namespace, raw: &[u8]) -> Result<(), Errno> {
         let mut ep = parse(raw)?;
         let mut state = self.state.lock();
@@ -259,8 +281,8 @@ impl Socket for InetSocket {
         }
         with(|net| {
             if ep.port == 0 {
-                ep.port = net.ephemeral()?;
-            } else if !net.ports.insert(ep.port) {
+                ep.port = net.ephemeral(Proto::Tcp)?;
+            } else if !net.ports.insert((Proto::Tcp, ep.port)) {
                 return Err(Errno::EADDRINUSE);
             }
             Ok(())
@@ -281,7 +303,7 @@ impl Socket for InetSocket {
             // bind していなければ、ポートを自動で振る(Linux と同じ)
             let local = match local {
                 Some(l) => l,
-                None => IpEndpoint::new(unspecified().addr, net.ephemeral()?),
+                None => IpEndpoint::new(unspecified().addr, net.ephemeral(Proto::Tcp)?),
             };
             let mut pending = Vec::new();
             for _ in 0..n {
@@ -320,6 +342,7 @@ impl Socket for InetSocket {
                     owns_port: false,
                     read_shut: false,
                 }),
+                options: Options::default(),
             });
             Some(Ok((file, to_bytes(peer))))
         })
@@ -338,7 +361,7 @@ impl Socket for InetSocket {
         let (handle, port) = with(|net| {
             let port = match local {
                 Some(l) => l.port,
-                None => net.ephemeral()?,
+                None => net.ephemeral(Proto::Tcp)?,
             };
             let s = net.new_tcp();
             let handle = net.lo.sockets.add(s);
@@ -351,7 +374,7 @@ impl Socket for InetSocket {
             if r.is_err() {
                 net.lo.sockets.remove(handle);
                 if local.is_none() {
-                    net.ports.remove(&port);
+                    net.ports.remove(&(Proto::Tcp, port));
                 }
                 return Err(Errno::EINVAL);
             }
@@ -379,7 +402,7 @@ impl Socket for InetSocket {
                 with(|net| {
                     net.lo.sockets.remove(handle);
                     if local.is_none() {
-                        net.ports.remove(&port);
+                        net.ports.remove(&(Proto::Tcp, port));
                     }
                 });
                 // bind していたなら、そのポートはまだこのソケットのもの
@@ -503,14 +526,14 @@ impl Drop for InetSocket {
         match state {
             State::Idle { local } => {
                 if let Some(l) = local {
-                    net.ports.remove(&l.port);
+                    net.ports.remove(&(Proto::Tcp, l.port));
                 }
             }
             State::Listening { local, pending } => {
                 for h in pending {
                     net.lo.sockets.remove(h);
                 }
-                net.ports.remove(&local.port);
+                net.ports.remove(&(Proto::Tcp, local.port));
             }
             State::Connected {
                 handle,
@@ -522,10 +545,206 @@ impl Drop for InetSocket {
                 net.tcp(handle).close();
                 net.closing.push(handle);
                 if owns_port {
-                    net.ports.remove(&local.port);
+                    net.ports.remove(&(Proto::Tcp, local.port));
                 }
             }
         }
         net.poll();
+    }
+}
+
+/// UDP のソケットの状態。smoltcp のソケットは、bind したとき(か、最初に送ったとき)に作る
+#[derive(Default)]
+struct UdpState {
+    handle: Option<SocketHandle>,
+    local: Option<IpEndpoint>,
+    /// connect した相手(write の宛先)
+    peer: Option<IpEndpoint>,
+}
+
+pub struct UdpSocket {
+    state: SpinLock<UdpState>,
+    options: Options,
+}
+
+/// 受け取りで覚えておけるデータグラムの数と、中身の合計
+const UDP_PACKETS: usize = 32;
+
+impl UdpState {
+    /// smoltcp のソケットを作って bind する。`ep` のポートが 0 なら自動で振る
+    fn open(&mut self, net: &mut Net, mut ep: IpEndpoint) -> Result<SocketHandle, Errno> {
+        if ep.port == 0 {
+            ep.port = net.ephemeral(Proto::Udp)?;
+        } else if !net.ports.insert((Proto::Udp, ep.port)) {
+            return Err(Errno::EADDRINUSE);
+        }
+        let mut s = udp::Socket::new(
+            udp::PacketBuffer::new(
+                vec![udp::PacketMetadata::EMPTY; UDP_PACKETS],
+                vec![0; BUFFER],
+            ),
+            udp::PacketBuffer::new(
+                vec![udp::PacketMetadata::EMPTY; UDP_PACKETS],
+                vec![0; BUFFER],
+            ),
+        );
+        let addr = (!ep.addr.is_unspecified()).then_some(ep.addr);
+        s.bind(IpListenEndpoint {
+            addr,
+            port: ep.port,
+        })
+        .map_err(|_| Errno::EINVAL)?;
+        let h = net.lo.sockets.add(s);
+        self.handle = Some(h);
+        self.local = Some(ep);
+        Ok(h)
+    }
+
+    /// bind していなければ、自動で bind する
+    fn ensure_open(&mut self, net: &mut Net) -> Result<SocketHandle, Errno> {
+        match self.handle {
+            Some(h) => Ok(h),
+            None => self.open(net, unspecified()),
+        }
+    }
+}
+
+impl Socket for UdpSocket {
+    fn sock_type(&self) -> u32 {
+        SOCK_DGRAM
+    }
+
+    fn options(&self) -> &Options {
+        &self.options
+    }
+
+    fn bind(&self, _ns: &mut dyn Namespace, raw: &[u8]) -> Result<(), Errno> {
+        let ep = parse(raw)?;
+        let mut state = self.state.lock();
+        if state.handle.is_some() {
+            return Err(Errno::EINVAL);
+        }
+        if !is_local(ep.addr) {
+            return Err(Errno::EADDRNOTAVAIL);
+        }
+        with(|net| state.open(net, ep).map(|_| ()))
+    }
+
+    fn listen(&self, _backlog: usize) -> Result<(), Errno> {
+        Err(Errno::EOPNOTSUPP)
+    }
+
+    fn accept(&self, _nonblock: bool) -> Result<(Arc<dyn File>, Vec<u8>), Errno> {
+        Err(Errno::EOPNOTSUPP)
+    }
+
+    /// UDP の connect は、宛先を覚えるだけ(パケットは送らない)
+    fn connect(&self, _ns: &mut dyn Namespace, raw: &[u8], _nonblock: bool) -> Result<(), Errno> {
+        let remote = parse(raw)?;
+        if !is_local(remote.addr) {
+            return Err(Errno::ENETUNREACH);
+        }
+        let mut state = self.state.lock();
+        with(|net| state.ensure_open(net))?;
+        state.peer = Some(remote);
+        Ok(())
+    }
+
+    fn local_addr(&self) -> Vec<u8> {
+        to_bytes(self.state.lock().local.unwrap_or(unspecified()))
+    }
+
+    fn peer_addr(&self) -> Result<Vec<u8>, Errno> {
+        self.state.lock().peer.map(to_bytes).ok_or(Errno::ENOTCONN)
+    }
+
+    fn shutdown(&self, _how: Shutdown) -> Result<(), Errno> {
+        if self.state.lock().peer.is_none() {
+            return Err(Errno::ENOTCONN);
+        }
+        Ok(())
+    }
+
+    fn send_to(&self, buf: &[u8], to: Option<&[u8]>, nonblock: bool) -> Result<usize, Errno> {
+        let (h, dest) = {
+            let mut state = self.state.lock();
+            let dest = match to {
+                Some(raw) => parse(raw)?,
+                None => state.peer.ok_or(Errno::EDESTADDRREQ)?,
+            };
+            if !is_local(dest.addr) || dest.addr.is_unspecified() {
+                return Err(Errno::ENETUNREACH);
+            }
+            (with(|net| state.ensure_open(net))?, dest)
+        };
+        if buf.len() > BUFFER {
+            return Err(Errno::EMSGSIZE);
+        }
+        wait(nonblock, |net| {
+            let s = net.lo.sockets.get_mut::<udp::Socket>(h);
+            match s.send_slice(buf, dest) {
+                Ok(()) => Some(Ok(buf.len())),
+                Err(udp::SendError::BufferFull) => None,
+                Err(udp::SendError::Unaddressable) => Some(Err(Errno::ENETUNREACH)),
+            }
+        })
+    }
+
+    fn recv_from(&self, buf: &mut [u8], nonblock: bool) -> Result<(usize, Vec<u8>), Errno> {
+        let h = {
+            let mut state = self.state.lock();
+            with(|net| state.ensure_open(net))?
+        };
+        wait(nonblock, |net| {
+            let s = net.lo.sockets.get_mut::<udp::Socket>(h);
+            let (data, meta) = s.recv().ok()?;
+            // バッファより長いデータグラムは切る(残りは捨てる。Linux と同じ)
+            let n = data.len().min(buf.len());
+            buf[..n].copy_from_slice(&data[..n]);
+            Some(Ok((n, to_bytes(meta.endpoint))))
+        })
+    }
+}
+
+impl File for UdpSocket {
+    fn stat(&self) -> Stat {
+        Stat {
+            kind: FileKind::Socket,
+            mode: 0o777,
+            ino: 0x6_2000,
+            ..Default::default()
+        }
+    }
+
+    fn read(&self, _offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        Ok(self.recv_from(buf, false)?.0)
+    }
+
+    fn write(&self, _offset: u64, buf: &[u8]) -> Result<usize, Errno> {
+        self.send_to(buf, None, false)
+    }
+
+    fn poll_readable(&self) -> bool {
+        let Some(h) = self.state.lock().handle else {
+            return false;
+        };
+        with(|net| net.lo.sockets.get_mut::<udp::Socket>(h).can_recv())
+    }
+
+    fn as_socket(&self) -> Option<&dyn Socket> {
+        Some(self)
+    }
+}
+
+impl Drop for UdpSocket {
+    fn drop(&mut self) {
+        let state = core::mem::take(self.state.get_mut());
+        let (Some(h), Some(local)) = (state.handle, state.local) else {
+            return;
+        };
+        if let Some(net) = NET.lock().as_mut() {
+            net.lo.sockets.remove(h);
+            net.ports.remove(&(Proto::Udp, local.port));
+        }
     }
 }

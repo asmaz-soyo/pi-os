@@ -49,8 +49,20 @@ pub trait ProtocolFamily: Send + Sync {
 }
 
 /// ソケットの操作。アドレス(`struct sockaddr_xxx` のバイト列)の形はファミリーごとに違うので、
-/// 読み解くのは実装の側
-pub trait Socket: Send + Sync {
+/// 読み解くのは実装の側。ソケットはファイルでもある(read / write はつながった相手との読み書き)
+pub trait Socket: File {
+    /// 種類(SOCK_STREAM、SOCK_DGRAM)
+    fn sock_type(&self) -> u32;
+    /// setsockopt / getsockopt で読み書きする設定
+    fn options(&self) -> &Options;
+    /// 宛先を付けて送る(sendto)。ストリームは宛先を見ず、write と同じ
+    fn send_to(&self, buf: &[u8], _to: Option<&[u8]>, _nonblock: bool) -> Result<usize, Errno> {
+        self.write(0, buf)
+    }
+    /// 受け取って、送り元のアドレスも返す(recvfrom)。ストリームはアドレスを返さない(空)
+    fn recv_from(&self, buf: &mut [u8], _nonblock: bool) -> Result<(usize, Vec<u8>), Errno> {
+        Ok((self.read(0, buf)?, Vec::new()))
+    }
     /// 名前を付ける(bind)
     fn bind(&self, ns: &mut dyn Namespace, addr: &[u8]) -> Result<(), Errno>;
     /// 待ち受けを始める(listen)。`backlog` は accept 待ちの数の上限
@@ -82,6 +94,50 @@ impl Shutdown {
             1 => Ok(Self::Write),
             2 => Ok(Self::Both),
             _ => Err(Errno::EINVAL),
+        }
+    }
+}
+
+/// setsockopt の level
+pub const SOL_SOCKET: u32 = 1;
+pub const IPPROTO_TCP: u32 = 6;
+/// SOL_SOCKET の名前
+pub const SO_REUSEADDR: u32 = 2;
+pub const SO_TYPE: u32 = 3;
+pub const SO_ERROR: u32 = 4;
+
+/// 受け付ける (level, 名前)。値は覚えておいて getsockopt で返すが、今はふるまいを変えない
+const KNOWN_OPTIONS: [(u32, u32); 8] = [
+    (SOL_SOCKET, SO_REUSEADDR),
+    (SOL_SOCKET, 6),  // SO_BROADCAST
+    (SOL_SOCKET, 7),  // SO_SNDBUF
+    (SOL_SOCKET, 8),  // SO_RCVBUF
+    (SOL_SOCKET, 9),  // SO_KEEPALIVE
+    (SOL_SOCKET, 10), // SO_OOBINLINE
+    (SOL_SOCKET, 15), // SO_REUSEPORT
+    (IPPROTO_TCP, 1), // TCP_NODELAY
+];
+
+/// ソケットの設定(int の値のものだけ)
+#[derive(Default)]
+pub struct Options(SpinLock<alloc::collections::BTreeMap<(u32, u32), i32>>);
+
+impl Options {
+    pub fn set(&self, level: u32, name: u32, value: i32) -> Result<(), Errno> {
+        if !KNOWN_OPTIONS.contains(&(level, name)) {
+            return Err(Errno::ENOPROTOOPT);
+        }
+        self.0.lock().insert((level, name), value);
+        Ok(())
+    }
+
+    /// 覚えている値(設定していなければ 0)。SO_TYPE と SO_ERROR はソケットから答える
+    pub fn get(&self, sock: &dyn Socket, level: u32, name: u32) -> Result<i32, Errno> {
+        match (level, name) {
+            (SOL_SOCKET, SO_TYPE) => Ok(sock.sock_type() as i32),
+            (SOL_SOCKET, SO_ERROR) => Ok(0),
+            key if KNOWN_OPTIONS.contains(&key) => Ok(*self.0.lock().get(&key).unwrap_or(&0)),
+            _ => Err(Errno::ENOPROTOOPT),
         }
     }
 }

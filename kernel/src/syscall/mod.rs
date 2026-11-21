@@ -96,6 +96,10 @@ pub mod nr {
     pub const CONNECT: u64 = 203;
     pub const GETSOCKNAME: u64 = 204;
     pub const GETPEERNAME: u64 = 205;
+    pub const SENDTO: u64 = 206;
+    pub const RECVFROM: u64 = 207;
+    pub const SETSOCKOPT: u64 = 208;
+    pub const GETSOCKOPT: u64 = 209;
     pub const SHUTDOWN: u64 = 210;
     pub const ACCEPT4: u64 = 242;
     pub const BRK: u64 = 214;
@@ -306,6 +310,10 @@ table! {
     nr::CONNECT, "connect", 3 => |p, a| result(net::connect(p, a[0], a[1], a[2]));
     nr::GETSOCKNAME, "getsockname", 3 => |p, a| result(net::getsockname(p, a[0], a[1], a[2]));
     nr::GETPEERNAME, "getpeername", 3 => |p, a| result(net::getpeername(p, a[0], a[1], a[2]));
+    nr::SENDTO, "sendto", 6 => |p, a| result(net::sendto(p, a[0], a[1], a[2], a[3], a[4], a[5]));
+    nr::RECVFROM, "recvfrom", 6 => |p, a| result(net::recvfrom(p, a[0], a[1], a[2], a[3], a[4], a[5]));
+    nr::SETSOCKOPT, "setsockopt", 5 => |p, a| result(net::setsockopt(p, a[0], a[1], a[2], a[3], a[4]));
+    nr::GETSOCKOPT, "getsockopt", 5 => |p, a| result(net::getsockopt(p, a[0], a[1], a[2], a[3], a[4]));
     nr::SHUTDOWN, "shutdown", 2 => |p, a| result(net::shutdown(p, a[0], a[1]));
     nr::BRK, "brk", 1 => |p, a| Action::Return(mm::brk(p, a[0]));
     nr::MUNMAP, "munmap", 2 => |p, a| result(mm::munmap(p, a[0], a[1]));
@@ -402,6 +410,8 @@ mod tests_times;
 mod tests_tmp;
 #[cfg(test)]
 mod tests_tty;
+#[cfg(test)]
+mod tests_udp;
 #[cfg(test)]
 mod tests_umask;
 #[cfg(test)]

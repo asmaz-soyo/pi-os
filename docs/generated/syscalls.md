@@ -84,6 +84,10 @@
 | 203 | `connect` | 3 |
 | 204 | `getsockname` | 3 |
 | 205 | `getpeername` | 3 |
+| 206 | `sendto` | 6 |
+| 207 | `recvfrom` | 6 |
+| 208 | `setsockopt` | 5 |
+| 209 | `getsockopt` | 5 |
 | 210 | `shutdown` | 2 |
 | 214 | `brk` | 1 |
 | 215 | `munmap` | 2 |
@@ -98,4 +102,4 @@
 | 276 | `renameat2` | 5 |
 | 278 | `getrandom` | 3 |
 
-合計 92 個
+合計 96 個

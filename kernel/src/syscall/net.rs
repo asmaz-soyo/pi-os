@@ -206,3 +206,91 @@ pub fn shutdown(p: &mut Process, fd: u64, how: u64) -> Result<u64, Errno> {
     sock(&f).shutdown(Shutdown::from_raw(how)?)?;
     Ok(0)
 }
+
+/// 送り受けのフラグ:このときだけ待たない
+const MSG_DONTWAIT: u64 = 0x40;
+/// 1 回の sendto / recvfrom で扱う最大の大きさ(カーネルの中に一度に置く量)
+const IO_MAX: u64 = 1 << 20;
+
+/// sendto(fd, buf, len, flags, addr, addrlen)。addr が 0 なら宛先なし(write と同じ)
+pub fn sendto(
+    p: &mut Process,
+    fd: u64,
+    buf: u64,
+    len: u64,
+    flags: u64,
+    addr: u64,
+    alen: u64,
+) -> Result<u64, Errno> {
+    let (f, nonblock) = socket_of(p, fd)?;
+    let mut data = alloc::vec![0u8; len.min(IO_MAX) as usize];
+    p.mem.copy_from_user(VirtAddr(buf), &mut data)?;
+    let to = if addr != 0 {
+        Some(read_addr(p, addr, alen)?)
+    } else {
+        None
+    };
+    let n = sock(&f).send_to(&data, to.as_deref(), nonblock || flags & MSG_DONTWAIT != 0)?;
+    Ok(n as u64)
+}
+
+/// recvfrom(fd, buf, len, flags, addr, addrlen)。addr が 0 なら送り元は返さない
+pub fn recvfrom(
+    p: &mut Process,
+    fd: u64,
+    buf: u64,
+    len: u64,
+    flags: u64,
+    addr: u64,
+    alen: u64,
+) -> Result<u64, Errno> {
+    let (f, nonblock) = socket_of(p, fd)?;
+    let mut data = alloc::vec![0u8; len.min(IO_MAX) as usize];
+    let (n, from) = sock(&f).recv_from(&mut data, nonblock || flags & MSG_DONTWAIT != 0)?;
+    p.mem.copy_to_user(VirtAddr(buf), &data[..n])?;
+    write_addr(p, addr, alen, &from)?;
+    Ok(n as u64)
+}
+
+/// setsockopt(fd, level, name, value, len)。値は int のものだけ
+pub fn setsockopt(
+    p: &mut Process,
+    fd: u64,
+    level: u64,
+    name: u64,
+    value: u64,
+    len: u64,
+) -> Result<u64, Errno> {
+    let (f, _) = socket_of(p, fd)?;
+    if len < 4 {
+        return Err(Errno::EINVAL);
+    }
+    let mut raw = [0u8; 4];
+    p.mem.copy_from_user(VirtAddr(value), &mut raw)?;
+    sock(&f)
+        .options()
+        .set(level as u32, name as u32, i32::from_le_bytes(raw))?;
+    Ok(0)
+}
+
+/// getsockopt(fd, level, name, value, lenp)
+pub fn getsockopt(
+    p: &mut Process,
+    fd: u64,
+    level: u64,
+    name: u64,
+    value: u64,
+    lenp: u64,
+) -> Result<u64, Errno> {
+    let (f, _) = socket_of(p, fd)?;
+    let mut raw = [0u8; 4];
+    p.mem.copy_from_user(VirtAddr(lenp), &mut raw)?;
+    if (u32::from_le_bytes(raw) as i32) < 4 {
+        return Err(Errno::EINVAL);
+    }
+    let s = sock(&f);
+    let v = s.options().get(s, level as u32, name as u32)?;
+    p.mem.copy_to_user(VirtAddr(value), &v.to_le_bytes())?;
+    p.mem.copy_to_user(VirtAddr(lenp), &4u32.to_le_bytes())?;
+    Ok(0)
+}

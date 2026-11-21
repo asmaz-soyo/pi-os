@@ -50,6 +50,8 @@ static const char *errname(int e) {
     case EAGAIN: return "EAGAIN";
     case EADDRNOTAVAIL: return "EADDRNOTAVAIL";
     case ECONNRESET: return "ECONNRESET";
+    case EDESTADDRREQ: return "EDESTADDRREQ";
+    case ENOPROTOOPT: return "ENOPROTOOPT";
     default: return "?";
     }
 }
@@ -348,6 +350,43 @@ int main(int argc, char **argv) {
     show("tcp connect closed port", connect(tc, (struct sockaddr *)&in, sizeof in));
     close(tc);
     show("socketpair inet", socketpair(AF_INET, SOCK_STREAM, 0, sv));
+
+    // UDP(ループバック)
+    struct sockaddr_in ua = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    int us = socket(AF_INET, SOCK_DGRAM, 0);
+    show_fd("udp socket", us);
+    show("udp bind", bind(us, (struct sockaddr *)&ua, sizeof ua));
+    socklen_t ualen = sizeof ua;
+    getsockname(us, (struct sockaddr *)&ua, &ualen);
+    int uc = socket(AF_INET, SOCK_DGRAM, 0);
+    show("udp write unconnected", write(uc, "x", 1));
+    show("udp sendto", sendto(uc, "one", 3, 0, (struct sockaddr *)&ua, sizeof ua));
+    show("udp sendto 2", sendto(uc, "second", 6, 0, (struct sockaddr *)&ua, sizeof ua));
+    struct sockaddr_in from;
+    socklen_t flen = sizeof from;
+    show("udp recvfrom", recvfrom(us, buf, sizeof buf, 0, (struct sockaddr *)&from, &flen));
+    printf("udp from len = %d, loopback = %d\n", (int)flen, from.sin_addr.s_addr == htonl(INADDR_LOOPBACK));
+    show("udp recv cut", recv(us, buf, 3, 0));
+    show("udp recv empty", recv(us, buf, sizeof buf, MSG_DONTWAIT));
+    show("udp sendto back", sendto(us, "pong", 4, 0, (struct sockaddr *)&from, flen));
+    show("udp connect", connect(uc, (struct sockaddr *)&ua, sizeof ua));
+    show("udp read", read(uc, buf, sizeof buf));
+    show("udp write", write(uc, "hi", 2));
+    show("udp read at server", read(us, buf, sizeof buf));
+    show("udp listen", listen(us, 1));
+    int one = 1, val = -1;
+    socklen_t vlen = sizeof val;
+    show("setsockopt reuseaddr", setsockopt(us, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one));
+    show("getsockopt reuseaddr", getsockopt(us, SOL_SOCKET, SO_REUSEADDR, &val, &vlen));
+    printf("reuseaddr = %d, len = %d\n", val != 0, (int)vlen);
+    show("getsockopt type", getsockopt(us, SOL_SOCKET, SO_TYPE, &val, &vlen));
+    printf("type = %d\n", val);
+    show("getsockopt error", getsockopt(uc, SOL_SOCKET, SO_ERROR, &val, &vlen));
+    printf("error = %d\n", val);
+    show("setsockopt unknown", setsockopt(us, SOL_SOCKET, 9999, &one, sizeof one));
+    show("setsockopt not socket", setsockopt(1, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one));
+    close(uc);
+    close(us);
 
     // プロセス
     pid_t c = fork();

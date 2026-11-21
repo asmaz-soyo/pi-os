@@ -213,12 +213,14 @@ enum State {
 /// AF_UNIX のソケット
 pub struct UnixSocket {
     state: SpinLock<State>,
+    options: super::Options,
 }
 
 impl UnixSocket {
     fn new(state: State) -> Self {
         Self {
             state: SpinLock::new(state),
+            options: super::Options::default(),
         }
     }
 
@@ -262,6 +264,14 @@ fn key_of(ns: &mut dyn Namespace, addr: &Addr, create: bool) -> Result<Key, Errn
 }
 
 impl Socket for UnixSocket {
+    fn sock_type(&self) -> u32 {
+        SOCK_STREAM
+    }
+
+    fn options(&self) -> &super::Options {
+        &self.options
+    }
+
     fn bind(&self, ns: &mut dyn Namespace, raw: &[u8]) -> Result<(), Errno> {
         let addr = Addr::parse(raw)?;
         let mut state = self.state.lock();
