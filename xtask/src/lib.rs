@@ -136,8 +136,9 @@ impl Bsp {
                 "virtio-blk-device,drive=hd0".to_string(),
                 // virtio-net(virtio-mmio)。QEMU のユーザーモードのネットワーク(slirp)につなぐ:
                 // ゲストは 10.0.2.15、ゲートウェイ 10.0.2.2、DNS 10.0.2.3。DHCP にも答える
+                // guestfwd:10.0.2.100:7 への接続をホストの `cat` につなぐ(テスト用のエコーサーバー)
                 "-netdev".to_string(),
-                "user,id=net0".to_string(),
+                "user,id=net0,guestfwd=tcp:10.0.2.100:7-cmd:cat".to_string(),
                 "-device".to_string(),
                 "virtio-net-device,netdev=net0".to_string(),
             ]);

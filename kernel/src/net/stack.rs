@@ -119,6 +119,18 @@ impl Stack {
         }
     }
 
+    /// 次に poll が要るまでの時間(ナノ秒)。急ぎのものがなければ None
+    pub fn poll_delay(&mut self, now_ns: u64) -> Option<u64> {
+        self.iface
+            .poll_delay(instant(now_ns), &self.sockets)
+            .map(|d| d.total_micros() * 1000)
+    }
+
+    /// デフォルトルートがあるか
+    pub fn has_default_route(&self) -> bool {
+        self.iface.routes().get_default_ipv4_route().is_some()
+    }
+
     /// 届いたものを処理し、送るものを送る。何か変わったら true
     pub fn poll(&mut self, now_ns: u64) -> bool {
         let changed = self.iface.poll(

@@ -29,12 +29,12 @@ const EXCLUDES: &str = "--exclude userland --exclude boot --exclude ktest \
                         --exclude bsp-qemu-virt --exclude bsp-raspi3";
 const VIRT_ARGS: &str = "-M virt -cpu cortex-a53 -m 128M -nic none -nographic -semihosting \
     -global virtio-mmio.force-legacy=false -drive file=target/virt-disk.img,if=none,format=raw,id=hd0 \
-    -device virtio-blk-device,drive=hd0 -netdev user,id=net0 -device virtio-net-device,netdev=net0";
+    -device virtio-blk-device,drive=hd0 -netdev user,id=net0,guestfwd=tcp:10.0.2.100:7-cmd:cat -device virtio-net-device,netdev=net0";
 /// cargo の runner は bsp/qemu-virt から QEMU を起動するので、ディスクの場所が変わる
 const VIRT_RUNNER_ARGS: &str = "-M virt -cpu cortex-a53 -m 128M -nic none -nographic -semihosting \
     -global virtio-mmio.force-legacy=false \
     -drive file=../../target/virt-disk.img,if=none,format=raw,id=hd0 -device virtio-blk-device,drive=hd0 \
-    -netdev user,id=net0 -device virtio-net-device,netdev=net0";
+    -netdev user,id=net0,guestfwd=tcp:10.0.2.100:7-cmd:cat -device virtio-net-device,netdev=net0";
 const MAKE_DISK: &str = "make disk target/virt-disk.img";
 const RASPI3_ARGS: &str = "-M raspi3b -nographic -semihosting";
 /// 実機用のビルド(セミホスティングなし、別の target ディレクトリ)

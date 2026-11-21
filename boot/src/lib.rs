@@ -79,6 +79,10 @@ pub fn init<B: Board>() {
     if kernel::block::find("vda").is_some() {
         kernel::sched::spawn(flusher, 0).expect("start the flusher thread");
     }
+    // 8. ネットワーク:見つけたカードをスタックにつなぎ、後ろで poll するスレッドを動かす
+    if bring_up_network() {
+        kernel::sched::spawn(net_poller, 0).expect("start the network poller");
+    }
     if cfg!(feature = "trace-syscalls") {
         kernel::syscall::TRACE.store(true, core::sync::atomic::Ordering::Relaxed);
     }
@@ -185,6 +189,34 @@ fn flusher(_: usize) {
         if let Err(e) = checkpoint.and_then(|_| kernel::block::flush_older_all(5 * SEC)) {
             kernel::println!("flusher: {e:?}");
         }
+    }
+}
+
+/// eth0 をネットワークスタックにつなぐ。つないだら true。
+/// アドレスは今は QEMU のユーザーモードのネットワークの決まった値(DHCP にするまでの仮)
+fn bring_up_network() -> bool {
+    use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address};
+    let Some(dev) = kernel::net::dev::take("eth0") else {
+        return false;
+    };
+    kernel::net::inet::attach(
+        dev,
+        Some(IpCidr::new(IpAddress::v4(10, 0, 2, 15), 24)),
+        Some(Ipv4Address::new(10, 0, 2, 2)),
+    );
+    true
+}
+
+/// だれもシステムコールで待っていないときに届いたパケットや、再送のタイマーのために、
+/// ネットワークを poll する。smoltcp が「次はいつ poll が要るか」を教えてくれるので、それまで眠る
+/// (急ぎがなければ 50ms。受信の割り込みを使うようになれば、届いたときに起こせる)
+fn net_poller(_: usize) {
+    const MIN: u64 = 1_000_000;
+    const MAX: u64 = 50_000_000;
+    let mut delay = MAX;
+    loop {
+        kernel::sched::sleep_until(kernel::time::now_ns() + delay.max(MIN));
+        delay = kernel::net::inet::poll_all(MAX);
     }
 }
 

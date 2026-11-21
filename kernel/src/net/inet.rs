@@ -1,4 +1,10 @@
-//! AF_INET:IPv4 の TCP と UDP のソケット(中身は smoltcp)。今はループバック(127.0.0.0/8)だけ。
+//! AF_INET:IPv4 の TCP と UDP のソケット(中身は smoltcp)。
+//!
+//! インターフェースは何本でも持てる。0 番はループバック(127.0.0.0/8)、そのあとに
+//! `attach` で足したもの(eth0 など)。smoltcp のソケットはインターフェースごとの SocketSet に入るので、
+//! ソケットは「どのインターフェースの、どのハンドルか」([`H`])を覚える。
+//! どのインターフェースを使うかは宛先で決める([`Net::route`])。0.0.0.0 での待ち受けは、
+//! すべてのインターフェースで待つ。
 //!
 //! Linux のソケットと smoltcp のソケットは、待ち受けの考え方が違う。
 //! - Linux:listen した 1 本のソケットが、何本もの接続を受ける(accept のたびに新しい fd)
@@ -7,8 +13,8 @@
 //! そこで listen では backlog の数だけ smoltcp のソケットを待たせておき、accept でつながったものを
 //! 1 本渡して、代わりの 1 本を補充する。
 //!
-//! smoltcp は `poll` を呼んだときだけ動く。今はシステムコールが待つあいだ、自分で `poll` を呼ぶ
-//! (ループバックは、送った側か受ける側のどちらかが必ず待っているので、これで回る)。
+//! smoltcp は `poll` を呼んだときだけ動く。システムコールが待つあいだは自分で `poll` を呼び、
+//! だれも待っていないときに届くもののために、カーネルのスレッドが定期的に [`poll_all`] を呼ぶ。
 
 use super::stack::Stack;
 use super::{
@@ -22,6 +28,7 @@ use alloc::collections::BTreeSet;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use hal::net::NetDev;
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::{tcp, udp};
 use smoltcp::wire::{IpAddress, IpCidr, IpEndpoint, IpListenEndpoint, Ipv4Address};
@@ -34,27 +41,46 @@ const BACKLOG_MAX: usize = 8;
 /// 自動で振るポートの範囲(Linux の既定の ip_local_port_range に近い)
 const EPHEMERAL: core::ops::RangeInclusive<u16> = 49152..=65535;
 
-/// ネットワーク全体(今はループバックだけ)
+/// smoltcp のソケットの居場所:(インターフェースの番号, その中のハンドル)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct H {
+    iface: usize,
+    handle: SocketHandle,
+}
+
+/// ループバックのインターフェースの番号
+const LO: usize = 0;
+
+/// ネットワーク全体
 struct Net {
-    lo: Stack,
-    /// 使っているポート(TCP と UDP は別々)
+    /// 0 番がループバック
+    stacks: Vec<Stack>,
+    /// 使っているポート(TCP と UDP は別々。インターフェースをまたいで 1 つ)
     ports: BTreeSet<(Proto, u16)>,
     next_port: u16,
     /// 閉じた(close した)が、FIN のやりとりが残っているソケット
-    closing: Vec<SocketHandle>,
+    closing: Vec<H>,
+}
+
+fn seed() -> u64 {
+    crate::time::now_ns() ^ 0x9e37_79b9_7f4a_7c15
+}
+
+fn is_loopback(addr: IpAddress) -> bool {
+    let IpAddress::Ipv4(ip) = addr;
+    ip.octets()[0] == 127
 }
 
 impl Net {
     fn new() -> Self {
-        let now = crate::time::now_ns();
         let lo = Stack::new(
             Box::new(super::loopback::Loopback::new()),
             &[IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8)],
-            now ^ 0x9e37_79b9_7f4a_7c15,
-            now,
+            seed(),
+            crate::time::now_ns(),
         );
         Self {
-            lo,
+            stacks: vec![lo],
             ports: BTreeSet::new(),
             next_port: *EPHEMERAL.start(),
             closing: Vec::new(),
@@ -64,26 +90,92 @@ impl Net {
     /// 届いたものを処理しきるまで poll し、閉じ終わったソケットを片付ける
     fn poll(&mut self) {
         let now = crate::time::now_ns();
-        for _ in 0..32 {
-            if !self.lo.poll(now) {
-                break;
+        for stack in &mut self.stacks {
+            for _ in 0..32 {
+                if !stack.poll(now) {
+                    break;
+                }
             }
         }
-        let sockets = &mut self.lo.sockets;
+        let stacks = &mut self.stacks;
         self.closing.retain(|&h| {
+            let sockets = &mut stacks[h.iface].sockets;
             let done = matches!(
-                sockets.get::<tcp::Socket>(h).state(),
+                sockets.get::<tcp::Socket>(h.handle).state(),
                 tcp::State::Closed | tcp::State::TimeWait
             );
             if done {
-                sockets.remove(h);
+                sockets.remove(h.handle);
             }
             !done
         });
     }
 
-    fn tcp(&mut self, h: SocketHandle) -> &mut tcp::Socket<'static> {
-        self.lo.sockets.get_mut::<tcp::Socket>(h)
+    fn tcp(&mut self, h: H) -> &mut tcp::Socket<'static> {
+        self.stacks[h.iface]
+            .sockets
+            .get_mut::<tcp::Socket>(h.handle)
+    }
+
+    fn udp(&mut self, h: H) -> &mut udp::Socket<'static> {
+        self.stacks[h.iface]
+            .sockets
+            .get_mut::<udp::Socket>(h.handle)
+    }
+
+    fn add<S: smoltcp::socket::AnySocket<'static>>(&mut self, iface: usize, s: S) -> H {
+        H {
+            iface,
+            handle: self.stacks[iface].sockets.add(s),
+        }
+    }
+
+    fn remove(&mut self, h: H) {
+        self.stacks[h.iface].sockets.remove(h.handle);
+    }
+
+    /// 宛先 `dst` に送るインターフェース。127/8 はループバック、それ以外は同じネットワークにいる
+    /// インターフェース、なければデフォルトルートのあるインターフェース
+    fn route(&self, dst: IpAddress) -> Result<usize, Errno> {
+        if dst.is_unspecified() {
+            return Err(Errno::ENETUNREACH);
+        }
+        if is_loopback(dst) {
+            return Ok(LO);
+        }
+        let others = || self.stacks.iter().enumerate().skip(1);
+        if let Some((i, _)) =
+            others().find(|(_, s)| s.iface.ip_addrs().iter().any(|c| c.contains_addr(&dst)))
+        {
+            return Ok(i);
+        }
+        others()
+            .find(|(_, s)| s.has_default_route())
+            .map(|(i, _)| i)
+            .ok_or(Errno::ENETUNREACH)
+    }
+
+    /// bind できるアドレスなら、それを持つインターフェース(0.0.0.0 なら None = すべて)
+    fn owner(&self, addr: IpAddress) -> Result<Option<usize>, Errno> {
+        if addr.is_unspecified() {
+            return Ok(None);
+        }
+        if is_loopback(addr) {
+            return Ok(Some(LO));
+        }
+        self.stacks
+            .iter()
+            .position(|s| s.iface.has_ip_addr(addr))
+            .map(Some)
+            .ok_or(Errno::EADDRNOTAVAIL)
+    }
+
+    /// `addr` で待つインターフェースの一覧
+    fn ifaces_for(&self, addr: IpAddress) -> Result<Vec<usize>, Errno> {
+        Ok(match self.owner(addr)? {
+            Some(i) => vec![i],
+            None => (0..self.stacks.len()).collect(),
+        })
     }
 
     /// 空いているポートを 1 つ振る
@@ -107,14 +199,14 @@ impl Net {
             tcp::SocketBuffer::new(vec![0; BUFFER]),
             tcp::SocketBuffer::new(vec![0; BUFFER]),
         );
-        // ループバックでは待つ理由がない:ACK をまとめず、小さいものもすぐ送る
+        // ACK をまとめず、小さいものもすぐ送る(対話的な使い方で待たせない)
         s.set_ack_delay(None);
         s.set_nagle_enabled(false);
         s
     }
 
-    /// 待ち受けのソケットを 1 本足す
-    fn add_listener(&mut self, local: IpEndpoint) -> Result<SocketHandle, Errno> {
+    /// インターフェース `iface` に、待ち受けのソケットを 1 本足す
+    fn add_listener(&mut self, iface: usize, local: IpEndpoint) -> Result<H, Errno> {
         let mut s = self.new_tcp();
         let addr = (!local.addr.is_unspecified()).then_some(local.addr);
         s.listen(IpListenEndpoint {
@@ -122,7 +214,7 @@ impl Net {
             port: local.port,
         })
         .map_err(|_| Errno::EINVAL)?;
-        Ok(self.lo.sockets.add(s))
+        Ok(self.add(iface, s))
     }
 }
 
@@ -134,6 +226,40 @@ enum Proto {
 }
 
 static NET: SpinLock<Option<Net>> = SpinLock::new(None);
+
+/// インターフェースを足す。`addr` があればそのアドレスを、`gateway` があればデフォルトルートを設定する。
+/// 返すのはインターフェースの番号
+pub fn attach(dev: Box<dyn NetDev>, addr: Option<IpCidr>, gateway: Option<Ipv4Address>) -> usize {
+    let mut guard = NET.lock();
+    let net = guard.get_or_insert_with(Net::new);
+    let addrs: Vec<IpCidr> = addr.into_iter().collect();
+    let mut stack = Stack::new(dev, &addrs, seed(), crate::time::now_ns());
+    if let Some(gw) = gateway {
+        let _ = stack.iface.routes_mut().add_default_ipv4_route(gw);
+    }
+    net.stacks.push(stack);
+    net.stacks.len() - 1
+}
+
+/// すべてのインターフェースを poll する(届いたパケットを処理し、再送などをする)。
+/// カーネルのスレッドが定期的に呼ぶ。返すのは、次に poll が要るまでの時間(ナノ秒、`max_ns` まで)
+pub fn poll_all(max_ns: u64) -> u64 {
+    with(|net| {
+        let now = crate::time::now_ns();
+        net.stacks
+            .iter_mut()
+            .filter_map(|s| s.poll_delay(now))
+            .fold(max_ns, u64::min)
+    })
+}
+
+/// インターフェース `iface` の IPv4 アドレス
+pub fn ipv4_of(iface: usize) -> Option<Ipv4Address> {
+    NET.lock()
+        .as_ref()
+        .and_then(|n| n.stacks.get(iface))
+        .and_then(|s| s.iface.ipv4_addr())
+}
 
 /// ネットワークを poll してから `f` を呼ぶ(呼んだあとも poll して、書いたものを送り出す)
 fn with<R>(f: impl FnOnce(&mut Net) -> R) -> R {
@@ -210,23 +336,14 @@ fn unspecified() -> IpEndpoint {
     IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED), 0)
 }
 
-/// このマシンのアドレスか(今はループバックだけ)
-fn is_local(addr: IpAddress) -> bool {
-    let IpAddress::Ipv4(ip) = addr;
-    ip.is_unspecified() || ip.octets()[0] == 127
-}
-
 enum State {
     /// 作っただけ(bind していれば local がある。ポートはこのソケットのもの)
     Idle { local: Option<IpEndpoint> },
     /// 待ち受け中。pending は待たせている smoltcp のソケット
-    Listening {
-        local: IpEndpoint,
-        pending: Vec<SocketHandle>,
-    },
+    Listening { local: IpEndpoint, pending: Vec<H> },
     /// つながった。`owns_port`:ポートをこのソケットが持っているか(accept したものは待ち受け側のもの)
     Connected {
-        handle: SocketHandle,
+        handle: H,
         local: IpEndpoint,
         peer: IpEndpoint,
         owns_port: bool,
@@ -241,7 +358,7 @@ pub struct InetSocket {
 
 impl InetSocket {
     /// つながったソケットの (handle, 読む側を閉じたか)
-    fn connection(&self) -> Result<(SocketHandle, bool), Errno> {
+    fn connection(&self) -> Result<(H, bool), Errno> {
         match &*self.state.lock() {
             State::Connected {
                 handle, read_shut, ..
@@ -252,7 +369,7 @@ impl InetSocket {
 }
 
 /// 待たせているソケットのうち、つながったもの(の位置)
-fn ready(net: &mut Net, pending: &[SocketHandle]) -> Option<usize> {
+fn ready(net: &mut Net, pending: &[H]) -> Option<usize> {
     pending.iter().position(|&h| {
         !matches!(
             net.tcp(h).state(),
@@ -276,10 +393,8 @@ impl Socket for InetSocket {
         if !matches!(*state, State::Idle { local: None }) {
             return Err(Errno::EINVAL);
         }
-        if !is_local(ep.addr) {
-            return Err(Errno::EADDRNOTAVAIL);
-        }
         with(|net| {
+            net.owner(ep.addr)?;
             if ep.port == 0 {
                 ep.port = net.ephemeral(Proto::Tcp)?;
             } else if !net.ports.insert((Proto::Tcp, ep.port)) {
@@ -306,8 +421,10 @@ impl Socket for InetSocket {
                 None => IpEndpoint::new(unspecified().addr, net.ephemeral(Proto::Tcp)?),
             };
             let mut pending = Vec::new();
-            for _ in 0..n {
-                pending.push(net.add_listener(local)?);
+            for iface in net.ifaces_for(local.addr)? {
+                for _ in 0..n {
+                    pending.push(net.add_listener(iface, local)?);
+                }
             }
             Ok::<_, Errno>((local, pending))
         })?;
@@ -327,7 +444,7 @@ impl Socket for InetSocket {
             let i = ready(net, pending)?;
             // つながったものを渡し、代わりを補充する
             let handle = pending.remove(i);
-            match net.add_listener(*local) {
+            match net.add_listener(handle.iface, *local) {
                 Ok(h) => pending.push(h),
                 Err(e) => return Some(Err(e)),
             }
@@ -355,24 +472,22 @@ impl Socket for InetSocket {
             State::Listening { .. } => return Err(Errno::EINVAL),
             State::Connected { .. } => return Err(Errno::EISCONN),
         };
-        if !is_local(remote.addr) || remote.addr.is_unspecified() {
-            return Err(Errno::ENETUNREACH);
-        }
         let (handle, port) = with(|net| {
+            let iface = net.route(remote.addr)?;
             let port = match local {
                 Some(l) => l.port,
                 None => net.ephemeral(Proto::Tcp)?,
             };
             let s = net.new_tcp();
-            let handle = net.lo.sockets.add(s);
-            let cx = net.lo.iface.context();
-            let r = net
-                .lo
+            let handle = net.add(iface, s);
+            let stack = &mut net.stacks[iface];
+            let cx = stack.iface.context();
+            let r = stack
                 .sockets
-                .get_mut::<tcp::Socket>(handle)
+                .get_mut::<tcp::Socket>(handle.handle)
                 .connect(cx, remote, port);
             if r.is_err() {
-                net.lo.sockets.remove(handle);
+                net.remove(handle);
                 if local.is_none() {
                     net.ports.remove(&(Proto::Tcp, port));
                 }
@@ -400,7 +515,7 @@ impl Socket for InetSocket {
             }
             Err(e) => {
                 with(|net| {
-                    net.lo.sockets.remove(handle);
+                    net.remove(handle);
                     if local.is_none() {
                         net.ports.remove(&(Proto::Tcp, port));
                     }
@@ -531,7 +646,7 @@ impl Drop for InetSocket {
             }
             State::Listening { local, pending } => {
                 for h in pending {
-                    net.lo.sockets.remove(h);
+                    net.remove(h);
                 }
                 net.ports.remove(&(Proto::Tcp, local.port));
             }
@@ -556,7 +671,8 @@ impl Drop for InetSocket {
 /// UDP のソケットの状態。smoltcp のソケットは、bind したとき(か、最初に送ったとき)に作る
 #[derive(Default)]
 struct UdpState {
-    handle: Option<SocketHandle>,
+    /// smoltcp のソケット(0.0.0.0 で bind したら、インターフェースごとに 1 つずつ)
+    handles: Vec<H>,
     local: Option<IpEndpoint>,
     /// connect した相手(write の宛先)
     peer: Option<IpEndpoint>,
@@ -572,40 +688,53 @@ const UDP_PACKETS: usize = 32;
 
 impl UdpState {
     /// smoltcp のソケットを作って bind する。`ep` のポートが 0 なら自動で振る
-    fn open(&mut self, net: &mut Net, mut ep: IpEndpoint) -> Result<SocketHandle, Errno> {
+    fn open(&mut self, net: &mut Net, mut ep: IpEndpoint) -> Result<(), Errno> {
+        let ifaces = net.ifaces_for(ep.addr)?;
         if ep.port == 0 {
             ep.port = net.ephemeral(Proto::Udp)?;
         } else if !net.ports.insert((Proto::Udp, ep.port)) {
             return Err(Errno::EADDRINUSE);
         }
-        let mut s = udp::Socket::new(
-            udp::PacketBuffer::new(
-                vec![udp::PacketMetadata::EMPTY; UDP_PACKETS],
-                vec![0; BUFFER],
-            ),
-            udp::PacketBuffer::new(
-                vec![udp::PacketMetadata::EMPTY; UDP_PACKETS],
-                vec![0; BUFFER],
-            ),
-        );
         let addr = (!ep.addr.is_unspecified()).then_some(ep.addr);
-        s.bind(IpListenEndpoint {
-            addr,
-            port: ep.port,
-        })
-        .map_err(|_| Errno::EINVAL)?;
-        let h = net.lo.sockets.add(s);
-        self.handle = Some(h);
+        for iface in ifaces {
+            let mut s = udp::Socket::new(
+                udp::PacketBuffer::new(
+                    vec![udp::PacketMetadata::EMPTY; UDP_PACKETS],
+                    vec![0; BUFFER],
+                ),
+                udp::PacketBuffer::new(
+                    vec![udp::PacketMetadata::EMPTY; UDP_PACKETS],
+                    vec![0; BUFFER],
+                ),
+            );
+            s.bind(IpListenEndpoint {
+                addr,
+                port: ep.port,
+            })
+            .map_err(|_| Errno::EINVAL)?;
+            let h = net.add(iface, s);
+            self.handles.push(h);
+        }
         self.local = Some(ep);
-        Ok(h)
+        Ok(())
     }
 
     /// bind していなければ、自動で bind する
-    fn ensure_open(&mut self, net: &mut Net) -> Result<SocketHandle, Errno> {
-        match self.handle {
-            Some(h) => Ok(h),
-            None => self.open(net, unspecified()),
+    fn ensure_open(&mut self, net: &mut Net) -> Result<(), Errno> {
+        if self.handles.is_empty() {
+            self.open(net, unspecified())?;
         }
+        Ok(())
+    }
+
+    /// `dest` に送るときに使うソケット
+    fn handle_for(&self, net: &Net, dest: IpAddress) -> Result<H, Errno> {
+        let iface = net.route(dest)?;
+        self.handles
+            .iter()
+            .find(|h| h.iface == iface)
+            .copied()
+            .ok_or(Errno::ENETUNREACH)
     }
 }
 
@@ -621,13 +750,10 @@ impl Socket for UdpSocket {
     fn bind(&self, _ns: &mut dyn Namespace, raw: &[u8]) -> Result<(), Errno> {
         let ep = parse(raw)?;
         let mut state = self.state.lock();
-        if state.handle.is_some() {
+        if !state.handles.is_empty() {
             return Err(Errno::EINVAL);
         }
-        if !is_local(ep.addr) {
-            return Err(Errno::EADDRNOTAVAIL);
-        }
-        with(|net| state.open(net, ep).map(|_| ()))
+        with(|net| state.open(net, ep))
     }
 
     fn listen(&self, _backlog: usize) -> Result<(), Errno> {
@@ -641,11 +767,11 @@ impl Socket for UdpSocket {
     /// UDP の connect は、宛先を覚えるだけ(パケットは送らない)
     fn connect(&self, _ns: &mut dyn Namespace, raw: &[u8], _nonblock: bool) -> Result<(), Errno> {
         let remote = parse(raw)?;
-        if !is_local(remote.addr) {
-            return Err(Errno::ENETUNREACH);
-        }
         let mut state = self.state.lock();
-        with(|net| state.ensure_open(net))?;
+        with(|net| {
+            net.route(remote.addr)?;
+            state.ensure_open(net)
+        })?;
         state.peer = Some(remote);
         Ok(())
     }
@@ -672,16 +798,17 @@ impl Socket for UdpSocket {
                 Some(raw) => parse(raw)?,
                 None => state.peer.ok_or(Errno::EDESTADDRREQ)?,
             };
-            if !is_local(dest.addr) || dest.addr.is_unspecified() {
-                return Err(Errno::ENETUNREACH);
-            }
-            (with(|net| state.ensure_open(net))?, dest)
+            let h = with(|net| {
+                state.ensure_open(net)?;
+                state.handle_for(net, dest.addr)
+            })?;
+            (h, dest)
         };
         if buf.len() > BUFFER {
             return Err(Errno::EMSGSIZE);
         }
         wait(nonblock, |net| {
-            let s = net.lo.sockets.get_mut::<udp::Socket>(h);
+            let s = net.udp(h);
             match s.send_slice(buf, dest) {
                 Ok(()) => Some(Ok(buf.len())),
                 Err(udp::SendError::BufferFull) => None,
@@ -691,13 +818,14 @@ impl Socket for UdpSocket {
     }
 
     fn recv_from(&self, buf: &mut [u8], nonblock: bool) -> Result<(usize, Vec<u8>), Errno> {
-        let h = {
+        let handles = {
             let mut state = self.state.lock();
-            with(|net| state.ensure_open(net))?
+            with(|net| state.ensure_open(net))?;
+            state.handles.clone()
         };
         wait(nonblock, |net| {
-            let s = net.lo.sockets.get_mut::<udp::Socket>(h);
-            let (data, meta) = s.recv().ok()?;
+            let h = *handles.iter().find(|&&h| net.udp(h).can_recv())?;
+            let (data, meta) = net.udp(h).recv().ok()?;
             // バッファより長いデータグラムは切る(残りは捨てる。Linux と同じ)
             let n = data.len().min(buf.len());
             buf[..n].copy_from_slice(&data[..n]);
@@ -725,10 +853,8 @@ impl File for UdpSocket {
     }
 
     fn poll_readable(&self) -> bool {
-        let Some(h) = self.state.lock().handle else {
-            return false;
-        };
-        with(|net| net.lo.sockets.get_mut::<udp::Socket>(h).can_recv())
+        let handles = self.state.lock().handles.clone();
+        !handles.is_empty() && with(|net| handles.iter().any(|&h| net.udp(h).can_recv()))
     }
 
     fn as_socket(&self) -> Option<&dyn Socket> {
@@ -739,11 +865,13 @@ impl File for UdpSocket {
 impl Drop for UdpSocket {
     fn drop(&mut self) {
         let state = core::mem::take(self.state.get_mut());
-        let (Some(h), Some(local)) = (state.handle, state.local) else {
+        let Some(local) = state.local else {
             return;
         };
         if let Some(net) = NET.lock().as_mut() {
-            net.lo.sockets.remove(h);
+            for h in state.handles {
+                net.remove(h);
+            }
             net.ports.remove(&(Proto::Udp, local.port));
         }
     }

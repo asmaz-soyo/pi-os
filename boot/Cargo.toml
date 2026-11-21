@@ -12,6 +12,7 @@ arch-aarch64 = { path = "../arch/aarch64" }
 userland = { path = "../user" }
 virtio-blk = { path = "../drivers/virtio-blk" }
 virtio-net = { path = "../drivers/virtio-net" }
+smoltcp = { version = "0.14", default-features = false, features = ["proto-ipv4"] }
 spin = { version = "0.9", default-features = false, features = ["once"] }
 
 [lib]

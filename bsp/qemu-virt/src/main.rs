@@ -149,6 +149,14 @@ mod tests {
     }
 
     #[test_case]
+    fn tcp_reaches_the_outside_through_virtio_net() {
+        // QEMU の guestfwd で、10.0.2.100:7 への接続はホストの `cat` につながる(エコーサーバー)
+        let script = b"test \"$(echo hello through virtio-net | nc 10.0.2.100 7)\" = \"hello through virtio-net\"";
+        let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
+        assert_eq!(boot::run_program("/bin/busybox", &argv), Ok(0));
+    }
+
+    #[test_case]
     fn virtio_disk_is_readable_and_writable_through_dev_vda() {
         assert_eq!(boot::run_program("/bin/diskread", &[b"diskread"]), Ok(0));
     }

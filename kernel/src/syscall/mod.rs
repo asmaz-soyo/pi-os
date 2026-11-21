@@ -385,6 +385,8 @@ pub fn dispatch(p: &mut Process, nr: u64, a: [u64; 6]) -> Action {
 #[cfg(test)]
 mod tests_chmod;
 #[cfg(test)]
+mod tests_eth;
+#[cfg(test)]
 mod tests_fifo;
 #[cfg(test)]
 mod tests_inet;
