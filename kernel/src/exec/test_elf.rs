@@ -4,16 +4,26 @@ use std::vec::Vec;
 
 /// テスト用の小さな ELF を組み立てる。`segs` は (種類, フラグ, vaddr, ファイル上のデータ, memsz)。
 pub fn build(machine: u16, segs: &[(u32, u32, u64, &[u8], u64)]) -> Vec<u8> {
+    build_typed(machine, 2, 0x40_1000, segs)
+}
+
+/// 種類(2 = ET_EXEC、3 = ET_DYN)と入口を指定して組み立てる。
+pub fn build_typed(
+    machine: u16,
+    etype: u16,
+    entry: u64,
+    segs: &[(u32, u32, u64, &[u8], u64)],
+) -> Vec<u8> {
     let phoff = 64u64;
     let data_start = phoff + 56 * segs.len() as u64;
     let mut out = Vec::new();
     out.extend_from_slice(b"\x7fELF");
     out.extend_from_slice(&[2, 1, 1, 0]); // 64 ビット、リトルエンディアン、版 1
     out.extend_from_slice(&[0; 8]);
-    out.extend_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    out.extend_from_slice(&etype.to_le_bytes());
     out.extend_from_slice(&machine.to_le_bytes());
     out.extend_from_slice(&1u32.to_le_bytes());
-    out.extend_from_slice(&0x40_1000u64.to_le_bytes()); // entry
+    out.extend_from_slice(&entry.to_le_bytes());
     out.extend_from_slice(&phoff.to_le_bytes());
     out.extend_from_slice(&0u64.to_le_bytes()); // shoff
     out.extend_from_slice(&0u32.to_le_bytes()); // flags

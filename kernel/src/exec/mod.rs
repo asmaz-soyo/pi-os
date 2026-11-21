@@ -4,6 +4,7 @@ pub mod elf;
 
 use crate::Errno;
 use crate::mm::user::UserMemory;
+use alloc::string::String;
 use alloc::vec::Vec;
 use hal::addr::{PAGE_SIZE, VirtAddr};
 use hal::mmu::MapFlags;
@@ -18,6 +19,7 @@ pub const AT_PHDR: u64 = 3;
 pub const AT_PHENT: u64 = 4;
 pub const AT_PHNUM: u64 = 5;
 pub const AT_PAGESZ: u64 = 6;
+pub const AT_BASE: u64 = 7;
 pub const AT_ENTRY: u64 = 9;
 pub const AT_UID: u64 = 11;
 pub const AT_EUID: u64 = 12;
@@ -106,14 +108,13 @@ fn read_exact(image: &(impl Image + ?Sized), offset: u64, buf: &mut [u8]) -> Res
 /// 一度に読む大きさ(1 ページ)
 const CHUNK: usize = 4096;
 
-pub fn load(
-    mem: &mut UserMemory,
-    image: &(impl Image + ?Sized),
-    argv: &[&[u8]],
-    envp: &[&[u8]],
-    random: [u8; 16],
-) -> Result<Loaded, Errno> {
-    // ELF ヘッダとプログラムヘッダだけを読む
+/// 動的リンカを置く場所(mmap の領域の手前)
+pub const INTERP_BASE: u64 = 0x0000_3f00_0000_0000;
+/// 位置独立(ET_DYN)のプログラムを置く場所
+pub const PIE_BASE: u64 = 0x0000_2aaa_0000_0000;
+
+/// ELF ヘッダとプログラムヘッダだけを読む
+fn read_headers(image: &(impl Image + ?Sized)) -> Result<Vec<u8>, Errno> {
     let size = image.size();
     let mut head = alloc::vec![0u8; (size as usize).min(64)];
     read_exact(image, 0, &mut head)?;
@@ -125,38 +126,134 @@ pub fn load(
         head.resize(len, 0);
         read_exact(image, 64, &mut head[64..])?;
     }
-    let elf = elf::parse(&head, size)?;
-    let mut brk = 0;
+    Ok(head)
+}
+
+/// 動的リンクのプログラムなら、インタプリタ(動的リンカ)のパス(PT_INTERP)
+pub fn interpreter(image: &(impl Image + ?Sized)) -> Result<Option<String>, Errno> {
+    let head = read_headers(image)?;
+    let elf = elf::parse(&head, image.size())?;
+    let Some((offset, len)) = elf.interp else {
+        return Ok(None);
+    };
+    let mut path = alloc::vec![0u8; len as usize];
+    read_exact(image, offset, &mut path)?;
+    // 終わりの NUL を外す
+    let path = path.split(|&b| b == 0).next().unwrap_or(&[]);
+    let path = core::str::from_utf8(path).map_err(|_| Errno::ENOEXEC)?;
+    Ok(Some(String::from(path)))
+}
+
+/// セグメントを `bias` だけずらして読み込み、データの終わり(ページ境界)を返す
+fn load_segments(
+    mem: &mut UserMemory,
+    image: &(impl Image + ?Sized),
+    elf: &elf::Elf<'_>,
+    bias: u64,
+) -> Result<u64, Errno> {
+    let mut end = 0;
     for seg in elf.segments() {
+        let vaddr = seg.vaddr.checked_add(bias).ok_or(Errno::ENOEXEC)?;
+        if vaddr
+            .checked_add(seg.memsz)
+            .is_none_or(|e| e > elf::USER_END)
+        {
+            return Err(Errno::ENOEXEC);
+        }
         // 1つのページを2つのセグメントが共有することがある。書き込める方の権限でまとめる
         let flags = if seg.flags.write {
             MapFlags::USER_RW
         } else {
             seg.flags
         };
-        mem.map_zeroed(VirtAddr(seg.vaddr), seg.memsz, flags)?;
+        mem.map_zeroed(VirtAddr(vaddr), seg.memsz, flags)?;
         // 中身はファイルから 1 ページずつ写す
         let mut chunk = [0u8; CHUNK];
         let mut done = 0;
         while done < seg.filesz {
             let n = (seg.filesz - done).min(CHUNK as u64) as usize;
             read_exact(image, seg.offset + done, &mut chunk[..n])?;
-            mem.load(VirtAddr(seg.vaddr + done), &chunk[..n])?;
+            mem.load(VirtAddr(vaddr + done), &chunk[..n])?;
             done += n as u64;
         }
-        brk = brk.max(VirtAddr(seg.vaddr + seg.memsz).align_up().0);
+        end = end.max(VirtAddr(vaddr + seg.memsz).align_up().0);
     }
+    Ok(end)
+}
+
+/// 静的リンクのプログラムを読み込む(動的リンクなら `ENOEXEC`:`load_with_interp` を使う)。
+pub fn load(
+    mem: &mut UserMemory,
+    image: &(impl Image + ?Sized),
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    random: [u8; 16],
+) -> Result<Loaded, Errno> {
+    load_with_interp(mem, image, None::<&[u8]>, argv, envp, random)
+}
+
+/// プログラムを読み込む。動的リンクなら `interp`(PT_INTERP のパスのファイル)も読み込み、
+/// 動的リンカの入口から始める。動的リンカは補助ベクタの AT_BASE(自分の場所)、AT_PHDR、
+/// AT_ENTRY(本体の入口)を見て、共有ライブラリを読み込んでから本体に飛ぶ。
+pub fn load_with_interp<I: Image + ?Sized>(
+    mem: &mut UserMemory,
+    image: &(impl Image + ?Sized),
+    interp: Option<&I>,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    random: [u8; 16],
+) -> Result<Loaded, Errno> {
+    let head = read_headers(image)?;
+    let elf = elf::parse(&head, image.size())?;
+    let bias = if elf.position_independent {
+        PIE_BASE
+    } else {
+        0
+    };
+    let brk = load_segments(mem, image, &elf, bias)?;
+    let main_entry = elf.entry + bias;
+    let (start, base) = match (elf.interp, interp) {
+        (None, _) => (main_entry, None),
+        (Some(_), None) => return Err(Errno::ENOEXEC),
+        (Some(_), Some(ld)) => {
+            let ld_head = read_headers(ld)?;
+            let ld_elf = elf::parse(&ld_head, ld.size())?;
+            // 動的リンカ自身は、ほかのインタプリタを要らない位置独立のもの
+            if ld_elf.interp.is_some() || !ld_elf.position_independent {
+                return Err(Errno::ENOEXEC);
+            }
+            load_segments(mem, ld, &ld_elf, INTERP_BASE)?;
+            (ld_elf.entry + INTERP_BASE, Some(INTERP_BASE))
+        }
+    };
     mem.map_zeroed(
         VirtAddr(STACK_TOP - STACK_SIZE),
         STACK_SIZE,
         MapFlags::USER_RW,
     )?;
-    let sp = build_stack(mem, &elf, argv, envp, random)?;
+    let at = AuxInfo {
+        phdr: elf.phdr_vaddr.map(|p| p + bias),
+        phent: elf.phent as u64,
+        phnum: elf.phnum as u64,
+        entry: main_entry,
+        base,
+    };
+    let sp = build_stack(mem, &at, argv, envp, random)?;
     Ok(Loaded {
-        entry: elf.entry,
+        entry: start,
         sp,
         brk,
     })
+}
+
+/// 補助ベクタに書く、プログラムの情報
+struct AuxInfo {
+    phdr: Option<u64>,
+    phent: u64,
+    phnum: u64,
+    entry: u64,
+    /// 動的リンカを置いた場所
+    base: Option<u64>,
 }
 
 /// 初期スタックを組み立てる。上(高いアドレス)から順に:
@@ -171,7 +268,7 @@ pub fn load(
 /// ```
 fn build_stack(
     mem: &mut UserMemory,
-    elf: &elf::Elf<'_>,
+    elf: &AuxInfo,
     argv: &[&[u8]],
     envp: &[&[u8]],
     random: [u8; 16],
@@ -201,12 +298,15 @@ fn build_stack(
     words.extend(&envp_ptrs);
     words.push(0);
     let mut aux = Vec::new();
-    if let Some(phdr) = elf.phdr_vaddr {
+    if let Some(phdr) = elf.phdr {
         aux.push((AT_PHDR, phdr));
     }
+    if let Some(base) = elf.base {
+        aux.push((AT_BASE, base));
+    }
     aux.extend([
-        (AT_PHENT, elf.phent as u64),
-        (AT_PHNUM, elf.phnum as u64),
+        (AT_PHENT, elf.phent),
+        (AT_PHNUM, elf.phnum),
         (AT_PAGESZ, PAGE_SIZE),
         (AT_ENTRY, elf.entry),
         (AT_UID, 0),
@@ -375,5 +475,120 @@ mod tests {
         mem.copy_from_user(VirtAddr(0x40_0000 + 60000), &mut buf)
             .unwrap();
         assert_eq!(&buf[..], &data[60000..60016]);
+    }
+
+    const INTERP: &[u8] = b"/lib/ld-musl-aarch64.so.1\0";
+
+    /// 動的リンクのプログラム:PT_INTERP と、0x40_0000 のコード
+    fn dynamic_program() -> std::vec::Vec<u8> {
+        use crate::exec::elf::PT_INTERP;
+        build(
+            EM_AARCH64,
+            &[
+                (PT_INTERP, PF_R, 0, INTERP, INTERP.len() as u64),
+                (PT_LOAD, PF_R | PF_X, 0x40_0000, b"MAIN", 4),
+            ],
+        )
+    }
+
+    /// 位置独立(ET_DYN)の動的リンカ:アドレス 0 からのコード、入口は 0x100
+    fn interpreter_image() -> std::vec::Vec<u8> {
+        crate::exec::test_elf::build_typed(
+            EM_AARCH64,
+            3,
+            0x100,
+            &[(PT_LOAD, PF_R | PF_X, 0, b"LDSO", 0x1000)],
+        )
+    }
+
+    fn aux_of(
+        mem: &mut crate::mm::user::UserMemory,
+        sp: u64,
+    ) -> std::collections::BTreeMap<u64, u64> {
+        // argc、argv、NULL、envp、NULL の後ろが補助ベクタ
+        let argc = u64_at(mem, sp);
+        let mut p = sp + 8 * (argc + 2);
+        while u64_at(mem, p) != 0 {
+            p += 8;
+        }
+        p += 8;
+        let mut aux = std::collections::BTreeMap::new();
+        while u64_at(mem, p) != AT_NULL {
+            aux.insert(u64_at(mem, p), u64_at(mem, p + 8));
+            p += 16;
+        }
+        aux
+    }
+
+    #[test]
+    fn the_interpreter_path_is_read_from_pt_interp() {
+        assert_eq!(
+            interpreter(dynamic_program().as_slice())
+                .unwrap()
+                .as_deref(),
+            Some("/lib/ld-musl-aarch64.so.1")
+        );
+        assert_eq!(interpreter(sample().as_slice()).unwrap(), None);
+    }
+
+    #[test]
+    fn a_dynamic_program_starts_in_its_interpreter() {
+        let (mut mem, _) = memory();
+        let ld = interpreter_image();
+        let loaded = load_with_interp(
+            &mut mem,
+            dynamic_program().as_slice(),
+            Some(ld.as_slice()),
+            &[b"prog"],
+            &[],
+            [0; 16],
+        )
+        .unwrap();
+        // 動き出すのは動的リンカの入口(置いた場所 + 0x100)
+        assert_eq!(loaded.entry, INTERP_BASE + 0x100);
+        let mut buf = [0u8; 4];
+        mem.copy_from_user(VirtAddr(INTERP_BASE), &mut buf).unwrap();
+        assert_eq!(&buf, b"LDSO");
+        mem.copy_from_user(VirtAddr(0x40_0000), &mut buf).unwrap();
+        assert_eq!(&buf, b"MAIN");
+        // 動的リンカは補助ベクタで、自分の場所(AT_BASE)と本体の入口(AT_ENTRY)を知る
+        let aux = aux_of(&mut mem, loaded.sp);
+        assert_eq!(aux[&AT_BASE], INTERP_BASE);
+        assert_eq!(aux[&AT_ENTRY], 0x40_1000);
+    }
+
+    #[test]
+    fn a_dynamic_program_without_its_interpreter_is_enoexec() {
+        let (mut mem, _) = memory();
+        assert_eq!(
+            load(
+                &mut mem,
+                dynamic_program().as_slice(),
+                &[b"prog"],
+                &[],
+                [0; 16]
+            )
+            .err(),
+            Some(Errno::ENOEXEC)
+        );
+    }
+
+    #[test]
+    fn a_position_independent_program_is_moved_to_its_base() {
+        // ld-musl を直接実行するときなど:ET_DYN のプログラムは PIE_BASE にずらして置く
+        let (mut mem, _) = memory();
+        let loaded = load(
+            &mut mem,
+            interpreter_image().as_slice(),
+            &[b"ld.so"],
+            &[],
+            [0; 16],
+        )
+        .unwrap();
+        assert_eq!(loaded.entry, PIE_BASE + 0x100);
+        let mut buf = [0u8; 4];
+        mem.copy_from_user(VirtAddr(PIE_BASE), &mut buf).unwrap();
+        assert_eq!(&buf, b"LDSO");
+        assert_eq!(aux_of(&mut mem, loaded.sp)[&AT_ENTRY], PIE_BASE + 0x100);
     }
 }

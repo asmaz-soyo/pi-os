@@ -1,4 +1,5 @@
-//! ELF(Executable and Linkable Format)の読み取り。静的リンクの AArch64 実行ファイルだけを扱う。
+//! ELF(Executable and Linkable Format)の読み取り。AArch64 の実行ファイル(静的リンク、動的リンク)と、
+//! 位置独立の共有オブジェクト(動的リンカ ld-musl など)を扱う。
 //!
 //! ```text
 //! +----------------+  0
@@ -17,6 +18,7 @@ use hal::mmu::MapFlags;
 
 pub const EM_AARCH64: u16 = 183;
 const ET_EXEC: u16 = 2;
+const ET_DYN: u16 = 3;
 pub const PT_LOAD: u32 = 1;
 pub const PT_INTERP: u32 = 3;
 pub const PF_X: u32 = 1;
@@ -51,6 +53,10 @@ pub struct Elf<'a> {
     pub phent: usize,
     /// プログラムヘッダがメモリ上に見えるアドレス(補助ベクタの AT_PHDR 用)
     pub phdr_vaddr: Option<u64>,
+    /// 位置独立(ET_DYN):どこに置いてもよく、アドレスは置いた場所からの相対
+    pub position_independent: bool,
+    /// 動的リンクなら、インタプリタ(動的リンカ)のパスがファイルのどこにあるか (位置, 長さ)
+    pub interp: Option<(u64, u64)>,
 }
 
 fn u16_at(b: &[u8], off: usize) -> Option<u16> {
@@ -114,7 +120,8 @@ pub fn parse(bytes: &[u8], file_size: u64) -> Result<Elf<'_>, Errno> {
     if bytes[4] != 2 || bytes[5] != 1 || bytes[6] != 1 {
         return Err(bad);
     }
-    if u16_at(bytes, 16) != Some(ET_EXEC) || u16_at(bytes, 18) != Some(EM_AARCH64) {
+    let etype = u16_at(bytes, 16).ok_or(bad)?;
+    if (etype != ET_EXEC && etype != ET_DYN) || u16_at(bytes, 18) != Some(EM_AARCH64) {
         return Err(bad);
     }
     let entry = u64_at(bytes, 24).ok_or(bad)?;
@@ -129,11 +136,18 @@ pub fn parse(bytes: &[u8], file_size: u64) -> Result<Elf<'_>, Errno> {
         return Err(bad);
     }
     let mut phdr_vaddr = None;
+    let mut interp = None;
     for i in 0..phnum {
         let ph = phdr_at(bytes, phoff + i * phent).ok_or(bad)?;
         match ph.kind {
-            // 動的リンク(インタプリタが必要)はまだ扱わない
-            PT_INTERP => return Err(bad),
+            // 動的リンク:このパスのプログラム(動的リンカ)に、読み込みの続きを任せる
+            PT_INTERP => {
+                let end = ph.offset.checked_add(ph.filesz).ok_or(bad)?;
+                if end > file_size || ph.filesz == 0 || ph.filesz > 4096 {
+                    return Err(bad);
+                }
+                interp = Some((ph.offset, ph.filesz));
+            }
             PT_LOAD => {
                 let file_end = ph.offset.checked_add(ph.filesz).ok_or(bad)?;
                 let mem_end = ph.vaddr.checked_add(ph.memsz).ok_or(bad)?;
@@ -156,6 +170,8 @@ pub fn parse(bytes: &[u8], file_size: u64) -> Result<Elf<'_>, Errno> {
         phnum,
         phent,
         phdr_vaddr,
+        position_independent: etype == ET_DYN,
+        interp,
     })
 }
 
@@ -247,12 +263,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_dynamically_linked_programs() {
+    fn dynamically_linked_programs_report_their_interpreter() {
         let bytes = build(EM_AARCH64, &[(PT_INTERP, PF_R, 0, b"/lib/ld.so", 10)]);
-        assert_eq!(
-            parse(&bytes, bytes.len() as u64).err(),
-            Some(Errno::ENOEXEC)
-        );
+        let elf = parse(&bytes, bytes.len() as u64).unwrap();
+        let (off, len) = elf.interp.unwrap();
+        assert_eq!(&bytes[off as usize..][..len as usize], b"/lib/ld.so");
+        assert!(!elf.position_independent);
     }
 
     #[test]

@@ -266,6 +266,11 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn dynamically_linked_programs_run_through_ld_musl() {
+            assert_eq!(boot::run_program("/bin/dynhello", &[b"dynhello"]), Ok(0));
+        }
+
+        #[test_case]
         fn micropython_runs_code_and_scripts() {
             let argv: [&[u8]; 3] = [
                 b"micropython",

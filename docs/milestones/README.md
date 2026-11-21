@@ -23,6 +23,7 @@
 | tmpfs、timerfd、epoll、サービスマネージャ | 完了 | `p2-services` |
 | サービスマネージャを Rust で(依存クレートなし) | 完了 | `p2-rust-svcman` |
 | MicroPython(unix ポート) | 完了 | `p2-micropython` |
+| 動的リンク(ld-musl) | 完了 | `p2-dynamic` |
 | GPIO 割り込みの fd、リアルタイム優先度、ジッタ計測 | 完了 | `p2-realtime` |
 | ブロック層(virtio-blk、MBR)、ext2 の読み書き、procfs | 完了 | `p2-ext2` |
 | FAT32 の読み込み(`/boot`) | 完了 | `p2-fat32` |

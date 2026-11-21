@@ -19,8 +19,16 @@ fn main() {
     println!("cargo:rerun-if-env-changed=ZIG");
 
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    // 動的リンカ(musl の libc.so)
+    let ld = build_musl_ldso(&root.join("third_party/musl"), &out);
+    files.push((
+        "lib/ld-musl-aarch64.so.1".to_string(),
+        std::fs::read(ld).unwrap(),
+    ));
     for path in sorted(&root.join("programs")) {
-        let name = path.file_stem().unwrap().to_str().unwrap().to_string();
+        // foo.dyn.c は動的リンクの foo
+        let name = path.file_stem().unwrap().to_str().unwrap();
+        let name = name.strip_suffix(".dyn").unwrap_or(name).to_string();
         let bin = out.join(&name);
         if build_program(&path, &bin, &out) {
             files.push((format!("bin/{name}"), std::fs::read(&bin).unwrap()));
@@ -159,6 +167,54 @@ fn build_rust_program(root: &Path, name: &str, out: &Path) -> PathBuf {
     target_dir.join(TARGET).join("release").join(name)
 }
 
+/// musl の共有ライブラリ libc.so(動的リンカを兼ねる)をビルドする。
+fn build_musl_ldso(dir: &Path, out: &Path) -> PathBuf {
+    const VERSION: &str = "musl-1.2.6";
+    let src = out.join(VERSION);
+    let lib = src.join("lib/libc.so");
+    if lib.exists() {
+        return lib;
+    }
+    if !src.join("configure").exists() {
+        let mut cmd = Command::new("tar");
+        cmd.arg("-xzf")
+            .arg(dir.join(format!("{VERSION}.tar.gz")))
+            .arg("-C")
+            .arg(out);
+        run(cmd, "extracting musl");
+    }
+    let zig = std::env::var("ZIG").unwrap_or_else(|_| "zig".to_string());
+    let mut cmd = Command::new("sh");
+    cmd.current_dir(&src)
+        .env("ZIG_LOCAL_CACHE_DIR", out.join("zig-cache"))
+        .env("ZIG_GLOBAL_CACHE_DIR", out.join("zig-global-cache"))
+        .arg("./configure")
+        .args([
+            "--target=aarch64-linux-musl",
+            "--prefix=/",
+            "--syslibdir=/lib",
+        ])
+        .arg(format!("CC={zig} cc -target aarch64-linux-musl"))
+        .arg(format!("AR={zig} ar"))
+        .arg(format!("RANLIB={zig} ranlib"))
+        // デバッグ情報と(動的リンクに要らない)シンボル表を付けない
+        .arg("CFLAGS=-g0")
+        .arg("LDFLAGS=-s")
+        .stdout(std::process::Stdio::null());
+    run(cmd, "configuring musl");
+    let jobs = std::env::var("NUM_JOBS").unwrap_or_else(|_| "4".to_string());
+    let mut cmd = Command::new("make");
+    cmd.current_dir(&src)
+        .env_remove("DEBUG")
+        .env("ZIG_LOCAL_CACHE_DIR", out.join("zig-cache"))
+        .env("ZIG_GLOBAL_CACHE_DIR", out.join("zig-global-cache"))
+        .arg(format!("-j{jobs}"))
+        .arg("lib/libc.so")
+        .stdout(std::process::Stdio::null());
+    run(cmd, "building musl libc.so");
+    lib
+}
+
 /// MicroPython の unix ポートをビルドする(ffi、btree、ssl、frozen モジュールはなし:サブモジュールが要るため)。
 /// 1. ホストの cc で mpy-cross(.py をバイトコードにする道具)を作る
 /// 2. zig cc(`zcc.sh` / `zcpp.sh`)で aarch64-linux-musl の静的リンクの `micropython` を作る
@@ -248,14 +304,13 @@ fn build_busybox(dir: &Path, out: &Path) -> PathBuf {
 /// `src`(.S か .c)を `bin` にビルドする。それ以外の拡張子なら false。
 fn build_program(src: &Path, bin: &Path, out: &Path) -> bool {
     let mut cmd = zig(out);
-    cmd.args([
-        "cc",
-        "-target",
-        "aarch64-linux-musl",
-        "-static",
-        "-s",
-        "-O2",
-    ]);
+    cmd.args(["cc", "-target", "aarch64-linux-musl", "-s", "-O2"]);
+    if src.to_str().is_some_and(|p| p.ends_with(".dyn.c")) {
+        // 動的リンク:実行時に /lib/ld-musl-aarch64.so.1 が libc を結びつける
+        cmd.arg("-dynamic");
+    } else {
+        cmd.arg("-static");
+    }
     match src.extension().and_then(|e| e.to_str()) {
         // アセンブリだけのプログラム(libc を使わない)
         Some("S") => cmd.arg("-nostdlib"),

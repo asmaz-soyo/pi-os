@@ -23,6 +23,7 @@ docs
 etc
 hello.js
 hello.py
+lib
 proc
 tmp
 pi-os:/$ cat /proc/version

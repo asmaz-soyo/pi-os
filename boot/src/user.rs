@@ -241,7 +241,13 @@ pub fn spawn_user(
             .wrapping_mul(0x9e37_79b9_7f4a_7c15)
             .to_le_bytes(),
     );
-    let loaded = kernel::exec::load(&mut mem, image, argv, &[], random)?;
+    // 動的リンクなら、動的リンカ(PT_INTERP のパス)も読み込む
+    let interp = match kernel::exec::interpreter(image)? {
+        Some(path) => Some(vfs().0.lookup(&path)?),
+        None => None,
+    };
+    let loaded =
+        kernel::exec::load_with_interp(&mut mem, image, interp.as_deref(), argv, &[], random)?;
     let (vfs, console) = vfs();
     let mut process = Process::new(mem, loaded, vfs, console);
     process.new_space = new_user_space;
