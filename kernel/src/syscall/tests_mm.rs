@@ -394,27 +394,48 @@ fn sched_yield_returns_zero() {
 }
 
 #[test]
-fn sigaltstack_is_accepted_and_reports_no_stack() {
-    // Rust の標準ライブラリが起動時に呼ぶ(スタックあふれを知らせるシグナル用)。シグナルはまだ配送しない
+fn sigaltstack_sets_and_reports_the_signal_stack() {
+    // Rust の標準ライブラリが起動時に呼ぶ(スタックあふれを知らせるシグナル用)
     const SS_DISABLE: u32 = 2;
     let (mut p, _) = process();
-    put(&mut p, SCRATCH + 0x100, &[0xff; 24]);
+    let stack_t = |sp: u64, flags: u32, size: u64| {
+        let mut b = [0u8; 24];
+        b[..8].copy_from_slice(&sp.to_le_bytes());
+        b[8..12].copy_from_slice(&flags.to_le_bytes());
+        b[16..].copy_from_slice(&size.to_le_bytes());
+        b
+    };
+    // 最初は「なし」
     assert_eq!(
-        call(
-            &mut p,
-            nr::SIGALTSTACK,
-            [SCRATCH, SCRATCH + 0x100, 0, 0, 0, 0]
-        ),
+        call(&mut p, nr::SIGALTSTACK, [0, SCRATCH + 0x100, 0, 0, 0, 0]),
         0
     );
-    // stack_t { ss_sp, ss_flags, ss_size }
     let old = get(&mut p, SCRATCH + 0x100, 24);
-    assert_eq!(old[..8], [0; 8]);
     assert_eq!(
         u32::from_le_bytes(old[8..12].try_into().unwrap()),
         SS_DISABLE
     );
-    assert_eq!(call(&mut p, nr::SIGALTSTACK, [0, 0, 0, 0, 0, 0]), 0);
+    // 設定して、読み戻す
+    put(&mut p, SCRATCH, &stack_t(0x5000_0000, 0, 0x4000));
+    assert_eq!(call(&mut p, nr::SIGALTSTACK, [SCRATCH, 0, 0, 0, 0, 0]), 0);
+    assert_eq!(
+        call(&mut p, nr::SIGALTSTACK, [0, SCRATCH + 0x100, 0, 0, 0, 0]),
+        0
+    );
+    assert_eq!(
+        get(&mut p, SCRATCH + 0x100, 24),
+        stack_t(0x5000_0000, 0, 0x4000)
+    );
+    // 小さすぎる(MINSIGSTKSZ より小さい)
+    put(&mut p, SCRATCH, &stack_t(0x5000_0000, 0, 0x100));
+    assert_eq!(
+        call(&mut p, nr::SIGALTSTACK, [SCRATCH, 0, 0, 0, 0, 0]),
+        err(Errno::ENOMEM)
+    );
+    // 外す
+    put(&mut p, SCRATCH, &stack_t(0, SS_DISABLE, 0));
+    assert_eq!(call(&mut p, nr::SIGALTSTACK, [SCRATCH, 0, 0, 0, 0, 0]), 0);
+    assert_eq!(p.sig_altstack.2, 0);
 }
 
 #[test]

@@ -371,8 +371,8 @@ impl<B: Board> Handler for Exceptions<B> {
         }
     }
 
-    fn before_return_to_user(&self, _frame: &mut TrapFrame) {
-        user::before_return_to_user();
+    fn before_return_to_user(&self, frame: &mut TrapFrame) {
+        user::before_return_to_user(frame);
         kernel::process::before_return_to_user();
     }
 

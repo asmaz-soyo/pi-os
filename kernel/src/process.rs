@@ -73,6 +73,8 @@ pub struct Process {
     pub sig_actions: Arc<SpinLock<crate::signal::Actions>>,
     /// マスクしているシグナル(スレッドごと)
     pub sig_blocked: u64,
+    /// シグナル用の別のスタック(sigaltstack):(場所, フラグ, 大きさ)。大きさ 0 はなし
+    pub sig_altstack: (u64, i32, u64),
     /// リアルタイム優先度(0 = 通常 SCHED_OTHER、1〜99 = SCHED_FIFO)
     pub rt_priority: u8,
     /// 作るときに消す権限のビット(umask)
@@ -104,6 +106,7 @@ impl Process {
             cred: Credentials::root(),
             sig_actions: Arc::new(SpinLock::new(crate::signal::Actions::default())),
             sig_blocked: 0,
+            sig_altstack: (0, 0, 0),
             rt_priority: 0,
             umask: 0o022,
         }
@@ -126,6 +129,7 @@ impl Process {
             vfs: self.vfs.clone(),
             sig_actions: self.sig_actions.clone(),
             sig_blocked: self.sig_blocked,
+            sig_altstack: (0, 0, 0), // 別のスタックはスレッドごと(新しいスレッドは持たない)
             cred: self.cred.clone(),
             rt_priority: self.rt_priority,
             umask: self.umask,
@@ -150,6 +154,7 @@ impl Process {
             vfs: self.vfs.clone(),
             sig_actions: Arc::new(SpinLock::new(self.sig_actions.lock().clone())),
             sig_blocked: self.sig_blocked,
+            sig_altstack: self.sig_altstack, // fork は受け継ぐ
             cred: self.cred.clone(),
             rt_priority: self.rt_priority,
             umask: self.umask,

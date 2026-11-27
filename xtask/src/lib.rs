@@ -593,6 +593,7 @@ pub const COMPAT_CASES: &[(&str, &[&str])] = &[
     ("thread0", &[]),
     ("threads", &[]),
     ("rthreads", &[]),
+    ("signals", &[]),
     ("busybox", &["echo", "hello", "world"]),
     ("busybox", &["seq", "3"]),
     ("busybox", &["expr", "6", "*", "7"]),

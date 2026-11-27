@@ -104,14 +104,33 @@ pub fn prctl(p: &mut Process, option: u64, arg: u64) -> Result<u64, Errno> {
     }
 }
 
-/// sigaltstack(new, old):シグナル用の別のスタック。シグナルはまだ配送しないので、
-/// 新しい設定は受け付けるだけで、前の設定は「なし」(SS_DISABLE)を返す。
-pub fn sigaltstack(p: &mut Process, old: u64) -> Result<u64, Errno> {
-    const SS_DISABLE: u32 = 2;
-    if old != 0 {
-        // stack_t { void *ss_sp; int ss_flags; size_t ss_size; }(24 バイト)
+/// sigaltstack(new, old):シグナルのハンドラを動かす別のスタック(SA_ONSTACK のとき使う)。
+/// `stack_t { void *ss_sp; int ss_flags; size_t ss_size; }`(24 バイト)
+pub fn sigaltstack(p: &mut Process, new: u64, old: u64) -> Result<u64, Errno> {
+    const SS_DISABLE: i32 = 2;
+    const MINSIGSTKSZ: u64 = 5120; // arm64
+    let prev = p.sig_altstack;
+    if new != 0 {
         let mut b = [0u8; 24];
-        b[8..12].copy_from_slice(&SS_DISABLE.to_le_bytes());
+        p.mem.copy_from_user(VirtAddr(new), &mut b)?;
+        let sp = u64::from_le_bytes(b[0..8].try_into().unwrap());
+        let flags = i32::from_le_bytes(b[8..12].try_into().unwrap());
+        let size = u64::from_le_bytes(b[16..24].try_into().unwrap());
+        p.sig_altstack = if flags & SS_DISABLE != 0 {
+            (0, SS_DISABLE, 0)
+        } else if size < MINSIGSTKSZ {
+            return Err(Errno::ENOMEM);
+        } else {
+            (sp, 0, size)
+        };
+    }
+    if old != 0 {
+        let (sp, flags, size) = prev;
+        let flags = if size == 0 { SS_DISABLE } else { flags };
+        let mut b = [0u8; 24];
+        b[0..8].copy_from_slice(&sp.to_le_bytes());
+        b[8..12].copy_from_slice(&flags.to_le_bytes());
+        b[16..24].copy_from_slice(&size.to_le_bytes());
         p.mem.copy_to_user(VirtAddr(old), &b)?;
     }
     Ok(0)

@@ -3,6 +3,7 @@
 //! 「準備ができたか」を繰り返し確かめ、その合間にほかのタスクへ譲る。
 
 use crate::Errno;
+use crate::process::PROCESSES;
 use crate::process::Process;
 use crate::wait::{earliest, register_poll};
 use alloc::vec;
@@ -102,6 +103,9 @@ pub fn pselect6(
             write_set(p, ex, &vec![0; words])?;
             return Ok(count);
         }
+        if PROCESSES.has_signal(p.pid, p.sig_blocked) {
+            return Err(Errno::EINTR);
+        }
         reg.sleep(wake_at);
     }
 }
@@ -146,6 +150,10 @@ pub fn ppoll(p: &mut Process, fds: u64, nfds: u64, ts: u64) -> Result<u64, Errno
         if count > 0 || expired(deadline) {
             p.mem.copy_to_user(VirtAddr(fds), &raw)?;
             return Ok(count);
+        }
+        // シグナルが来た(pause() も、fd のない ppoll)
+        if PROCESSES.has_signal(p.pid, p.sig_blocked) {
+            return Err(Errno::EINTR);
         }
         reg.sleep(wake_at);
     }

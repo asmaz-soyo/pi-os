@@ -255,6 +255,11 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn signal_handlers_masks_and_default_actions_work() {
+            assert_eq!(boot::run_program("/bin/signals", &[b"signals"]), Ok(0));
+        }
+
+        #[test_case]
         fn rust_std_threads_work() {
             assert_eq!(boot::run_program("/bin/rthreads", &[b"rthreads"]), Ok(0));
         }
@@ -498,7 +503,9 @@ macro_rules! common_tests {
         fn two_processes_talk_over_tcp_on_loopback() {
             // サーバー(nc -l)を後ろで動かし、クライアントがつながるまで試し直す
             // (シェルの wait は rt_sigsuspend を使うのでまだ使えない。受け取ったファイルができるまで待つ)
-            let script = b"nc -l -p 7300 < /dev/null > /tmp/got & \
+            // サーバーの標準入力は 2 秒閉じないパイプにする。/dev/null だとサーバーがすぐ FIN を送り、
+            // BusyBox の nc のクライアントは、その EOF を読むと送る前に終わることがある
+            let script = b"/bin/busybox sleep 2 | nc -l -p 7300 > /tmp/got & \
                 for i in $(seq 20); do echo hello over tcp | nc 127.0.0.1 7300 && break; done; \
                 for i in $(seq 1000); do test -s /tmp/got && break; done; \
                 test \"$(cat /tmp/got)\" = \"hello over tcp\"";

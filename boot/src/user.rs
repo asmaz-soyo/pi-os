@@ -18,7 +18,7 @@ use kernel::fs::initramfs::Initramfs;
 use kernel::fs::vfs::{File, FileSystem, Vfs};
 use kernel::mm::user::UserMemory;
 use kernel::process::{ExitStatus, PROCESSES, Process};
-use kernel::signal::Disposition;
+use kernel::signal::{Disposition, SigAction};
 use kernel::syscall::Action;
 
 /// カーネルのフレーム割り当て器(物理メモリ)。
@@ -207,6 +207,7 @@ pub(crate) fn user_synchronous(frame: &mut TrapFrame) {
             match action {
                 Action::Return(value) => frame.x[0] = value,
                 Action::Exit(status) => finish(ExitStatus::Code(status)),
+                Action::SigReturn => sigreturn(pid, frame),
                 Action::ExitGroup(status) => {
                     let tgid = PROCESSES.with(pid, |p| p.tgid).unwrap_or(pid);
                     let status = ExitStatus::Code(status);
@@ -248,11 +249,10 @@ pub(crate) fn user_synchronous(frame: &mut TrapFrame) {
     }
 }
 
-/// EL0 に戻る直前(`before_return_to_user`)の、プロセスに関する処理。
-pub(crate) fn before_return_to_user() {
+/// EL0 に戻る直前(`before_return_to_user`)の、プロセスに関する処理:保留中のシグナルを配る。
+/// ハンドラを呼ぶものは 1 つだけ(残りは、ハンドラから戻ってユーザーに戻るときに)
+pub(crate) fn before_return_to_user(frame: &mut TrapFrame) {
     let pid = kernel::sched::current();
-    // 保留中のシグナル(今は「強制終了」だけ)
-    // 保留中のシグナルを配る
     loop {
         let Some(blocked) = PROCESSES.with(pid, |p| p.sig_blocked) else {
             return;
@@ -264,17 +264,93 @@ pub(crate) fn before_return_to_user() {
             .with(pid, |p| p.sig_actions.lock().disposition(sig))
             .expect("checked above");
         match disposition {
-            Disposition::Terminate => {
-                // グループごと終わる(終了ステータスは 128 + 番号)
-                let tgid = PROCESSES.with(pid, |p| p.tgid).unwrap_or(pid);
-                let status = ExitStatus::Signal(sig as i32);
-                PROCESSES.exit_group(pid, tgid, status);
-                finish(status);
+            Disposition::Ignore => {}
+            Disposition::Terminate => terminate(pid, sig),
+            Disposition::Handle(act) => {
+                if !deliver(pid, frame, sig, act) {
+                    // フレームを積めない(スタックが壊れている):Linux と同じく SIGSEGV で終わる
+                    terminate(pid, kernel::signal::SIGSEGV);
+                }
+                return;
             }
-            // ハンドラを呼ぶのは次の段階。それまでは無視する(シェルは SIGCHLD などにハンドラを置く)
-            Disposition::Ignore | Disposition::Handle(_) => {}
         }
     }
+}
+
+/// シグナルの既定の動作で、グループごと終わる(終了ステータスは 128 + 番号)
+fn terminate(pid: kernel::process::Pid, sig: u32) -> ! {
+    let tgid = PROCESSES.with(pid, |p| p.tgid).unwrap_or(pid);
+    let status = ExitStatus::Signal(sig as i32);
+    PROCESSES.exit_group(pid, tgid, status);
+    finish(status)
+}
+
+/// ハンドラを呼ぶ:ユーザーのスタック(SA_ONSTACK なら別のスタック)にシグナルフレームを積み、
+/// マスクを足して、ハンドラから始めるようにレジスタを変える
+fn deliver(pid: kernel::process::Pid, frame: &mut TrapFrame, sig: u32, act: SigAction) -> bool {
+    use arch_aarch64::signal::{FRAME_SIZE, SigInfo, Stack};
+    use kernel::signal::{SA_NODEFER, SA_ONSTACK, SA_RESETHAND, UNBLOCKABLE, bit};
+    const SS_ONSTACK: i32 = 1;
+    const SS_DISABLE: i32 = 2;
+    let done = PROCESSES.with(pid, |p| {
+        let (alt_sp, _, alt_size) = p.sig_altstack;
+        let on_alt = alt_size != 0 && frame.sp_el0 > alt_sp && frame.sp_el0 <= alt_sp + alt_size;
+        let top = if act.flags & SA_ONSTACK != 0 && alt_size != 0 && !on_alt {
+            alt_sp + alt_size
+        } else {
+            frame.sp_el0
+        };
+        let stack = Stack {
+            sp: alt_sp,
+            flags: if alt_size == 0 {
+                SS_DISABLE
+            } else if on_alt {
+                SS_ONSTACK
+            } else {
+                0
+            },
+            size: alt_size,
+        };
+        let info = SigInfo {
+            signo: sig as i32,
+            ..SigInfo::default()
+        };
+        let addr = arch_aarch64::signal::frame_address(top);
+        let mut buf = Box::new([0u8; FRAME_SIZE]);
+        arch_aarch64::signal::write_frame(&mut buf, frame, &info, p.sig_blocked, &stack);
+        p.mem.copy_to_user(VirtAddr(addr), &buf[..]).ok()?;
+        // ハンドラの間は sa_mask と(SA_NODEFER でなければ)同じシグナルもマスクする
+        let mut blocked = p.sig_blocked | act.mask;
+        if act.flags & SA_NODEFER == 0 {
+            blocked |= bit(sig);
+        }
+        p.sig_blocked = blocked & !UNBLOCKABLE;
+        if act.flags & SA_RESETHAND != 0 {
+            let _ = p.sig_actions.lock().set(sig, SigAction::default());
+        }
+        Some(addr)
+    });
+    match done.flatten() {
+        Some(addr) => {
+            arch_aarch64::signal::enter_handler(frame, addr, sig, act.handler, act.restorer);
+            true
+        }
+        None => false,
+    }
+}
+
+/// rt_sigreturn:スタックのシグナルフレームから、レジスタとマスクを戻す
+fn sigreturn(pid: kernel::process::Pid, frame: &mut TrapFrame) {
+    use arch_aarch64::signal::FRAME_SIZE;
+    let mut buf = Box::new([0u8; FRAME_SIZE]);
+    let read = PROCESSES.with(pid, |p| {
+        p.mem.copy_from_user(VirtAddr(frame.sp_el0), &mut buf[..])
+    });
+    if !matches!(read, Some(Ok(()))) {
+        terminate(pid, kernel::signal::SIGSEGV);
+    }
+    let mask = arch_aarch64::signal::read_frame(&buf, frame);
+    PROCESSES.with(pid, |p| p.sig_blocked = mask & !kernel::signal::UNBLOCKABLE);
 }
 
 /// 新しいプロセスのタスクの入口。アドレス空間を有効にして EL0 に入る。

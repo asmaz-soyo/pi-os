@@ -234,6 +234,9 @@ pub fn epoll_pwait(
             p.mem.copy_to_user(VirtAddr(events), &out)?;
             return Ok(out.len() as u64 / 16);
         }
+        if crate::process::PROCESSES.has_signal(p.pid, p.sig_blocked) {
+            return Err(Errno::EINTR);
+        }
         reg.sleep(wake_at);
     }
 }

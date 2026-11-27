@@ -9,6 +9,7 @@ extern crate std;
 
 pub mod esr;
 pub mod mmu;
+pub mod signal;
 pub mod trap;
 
 #[cfg(target_os = "none")]

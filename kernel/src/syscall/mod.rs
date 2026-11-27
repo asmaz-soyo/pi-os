@@ -84,6 +84,7 @@ pub mod nr {
     pub const RT_SIGACTION: u64 = 134;
     pub const RT_SIGPROCMASK: u64 = 135;
     pub const RT_SIGPENDING: u64 = 136;
+    pub const RT_SIGRETURN: u64 = 139;
     pub const UNAME: u64 = 160;
     pub const UMASK: u64 = 166;
     pub const PRCTL: u64 = 167;
@@ -145,6 +146,9 @@ pub enum Action {
     },
     /// スレッドのグループ全体を終える(exit_group)
     ExitGroup(i32),
+    /// シグナルのハンドラから戻る(rt_sigreturn)。スタックのシグナルフレームから、レジスタと
+    /// マスクを戻す(レジスタの並びはアーキテクチャのものなので、戻すのは boot)
+    SigReturn,
     /// 新しいプログラムの入口から始める(execve)。ユーザー空間は差し替え済み
     Exec { entry: u64, sp: u64 },
 }
@@ -155,6 +159,7 @@ impl core::fmt::Debug for Action {
             Self::Return(v) => write!(f, "Return({v:#x})"),
             Self::Exit(s) => write!(f, "Exit({s})"),
             Self::ExitGroup(s) => write!(f, "ExitGroup({s})"),
+            Self::SigReturn => write!(f, "SigReturn"),
             Self::Fork { sp, .. } => write!(f, "Fork {{ sp: {sp:x?} }}"),
             Self::Exec { entry, sp } => write!(f, "Exec {{ entry: {entry:#x}, sp: {sp:#x} }}"),
         }
@@ -167,6 +172,7 @@ impl PartialEq for Action {
             (Self::Return(a), Self::Return(b)) => a == b,
             (Self::Exit(a), Self::Exit(b)) => a == b,
             (Self::ExitGroup(a), Self::ExitGroup(b)) => a == b,
+            (Self::SigReturn, Self::SigReturn) => true,
             (Self::Exec { entry: a, sp: b }, Self::Exec { entry: c, sp: d }) => a == c && b == d,
             _ => false,
         }
@@ -307,12 +313,13 @@ table! {
     nr::KILL, "kill", 2 => |p, a| result(signal::kill(p, a[0] as i64, a[1]));
     nr::TKILL, "tkill", 2 => |p, a| result(signal::tgkill(p, None, a[0], a[1]));
     nr::TGKILL, "tgkill", 3 => |p, a| result(signal::tgkill(p, Some(a[0]), a[1], a[2]));
-    nr::SIGALTSTACK, "sigaltstack", 2 => |p, a| result(misc::sigaltstack(p, a[1]));
+    nr::SIGALTSTACK, "sigaltstack", 2 => |p, a| result(misc::sigaltstack(p, a[0], a[1]));
     // シグナルはまだ配送しないので、設定は受け付けるだけ
     nr::RT_SIGACTION, "rt_sigaction", 4 => |p, a| result(signal::rt_sigaction(p, a[0], a[1], a[2], a[3]));
     nr::RT_SIGPROCMASK, "rt_sigprocmask", 4
         => |p, a| result(signal::rt_sigprocmask(p, a[0], a[1], a[2], a[3]));
     nr::RT_SIGPENDING, "rt_sigpending", 2 => |p, a| result(signal::rt_sigpending(p, a[0], a[1]));
+    nr::RT_SIGRETURN, "rt_sigreturn", 0 => |p, a| Action::SigReturn;
     nr::UNAME, "uname", 1 => |p, a| result(misc::uname(p, a[0]));
     nr::UMASK, "umask", 1 => |p, a| {
         let old = p.umask;
@@ -407,6 +414,9 @@ pub fn dispatch(p: &mut Process, nr: u64, a: [u64; 6]) -> Action {
                 crate::println!("[trace] {}({status}) = ?", syscall.name)
             }
             Action::Fork { .. } => crate::println!("[trace] {}(…) = (child)", syscall.name),
+            Action::SigReturn => {
+                crate::println!("[trace] {}() = (back from handler)", syscall.name)
+            }
             Action::Exec { .. } => crate::println!("[trace] {}(…) = (new program)", syscall.name),
         }
     }
