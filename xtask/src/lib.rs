@@ -592,6 +592,7 @@ pub const COMPAT_CASES: &[(&str, &[&str])] = &[
     ("compat", &["one"]),
     ("thread0", &[]),
     ("threads", &[]),
+    ("rthreads", &[]),
     ("busybox", &["echo", "hello", "world"]),
     ("busybox", &["seq", "3"]),
     ("busybox", &["expr", "6", "*", "7"]),

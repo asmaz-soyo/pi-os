@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["hal", "kernel", "drivers/pl011", "drivers/gicv2", "drivers/bcm2836-local-intc", "drivers/virtio-mmio", "drivers/virtio-blk", "drivers/virtio-net", "drivers/pl061", "xtask", "arch/aarch64", "user", "boot", "ktest", "bsp/qemu-virt", "bsp/raspi3", "tools/fatimg", "user/rust/svcman"]
+members = ["hal", "kernel", "drivers/pl011", "drivers/gicv2", "drivers/bcm2836-local-intc", "drivers/virtio-mmio", "drivers/virtio-blk", "drivers/virtio-net", "drivers/pl061", "xtask", "arch/aarch64", "user", "boot", "ktest", "bsp/qemu-virt", "bsp/raspi3", "tools/fatimg", "user/rust/svcman", "user/rust/rthreads"]
 default-members = [
     "hal",
     "kernel",

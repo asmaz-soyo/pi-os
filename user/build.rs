@@ -39,6 +39,8 @@ fn main() {
     // Rust のプログラム(user/rust/<名前>)
     let svcman = build_rust_program(&root, "svcman", &out);
     files.push(("bin/svcman".to_string(), std::fs::read(svcman).unwrap()));
+    let rthreads = build_rust_program(&root, "rthreads", &out);
+    files.push(("bin/rthreads".to_string(), std::fs::read(rthreads).unwrap()));
     let micropython = build_micropython(&root.join("third_party/micropython"), &out);
     files.push((
         "bin/micropython".to_string(),

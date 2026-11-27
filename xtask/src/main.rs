@@ -256,6 +256,10 @@ fn compat(cases: &[(String, Vec<String>)], cmd: &Cmd) -> Result<(), String> {
         let path = match prog.as_str() {
             "busybox" => bin.join("busybox-1.38.0/busybox_unstripped"),
             "micropython" => bin.join("micropython-1.29.0/ports/unix/build-standard/micropython"),
+            // Rust のプログラム(user/build.rs の build_rust_program の出力先)
+            "svcman" | "rthreads" => bin
+                .join("rust/aarch64-unknown-linux-musl/release")
+                .join(prog),
             _ => bin.join(prog),
         };
         let out = Command::new("qemu-aarch64")

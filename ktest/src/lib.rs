@@ -240,6 +240,11 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn rust_std_threads_work() {
+            assert_eq!(boot::run_program("/bin/rthreads", &[b"rthreads"]), Ok(0));
+        }
+
+        #[test_case]
         fn a_task_waiting_on_a_wait_queue_sleeps_until_woken() {
             use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
             static Q: kernel::wait::WaitQueue = kernel::wait::WaitQueue::new();
