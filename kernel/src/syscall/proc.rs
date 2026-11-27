@@ -130,8 +130,8 @@ fn exec_inner(p: &mut Process, path: u64, argv: u64, envp: u64) -> Result<(u64, 
     p.name = String::from(path.rsplit('/').next().unwrap_or(&path));
     PROCESSES.rename(p.pid, &p.name);
     p.entry = loaded;
-    p.brk = loaded.brk;
-    p.mmap_next = MMAP_BASE;
+    p.mem.set_brk(loaded.brk);
+    p.mem.set_mmap_next(MMAP_BASE);
     Ok((loaded.entry, loaded.sp))
 }
 

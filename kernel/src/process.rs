@@ -59,10 +59,6 @@ pub struct Process {
     pub mem: UserMemory,
     /// プログラムの入口と初期スタック
     pub entry: Loaded,
-    /// ヒープ(brk)の今の終わり
-    pub brk: u64,
-    /// 次に mmap で使うアドレス
-    pub mmap_next: u64,
     pub fds: FdTable,
     pub cwd: String,
     pub vfs: Arc<Vfs>,
@@ -78,7 +74,9 @@ pub struct Process {
 
 impl Process {
     /// `stdio` を fd 0, 1, 2(標準入力・出力・エラー出力)にしたプロセスを作る。
-    pub fn new(mem: UserMemory, entry: Loaded, vfs: Arc<Vfs>, stdio: Arc<dyn File>) -> Self {
+    pub fn new(mut mem: UserMemory, entry: Loaded, vfs: Arc<Vfs>, stdio: Arc<dyn File>) -> Self {
+        mem.set_brk(entry.brk);
+        mem.set_mmap_next(MMAP_BASE);
         let mut fds = FdTable::new();
         for _ in 0..3 {
             fds.insert(OpenFile::new(stdio.clone(), O_RDWR))
@@ -91,8 +89,6 @@ impl Process {
             new_space: no_space,
             mem,
             entry,
-            brk: entry.brk,
-            mmap_next: MMAP_BASE,
             fds,
             cwd: String::from("/"),
             vfs,
@@ -114,8 +110,6 @@ impl Process {
             new_space: self.new_space,
             mem,
             entry: self.entry,
-            brk: self.brk,
-            mmap_next: self.mmap_next,
             fds: self.fds.clone(),
             cwd: self.cwd.clone(),
             vfs: self.vfs.clone(),

@@ -6,8 +6,10 @@
 //! そのため、ユーザーが変なポインタを渡しても、カーネルはフォールトせずに `EFAULT` を返せる。
 
 use crate::Errno;
+use crate::sync::SpinLock;
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use hal::addr::{PAGE_SIZE, VirtAddr};
 use hal::mmu::{AddressSpace, MapError, MapFlags, PhysMemory};
@@ -15,19 +17,125 @@ use hal::mmu::{AddressSpace, MapError, MapFlags, PhysMemory};
 /// ユーザー空間の上限(48 ビットの下半分)。
 pub const USER_END: u64 = 0x0001_0000_0000_0000;
 
+/// プロセス(スレッドのグループ)のユーザー空間。スレッドどうしは [`UserMemory::share`] で
+/// 同じものを使う(Linux の CLONE_VM)。中身は最後の 1 つが捨てられたときに返す。
+///
+/// システムコールは割り込みを止めて動くので、1 つのシステムコールの途中でほかのスレッドに
+/// 切り替わることはない(眠るときを除く)。だからロックは、メソッドごとに取れば足りる
 pub struct UserMemory {
+    inner: Arc<SpinLock<Space>>,
+}
+
+/// 中身:アドレス空間と、ヒープ(brk)・mmap の位置(スレッドで共有するもの)
+struct Space {
     space: Box<dyn AddressSpace>,
     phys: &'static dyn PhysMemory,
     /// マップしたページ(解放のため)
     pages: BTreeSet<u64>,
+    /// ヒープ(brk)の今の終わり
+    brk: u64,
+    /// 次に mmap で使うアドレス
+    mmap_next: u64,
 }
 
 impl UserMemory {
     pub fn new(space: Box<dyn AddressSpace>, phys: &'static dyn PhysMemory) -> Self {
+        Self::wrap(Space::new(space, phys))
+    }
+
+    fn wrap(space: Space) -> Self {
+        Self {
+            inner: Arc::new(SpinLock::new(space)),
+        }
+    }
+
+    /// 同じユーザー空間をもう 1 つ持つ(スレッドを作るとき。CLONE_VM)
+    pub fn share(&self) -> UserMemory {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// ユーザー空間の目印(同じものを共有していれば同じ。futex の鍵に使う)
+    pub fn id(&self) -> usize {
+        Arc::as_ptr(&self.inner) as usize
+    }
+
+    pub fn brk(&self) -> u64 {
+        self.inner.lock().brk
+    }
+
+    pub fn set_brk(&mut self, brk: u64) {
+        self.inner.lock().brk = brk;
+    }
+
+    pub fn mmap_next(&self) -> u64 {
+        self.inner.lock().mmap_next
+    }
+
+    pub fn set_mmap_next(&mut self, next: u64) {
+        self.inner.lock().mmap_next = next;
+    }
+
+    pub fn map_zeroed(&mut self, va: VirtAddr, len: u64, flags: MapFlags) -> Result<(), Errno> {
+        self.inner.lock().map_zeroed(va, len, flags)
+    }
+
+    pub fn unmap(&mut self, va: VirtAddr, len: u64) {
+        self.inner.lock().unmap(va, len)
+    }
+
+    pub fn protect(&mut self, va: VirtAddr, len: u64, flags: MapFlags) -> Result<(), Errno> {
+        self.inner.lock().protect(va, len, flags)
+    }
+
+    pub fn phys(&self) -> &'static dyn PhysMemory {
+        self.inner.lock().phys
+    }
+
+    /// 同じ中身・同じ権限のユーザー空間を `space` に作る(fork 用。共有はしない)
+    pub fn fork(&mut self, space: Box<dyn AddressSpace>) -> Result<UserMemory, Errno> {
+        Ok(Self::wrap(self.inner.lock().fork(space)?))
+    }
+
+    pub fn is_mapped(&self, va: VirtAddr) -> bool {
+        self.inner.lock().is_mapped(va)
+    }
+
+    /// ユーザーの `va` から `buf.len()` バイトを読む。
+    pub fn copy_from_user(&mut self, va: VirtAddr, buf: &mut [u8]) -> Result<(), Errno> {
+        self.inner.lock().copy_from_user(va, buf)
+    }
+
+    /// ユーザーの `va` に `data` を書く。書き込みが許されたページだけ。
+    pub fn copy_to_user(&mut self, va: VirtAddr, data: &[u8]) -> Result<(), Errno> {
+        self.inner.lock().copy_to_user(va, data)
+    }
+
+    /// プログラムの読み込み用:読み出し専用のページにも書ける。
+    pub fn load(&mut self, va: VirtAddr, data: &[u8]) -> Result<(), Errno> {
+        self.inner.lock().load(va, data)
+    }
+
+    /// NUL で終わる文字列を読む(NUL は含めない)。`max` バイト以内に NUL がなければ `ENAMETOOLONG`。
+    pub fn read_cstr(&mut self, va: VirtAddr, max: usize) -> Result<Vec<u8>, Errno> {
+        self.inner.lock().read_cstr(va, max)
+    }
+
+    /// このアドレス空間を CPU に設定する。
+    pub fn activate(&mut self) {
+        self.inner.lock().activate()
+    }
+}
+
+impl Space {
+    fn new(space: Box<dyn AddressSpace>, phys: &'static dyn PhysMemory) -> Self {
         Self {
             space,
             phys,
             pages: BTreeSet::new(),
+            brk: 0,
+            mmap_next: 0,
         }
     }
 
@@ -90,14 +198,12 @@ impl UserMemory {
         Ok(())
     }
 
-    pub fn phys(&self) -> &'static dyn PhysMemory {
-        self.phys
-    }
-
     /// 同じ中身・同じ権限のユーザー空間を `space` に作る(fork 用。今はすべてのページをすぐに写す。
     /// コピーオンライトは後で)。
-    pub fn fork(&mut self, space: Box<dyn AddressSpace>) -> Result<UserMemory, Errno> {
-        let mut child = UserMemory::new(space, self.phys);
+    fn fork(&mut self, space: Box<dyn AddressSpace>) -> Result<Space, Errno> {
+        let mut child = Space::new(space, self.phys);
+        child.brk = self.brk;
+        child.mmap_next = self.mmap_next;
         let pages: Vec<u64> = self.pages.iter().copied().collect();
         for page in pages {
             let va = VirtAddr(page);
@@ -203,7 +309,7 @@ impl UserMemory {
     }
 }
 
-impl Drop for UserMemory {
+impl Drop for Space {
     fn drop(&mut self) {
         let pages: Vec<u64> = self.pages.iter().copied().collect();
         for page in pages {
@@ -296,6 +402,45 @@ pub(crate) mod tests {
     pub fn memory() -> (UserMemory, &'static FakePhys) {
         let phys = FakePhys::leak();
         (UserMemory::new(Box::new(FakeSpace::default()), phys), phys)
+    }
+
+    #[test]
+    fn shared_memory_is_one_address_space() {
+        // スレッドは同じアドレス空間を使う(CLONE_VM)。最後の 1 つが捨てられたときにフレームを返す
+        let (mut a, phys) = memory();
+        let before = phys.live_frames();
+        a.map_zeroed(VirtAddr(0x40_0000), PAGE_SIZE, MapFlags::USER_RW)
+            .unwrap();
+        let mut b = a.share();
+        assert_eq!(a.id(), b.id());
+        b.copy_to_user(VirtAddr(0x40_0010), b"seen by both")
+            .unwrap();
+        let mut back = [0u8; 12];
+        a.copy_from_user(VirtAddr(0x40_0010), &mut back).unwrap();
+        assert_eq!(&back, b"seen by both");
+        // ヒープの終わりと mmap の位置も共有する(どのスレッドが malloc しても同じ所を使う)
+        a.set_brk(0x50_0000);
+        b.set_mmap_next(0x7000_0000);
+        assert_eq!((b.brk(), a.mmap_next()), (0x50_0000, 0x7000_0000));
+        drop(a);
+        assert!(phys.live_frames() > before, "まだ b が使っている");
+        drop(b);
+        assert_eq!(phys.live_frames(), before);
+    }
+
+    #[test]
+    fn fork_copies_and_does_not_share() {
+        let (mut a, _) = memory();
+        a.map_zeroed(VirtAddr(0x40_0000), PAGE_SIZE, MapFlags::USER_RW)
+            .unwrap();
+        a.set_brk(0x41_0000);
+        let mut b = a.fork(Box::new(FakeSpace::default())).unwrap();
+        assert_ne!(a.id(), b.id());
+        assert_eq!(b.brk(), 0x41_0000);
+        b.copy_to_user(VirtAddr(0x40_0000), b"child").unwrap();
+        let mut back = [0u8; 5];
+        a.copy_from_user(VirtAddr(0x40_0000), &mut back).unwrap();
+        assert_eq!(back, [0; 5]);
     }
 
     #[test]

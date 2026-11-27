@@ -31,21 +31,22 @@ fn flags_of(prot: u64) -> Option<MapFlags> {
 /// brk(addr)。ヒープの終わりを `addr` にする。失敗しても(Linux と同じく)今の値を返す。
 pub fn brk(p: &mut Process, addr: u64) -> u64 {
     let start = p.entry.brk;
+    let brk = p.mem.brk();
     if addr < start || addr >= MMAP_BASE {
-        return p.brk;
+        return brk;
     }
-    let (old_end, new_end) = (page_up(p.brk), page_up(addr));
+    let (old_end, new_end) = (page_up(brk), page_up(addr));
     if new_end > old_end {
         if p.mem
             .map_zeroed(VirtAddr(old_end), new_end - old_end, MapFlags::USER_RW)
             .is_err()
         {
-            return p.brk;
+            return brk;
         }
     } else if new_end < old_end {
         p.mem.unmap(VirtAddr(new_end), old_end - new_end);
     }
-    p.brk = addr;
+    p.mem.set_brk(addr);
     addr
 }
 
@@ -76,8 +77,9 @@ pub fn mmap(
         addr
     } else {
         // 場所はカーネルが選ぶ(下から順に。解放した場所はまだ再利用しない)
-        let start = p.mmap_next;
-        p.mmap_next += len + PAGE_SIZE; // 隣とくっつかないよう 1 ページ空ける
+        // (ヒープと同じく、スレッドどうしで共有する位置)
+        let start = p.mem.mmap_next();
+        p.mem.set_mmap_next(start + len + PAGE_SIZE); // 隣とくっつかないよう 1 ページ空ける
         start
     };
     let Some(map_flags) = flags_of(prot) else {

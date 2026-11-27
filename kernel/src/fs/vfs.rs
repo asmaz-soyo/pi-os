@@ -248,9 +248,14 @@ impl OpenFile {
     }
 }
 
-/// ファイル記述子の表。複製すると(fork)、開いたファイルは共有される。
-#[derive(Clone)]
+/// ファイル記述子の表。複製すると(fork、`clone`)、開いたファイルは共有されるが、表は別になる。
+/// スレッドどうしは [`FdTable::share`] で同じ表を使う(Linux の CLONE_FILES)
 pub struct FdTable {
+    inner: Arc<crate::sync::SpinLock<Table>>,
+}
+
+#[derive(Clone)]
+struct Table {
     fds: Vec<Option<Arc<OpenFile>>>,
     /// close-on-exec の印が付いた番号(execve で閉じる)
     cloexec: alloc::collections::BTreeSet<usize>,
@@ -259,11 +264,30 @@ pub struct FdTable {
 /// 1つのプロセスが開けるファイルの数
 pub const MAX_FDS: usize = 256;
 
-impl FdTable {
-    pub const fn new() -> Self {
+/// fork:表を写す(番号ごとの開いたファイルは共有)
+impl Clone for FdTable {
+    fn clone(&self) -> Self {
+        let table = self.inner.lock().clone();
         Self {
-            fds: Vec::new(),
-            cloexec: alloc::collections::BTreeSet::new(),
+            inner: Arc::new(crate::sync::SpinLock::new(table)),
+        }
+    }
+}
+
+impl FdTable {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(crate::sync::SpinLock::new(Table {
+                fds: Vec::new(),
+                cloexec: alloc::collections::BTreeSet::new(),
+            })),
+        }
+    }
+
+    /// 同じ表をもう 1 つ持つ(スレッドを作るとき)
+    pub fn share(&self) -> FdTable {
+        Self {
+            inner: self.inner.clone(),
         }
     }
 
@@ -274,60 +298,83 @@ impl FdTable {
 
     /// `min` 以上で空いている一番小さい番号に入れる。
     pub fn insert_from(&mut self, min: usize, file: Arc<OpenFile>) -> Result<usize, Errno> {
+        let mut t = self.inner.lock();
         let fd = (min..MAX_FDS)
-            .find(|&i| self.fds.get(i).is_none_or(Option::is_none))
+            .find(|&i| t.fds.get(i).is_none_or(Option::is_none))
             .ok_or(Errno::EMFILE)?;
-        self.insert_at(fd, file)?;
+        let old = t.put(fd, file)?;
+        drop(t);
+        drop(old);
         Ok(fd)
     }
 
     /// 番号 `fd` に入れる(開いていれば閉じてから)。
     pub fn insert_at(&mut self, fd: usize, file: Arc<OpenFile>) -> Result<(), Errno> {
-        if fd >= MAX_FDS {
-            return Err(Errno::EBADF);
-        }
-        if self.fds.len() <= fd {
-            self.fds.resize(fd + 1, None);
-        }
-        self.fds[fd] = Some(file);
-        self.cloexec.remove(&fd);
+        let old = self.inner.lock().put(fd, file)?;
+        drop(old); // 閉じたファイルの後片付けは、表のロックの外で
         Ok(())
     }
 
     pub fn get(&self, fd: u64) -> Result<Arc<OpenFile>, Errno> {
-        self.fds
+        self.inner
+            .lock()
+            .fds
             .get(fd as usize)
             .and_then(Clone::clone)
             .ok_or(Errno::EBADF)
     }
 
     pub fn close(&mut self, fd: u64) -> Result<(), Errno> {
-        let slot = self.fds.get_mut(fd as usize).ok_or(Errno::EBADF)?;
-        self.cloexec.remove(&(fd as usize));
-        slot.take().map(|_| ()).ok_or(Errno::EBADF)
+        let taken = {
+            let mut t = self.inner.lock();
+            t.cloexec.remove(&(fd as usize));
+            t.fds.get_mut(fd as usize).and_then(Option::take)
+        };
+        // 最後の参照なら、ここでファイルが閉じられる(ソケットなら FIN を送るなど。表のロックの外で)
+        taken.map(drop).ok_or(Errno::EBADF)
     }
 
     pub fn set_cloexec(&mut self, fd: u64, on: bool) -> Result<(), Errno> {
         self.get(fd)?;
+        let mut t = self.inner.lock();
         if on {
-            self.cloexec.insert(fd as usize);
+            t.cloexec.insert(fd as usize);
         } else {
-            self.cloexec.remove(&(fd as usize));
+            t.cloexec.remove(&(fd as usize));
         }
         Ok(())
     }
 
     pub fn is_cloexec(&self, fd: u64) -> bool {
-        self.cloexec.contains(&(fd as usize))
+        self.inner.lock().cloexec.contains(&(fd as usize))
     }
 
     /// close-on-exec の印が付いたものを閉じる(execve の成功時)。
     pub fn close_on_exec(&mut self) {
-        for fd in core::mem::take(&mut self.cloexec) {
-            if let Some(slot) = self.fds.get_mut(fd) {
-                *slot = None;
+        let mut closed = Vec::new();
+        {
+            let mut t = self.inner.lock();
+            for fd in core::mem::take(&mut t.cloexec) {
+                if let Some(slot) = t.fds.get_mut(fd) {
+                    closed.push(slot.take());
+                }
             }
         }
+        drop(closed);
+    }
+}
+
+impl Table {
+    /// 番号 `fd` に入れ、前に入っていたものを返す
+    fn put(&mut self, fd: usize, file: Arc<OpenFile>) -> Result<Option<Arc<OpenFile>>, Errno> {
+        if fd >= MAX_FDS {
+            return Err(Errno::EBADF);
+        }
+        if self.fds.len() <= fd {
+            self.fds.resize(fd + 1, None);
+        }
+        self.cloexec.remove(&fd);
+        Ok(self.fds[fd].replace(file))
     }
 }
 
@@ -809,6 +856,21 @@ impl Vfs {
 mod tests {
     use super::*;
     use crate::Errno;
+
+    #[test]
+    fn a_shared_fd_table_is_one_table_but_a_clone_is_a_copy() {
+        let f: alloc::sync::Arc<dyn File> = alloc::sync::Arc::new(Dummy);
+        let mut a = FdTable::new();
+        let mut shared = a.share(); // スレッド(CLONE_FILES)
+        let mut copy = a.clone(); // fork
+        assert_eq!(a.insert(OpenFile::new(f.clone(), O_RDONLY)), Ok(0));
+        assert!(shared.get(0).is_ok(), "同じ表");
+        assert!(copy.get(0).is_err(), "fork の前に作った写し");
+        shared.close(0).unwrap();
+        assert!(a.get(0).is_err());
+        assert_eq!(copy.insert(OpenFile::new(f, O_RDONLY)), Ok(0));
+        assert!(a.get(0).is_err());
+    }
 
     #[test]
     fn normalize_resolves_dots_and_slashes() {
