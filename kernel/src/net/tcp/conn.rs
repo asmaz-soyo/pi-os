@@ -96,6 +96,8 @@ pub struct Conn {
     probe: bool,
     /// TIME-WAIT が終わる時刻
     time_wait_until: Option<u64>,
+    /// 次の dispatch で RST を送る(abort した)
+    rst_pending: bool,
 }
 
 impl Conn {
@@ -129,6 +131,7 @@ impl Conn {
             retries: 0,
             probe: false,
             time_wait_until: None,
+            rst_pending: false,
         }
     }
 
@@ -364,6 +367,10 @@ impl Conn {
 
     /// いま送るべきセグメント(TCP のバイト列)を全部取り出す
     pub fn dispatch(&mut self, now: u64) -> Vec<Vec<u8>> {
+        if core::mem::take(&mut self.rst_pending) {
+            let seq = self.snd_nxt;
+            return alloc::vec![self.segment(seq, RST | ACK, None, &[])];
+        }
         if self.time_wait_until.is_some_and(|t| now >= t) {
             self.state = State::Closed;
         }
@@ -522,6 +529,16 @@ impl Conn {
             _ => return, // もう閉じている
         }
         self.fin_queued = true;
+    }
+
+    /// RST を送って、すぐに終わる(待ち受けをやめたときの、accept されていない接続など)
+    pub fn abort(&mut self) {
+        if !matches!(self.state, State::Closed | State::SynSent) {
+            self.rst_pending = true;
+        }
+        self.state = State::Closed;
+        self.rto_at = None;
+        self.time_wait_until = None;
     }
 
     /// RST で終わったときの理由(ECONNREFUSED / ECONNRESET)、再送をあきらめたとき(ETIMEDOUT)
