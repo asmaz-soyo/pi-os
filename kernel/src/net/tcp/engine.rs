@@ -107,6 +107,17 @@ impl Engine {
         Some(id)
     }
 
+    /// accept できる接続があるか
+    pub fn ready(&self, listener: Id) -> bool {
+        self.listeners.get(&listener).is_some_and(|l| {
+            l.queue.iter().any(|id| {
+                self.conns
+                    .get(id)
+                    .is_some_and(|e| !matches!(e.conn.state, State::SynReceived | State::Closed))
+            })
+        })
+    }
+
     /// 待ち受けをやめる。accept されていない接続は RST で切る
     pub fn unlisten(&mut self, listener: Id) {
         if let Some(l) = self.listeners.remove(&listener) {
@@ -317,7 +328,9 @@ mod tests {
         let c = client.connect(ep(A, 40000), ep(B, 80), 0);
         assert_eq!(server.accept(l), None);
         run(&mut client, &mut server, 0);
+        assert!(server.ready(l));
         let s = server.accept(l).expect("accepted");
+        assert!(!server.ready(l));
         assert_eq!(server.conn(s).unwrap().state, State::Established);
         assert_eq!(
             server.conn(s).unwrap().local,

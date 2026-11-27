@@ -13,10 +13,19 @@
 //! そこで listen では backlog の数だけ smoltcp のソケットを待たせておき、accept でつながったものを
 //! 1 本渡して、代わりの 1 本を補充する。
 //!
+//! TCP は 2 つの実装から選べる(ADR-0006):
+//! - smoltcp の TCP(`socket(AF_INET, SOCK_STREAM, 0)`、ふつうはこちら)
+//! - 自作の TCP(`socket(AF_INET, SOCK_STREAM, 253)`。253 は実験用のプロトコル番号、RFC 3692)。
+//!   各インターフェースの TCP の raw ソケットで IP パケットを受け取り、[`Engine`] に渡す。
+//!   送るものには IPv4 のヘッダを付けて、宛先のインターフェースの raw ソケットに入れる。
+//!   smoltcp の TCP と同時に使える(ポートは共通の表で分ける)
+//!
 //! smoltcp は `poll` を呼んだときだけ動く。システムコールが待つあいだは自分で `poll` を呼び、
 //! だれも待っていないときに届くもののために、カーネルのスレッドが定期的に [`poll_all`] を呼ぶ。
 
 use super::stack::Stack;
+use super::tcp::conn::{Endpoint, State as OwnState};
+use super::tcp::engine::{Engine, Id};
 use super::{
     Namespace, Options, ProtocolFamily, SOCK_DGRAM, SOCK_STREAM, Shutdown, Socket, split_type,
 };
@@ -41,6 +50,8 @@ const AF_INET: u16 = super::AF_INET as u16;
 const BUFFER: usize = 16 * 1024;
 /// 待ち受けで待たせておくソケットの数の上限
 const BACKLOG_MAX: usize = 8;
+/// 自作の TCP を選ぶプロトコル番号(IANA の実験用。RFC 3692)
+pub const IPPROTO_OWN_TCP: u32 = 253;
 /// 自動で振るポートの範囲(Linux の既定の ip_local_port_range に近い)
 const EPHEMERAL: core::ops::RangeInclusive<u16> = 49152..=65535;
 
@@ -65,6 +76,8 @@ struct Net {
     next_port: u16,
     /// 閉じた(close した)が、FIN のやりとりが残っているソケット
     closing: Vec<H>,
+    /// 自作の TCP
+    own: Engine,
 }
 
 fn seed() -> u64 {
@@ -84,13 +97,65 @@ impl Net {
             seed(),
             crate::time::now_ns(),
         );
-        Self {
-            stacks: vec![lo],
-            names: vec![String::from("lo")],
+        let mut net = Self {
+            stacks: Vec::new(),
+            names: Vec::new(),
             ports: BTreeSet::new(),
             next_port: *EPHEMERAL.start(),
             closing: Vec::new(),
+            own: Engine::new(seed(), BUFFER),
+        };
+        net.push("lo", lo);
+        net
+    }
+
+    /// インターフェースを足す(自作の TCP のために、TCP の raw ソケットも付ける)
+    fn push(&mut self, name: &str, mut stack: Stack) -> usize {
+        stack.enable_raw_tcp();
+        self.stacks.push(stack);
+        self.names.push(String::from(name));
+        self.stacks.len() - 1
+    }
+
+    /// 自作の TCP:raw ソケットに届いたものを Engine に渡し、Engine が送るものを raw ソケットに入れる。
+    /// 何か動いたら true
+    fn pump_own(&mut self, now: u64) -> bool {
+        let mut inbound = Vec::new();
+        for stack in &mut self.stacks {
+            while let Some(p) = stack.recv_raw() {
+                inbound.push(p);
+            }
         }
+        let mut changed = !inbound.is_empty();
+        // smoltcp の TCP のソケットが実際に使っているポート。ポートの表だけでは足りない
+        // (close されて表から外れても FIN のやりとりが残っているもの、待ち受けが閉じられたあとも
+        // 続いている accept した接続がある)
+        let smol_ports: BTreeSet<u16> = if inbound.is_empty() {
+            BTreeSet::new()
+        } else {
+            self.stacks.iter().flat_map(|s| s.tcp_ports()).collect()
+        };
+        for packet in &inbound {
+            let Some((src, dst, tcp)) = split_ipv4(packet) else {
+                continue;
+            };
+            if tcp.len() < 4 {
+                continue;
+            }
+            // smoltcp の TCP のポートに来たものは smoltcp が答える。自作のポートか、だれも使っていない
+            // ポートなら、当てはまる接続がなければ自作のほうが RST を返す(bind しただけのポートも
+            // 「だれも使っていない」:Linux も listen 前のポートへの SYN には RST を返す)
+            let port = u16::from_be_bytes([tcp[2], tcp[3]]);
+            let rst = !smol_ports.contains(&port) || self.own.owns_port(port);
+            self.own.input(src, dst, tcp, now, rst);
+        }
+        for (src, dst, tcp) in self.own.output(now) {
+            if let Ok(i) = self.route(IpAddress::Ipv4(dst)) {
+                self.stacks[i].send_raw(&ipv4_packet(src, dst, &tcp));
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// 届いたものを処理しきるまで poll し、閉じ終わったソケットを片付ける
@@ -109,6 +174,7 @@ impl Net {
         for stack in &mut self.stacks {
             changed |= stack.poll(now);
         }
+        changed |= self.pump_own(now);
         let stacks = &mut self.stacks;
         self.closing.retain(|&h| {
             let sockets = &mut stacks[h.iface].sockets;
@@ -238,6 +304,176 @@ enum Proto {
     Udp,
 }
 
+/// IPv4 のパケットを (送り元, 宛先, 中身) に分ける
+fn split_ipv4(p: &[u8]) -> Option<(Ipv4Address, Ipv4Address, &[u8])> {
+    if p.len() < 20 || p[0] >> 4 != 4 {
+        return None;
+    }
+    let header = (p[0] & 0xf) as usize * 4;
+    let total = (u16::from_be_bytes([p[2], p[3]]) as usize).min(p.len());
+    if header < 20 || header > total {
+        return None;
+    }
+    let addr = |i: usize| Ipv4Address::new(p[i], p[i + 1], p[i + 2], p[i + 3]);
+    Some((addr(12), addr(16), &p[header..total]))
+}
+
+/// TCP のセグメントに IPv4 のヘッダ(20 バイト)を付ける。ヘッダのチェックサムは smoltcp が入れる
+fn ipv4_packet(src: Ipv4Address, dst: Ipv4Address, tcp: &[u8]) -> Vec<u8> {
+    let total = (20 + tcp.len()) as u16;
+    let mut p = Vec::with_capacity(total as usize);
+    p.extend_from_slice(&[0x45, 0]); // バージョン 4、ヘッダ 5 × 4 バイト
+    p.extend_from_slice(&total.to_be_bytes());
+    p.extend_from_slice(&[0, 0, 0x40, 0]); // 識別子、分割しない(DF)
+    p.extend_from_slice(&[64, 6, 0, 0]); // TTL、プロトコル(TCP)、チェックサム
+    p.extend_from_slice(&src.octets());
+    p.extend_from_slice(&dst.octets());
+    p.extend_from_slice(tcp);
+    p
+}
+
+fn endpoint(ep: IpEndpoint) -> Endpoint {
+    let IpAddress::Ipv4(addr) = ep.addr;
+    Endpoint {
+        addr,
+        port: ep.port,
+    }
+}
+
+fn ip_endpoint(ep: Endpoint) -> IpEndpoint {
+    IpEndpoint::new(IpAddress::Ipv4(ep.addr), ep.port)
+}
+
+/// TCP の接続:smoltcp のソケットか、自作の TCP の接続か
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum T {
+    Smol(H),
+    Own(Id),
+}
+
+/// 待ち受け:smoltcp は待たせておくソケットの束、自作は 1 つの待ち受け
+enum Listen {
+    Smol(Vec<H>),
+    Own(Id),
+}
+
+/// 2 つの実装の違いを、ここで吸収する(ソケットの層は `T` だけを見る)
+impl Net {
+    /// 3 ウェイハンドシェイクの結果(まだなら None)。つながったら自分の端
+    fn connected(&mut self, t: T) -> Option<Result<Option<IpEndpoint>, Errno>> {
+        match t {
+            T::Smol(h) => match self.tcp(h).state() {
+                tcp::State::SynSent | tcp::State::SynReceived => None,
+                tcp::State::Closed => Some(Err(Errno::ECONNREFUSED)),
+                _ => Some(Ok(self.tcp(h).local_endpoint())),
+            },
+            T::Own(id) => {
+                let c = self.own.conn(id)?;
+                match c.state {
+                    OwnState::SynSent | OwnState::SynReceived => None,
+                    OwnState::Closed => Some(Err(c.error().unwrap_or(Errno::ECONNREFUSED))),
+                    _ => Some(Ok(Some(ip_endpoint(c.local)))),
+                }
+            }
+        }
+    }
+
+    /// 読む。読むものがまだなければ None
+    fn t_recv(&mut self, t: T, buf: &mut [u8]) -> Option<Result<usize, Errno>> {
+        match t {
+            T::Smol(h) => {
+                let s = self.tcp(h);
+                if s.can_recv() {
+                    return Some(s.recv_slice(buf).map_err(|_| Errno::ECONNRESET));
+                }
+                // 相手が FIN を送った(か、接続が終わった):終わり
+                (!s.may_recv()).then_some(Ok(0))
+            }
+            T::Own(id) => {
+                let Some(c) = self.own.conn(id) else {
+                    return Some(Ok(0));
+                };
+                if c.readable() > 0 {
+                    return Some(Ok(c.recv(buf)));
+                }
+                if c.is_eof() || c.state == OwnState::Closed {
+                    return Some(match c.error() {
+                        Some(Errno::ECONNRESET) => Err(Errno::ECONNRESET),
+                        _ => Ok(0),
+                    });
+                }
+                None
+            }
+        }
+    }
+
+    /// 書けるだけ書く(0 もある)。もう書けない(shutdown した、切れた)なら EPIPE
+    fn t_send(&mut self, t: T, data: &[u8]) -> Result<usize, Errno> {
+        match t {
+            T::Smol(h) => {
+                let s = self.tcp(h);
+                if !s.may_send() {
+                    return Err(Errno::EPIPE);
+                }
+                Ok(if s.can_send() {
+                    s.send_slice(data).unwrap_or(0)
+                } else {
+                    0
+                })
+            }
+            T::Own(id) => match self.own.conn(id) {
+                Some(c) if c.may_send() => Ok(c.send(data)),
+                _ => Err(Errno::EPIPE),
+            },
+        }
+    }
+
+    /// 読むものがある(か、終わりを読める)
+    fn t_readable(&mut self, t: T) -> bool {
+        match t {
+            T::Smol(h) => {
+                let s = self.tcp(h);
+                s.can_recv() || !s.may_recv()
+            }
+            T::Own(id) => self
+                .own
+                .conn(id)
+                .is_none_or(|c| c.readable() > 0 || c.is_eof() || c.state == OwnState::Closed),
+        }
+    }
+
+    /// 送るほうを閉じる(FIN を送る)
+    fn t_close(&mut self, t: T) {
+        match t {
+            T::Smol(h) => self.tcp(h).close(),
+            T::Own(id) => {
+                if let Some(c) = self.own.conn(id) {
+                    c.close();
+                }
+            }
+        }
+    }
+
+    /// ソケットが閉じられた:FIN を送り、やりとりが終わったら片付ける
+    fn t_release(&mut self, t: T) {
+        match t {
+            T::Smol(h) => {
+                self.tcp(h).close();
+                self.closing.push(h);
+            }
+            T::Own(id) => self.own.release(id),
+        }
+    }
+
+    /// つながらなかった接続を捨てる
+    fn t_forget(&mut self, t: T) {
+        match t {
+            T::Smol(h) => self.remove(h),
+            T::Own(id) => self.own.release(id),
+        }
+    }
+}
+
 static NET: SpinLock<Option<Net>> = SpinLock::new(None);
 
 /// インターフェースを足す。`addr` があればそのアドレスを、`gateway` があればデフォルトルートを設定する。
@@ -258,9 +494,7 @@ pub fn attach(
     if addr.is_none() {
         stack.start_dhcp();
     }
-    net.stacks.push(stack);
-    net.names.push(String::from(name));
-    net.stacks.len() - 1
+    net.push(name, stack)
 }
 
 /// すべてのインターフェースを 1 巡だけ poll する(届いたパケットを処理し、再送などをする)。
@@ -275,9 +509,11 @@ pub fn poll_all(max_ns: u64) -> u64 {
         return 0;
     }
     let now = crate::time::now_ns();
+    let own = net.own.poll_at().map(|t| t.saturating_sub(now));
     net.stacks
         .iter_mut()
         .filter_map(|s| s.poll_delay(now))
+        .chain(own)
         .fold(max_ns, u64::min)
 }
 
@@ -363,9 +599,10 @@ impl ProtocolFamily for Inet {
         const IPPROTO_UDP: u32 = 17;
         let (kind, _) = split_type(ty)?;
         match (kind, protocol) {
-            (SOCK_STREAM, 0 | IPPROTO_TCP) => Ok(Arc::new(InetSocket {
+            (SOCK_STREAM, 0 | IPPROTO_TCP | IPPROTO_OWN_TCP) => Ok(Arc::new(InetSocket {
                 state: SpinLock::new(State::Idle { local: None }),
                 options: Options::default(),
+                own: protocol == IPPROTO_OWN_TCP,
             })),
             (SOCK_DGRAM, 0 | IPPROTO_UDP) => Ok(Arc::new(UdpSocket {
                 state: SpinLock::new(UdpState::default()),
@@ -407,11 +644,11 @@ fn unspecified() -> IpEndpoint {
 enum State {
     /// 作っただけ(bind していれば local がある。ポートはこのソケットのもの)
     Idle { local: Option<IpEndpoint> },
-    /// 待ち受け中。pending は待たせている smoltcp のソケット
-    Listening { local: IpEndpoint, pending: Vec<H> },
+    /// 待ち受け中
+    Listening { local: IpEndpoint, pending: Listen },
     /// つながった。`owns_port`:ポートをこのソケットが持っているか(accept したものは待ち受け側のもの)
     Connected {
-        handle: H,
+        handle: T,
         local: IpEndpoint,
         peer: IpEndpoint,
         owns_port: bool,
@@ -422,11 +659,13 @@ enum State {
 pub struct InetSocket {
     state: SpinLock<State>,
     options: Options,
+    /// 自作の TCP を使う
+    own: bool,
 }
 
 impl InetSocket {
     /// つながったソケットの (handle, 読む側を閉じたか)
-    fn connection(&self) -> Result<(H, bool), Errno> {
+    fn connection(&self) -> Result<(T, bool), Errno> {
         match &*self.state.lock() {
             State::Connected {
                 handle, read_shut, ..
@@ -488,13 +727,17 @@ impl Socket for InetSocket {
                 Some(l) => l,
                 None => IpEndpoint::new(unspecified().addr, net.ephemeral(Proto::Tcp)?),
             };
+            let ifaces = net.ifaces_for(local.addr)?;
+            if self.own {
+                return Ok((local, Listen::Own(net.own.listen(endpoint(local), n))));
+            }
             let mut pending = Vec::new();
-            for iface in net.ifaces_for(local.addr)? {
+            for iface in ifaces {
                 for _ in 0..n {
                     pending.push(net.add_listener(iface, local)?);
                 }
             }
-            Ok::<_, Errno>((local, pending))
+            Ok::<_, Errno>((local, Listen::Smol(pending)))
         })?;
         *state = State::Listening { local, pending };
         Ok(())
@@ -509,16 +752,26 @@ impl Socket for InetSocket {
             let State::Listening { local, pending } = &mut *state else {
                 return Some(Err(Errno::EINVAL));
             };
-            let i = ready(net, pending)?;
-            // つながったものを渡し、代わりを補充する
-            let handle = pending.remove(i);
-            match net.add_listener(handle.iface, *local) {
-                Ok(h) => pending.push(h),
-                Err(e) => return Some(Err(e)),
-            }
-            let s = net.tcp(handle);
-            let me = s.local_endpoint().unwrap_or(*local);
-            let peer = s.remote_endpoint().unwrap_or(unspecified());
+            let (handle, me, peer) = match pending {
+                Listen::Smol(pending) => {
+                    let i = ready(net, pending)?;
+                    // つながったものを渡し、代わりを補充する
+                    let handle = pending.remove(i);
+                    match net.add_listener(handle.iface, *local) {
+                        Ok(h) => pending.push(h),
+                        Err(e) => return Some(Err(e)),
+                    }
+                    let s = net.tcp(handle);
+                    let me = s.local_endpoint().unwrap_or(*local);
+                    let peer = s.remote_endpoint().unwrap_or(unspecified());
+                    (T::Smol(handle), me, peer)
+                }
+                Listen::Own(l) => {
+                    let id = net.own.accept(*l)?;
+                    let c = net.own.conn(id)?;
+                    (T::Own(id), ip_endpoint(c.local), ip_endpoint(c.remote))
+                }
+            };
             let file: Arc<dyn File> = Arc::new(InetSocket {
                 state: SpinLock::new(State::Connected {
                     handle,
@@ -528,6 +781,7 @@ impl Socket for InetSocket {
                     read_shut: false,
                 }),
                 options: Options::default(),
+                own: self.own,
             });
             Some(Ok((file, to_bytes(peer))))
         })
@@ -546,6 +800,17 @@ impl Socket for InetSocket {
                 Some(l) => l.port,
                 None => net.ephemeral(Proto::Tcp)?,
             };
+            if self.own {
+                let Some(addr) = net.stacks[iface].iface.ipv4_addr() else {
+                    if local.is_none() {
+                        net.ports.remove(&(Proto::Tcp, port));
+                    }
+                    return Err(Errno::ENETUNREACH);
+                };
+                let me = Endpoint { addr, port };
+                let now = crate::time::now_ns();
+                return Ok((T::Own(net.own.connect(me, endpoint(remote), now)), port));
+            }
             let s = net.new_tcp();
             let handle = net.add(iface, s);
             let stack = &mut net.stacks[iface];
@@ -561,14 +826,10 @@ impl Socket for InetSocket {
                 }
                 return Err(Errno::EINVAL);
             }
-            Ok((handle, port))
+            Ok((T::Smol(handle), port))
         })?;
         // 3 ウェイ・ハンドシェイクを待つ
-        let result = wait(false, |net| match net.tcp(handle).state() {
-            tcp::State::SynSent | tcp::State::SynReceived => None,
-            tcp::State::Closed => Some(Err(Errno::ECONNREFUSED)),
-            _ => Some(Ok(net.tcp(handle).local_endpoint())),
-        });
+        let result = wait(false, |net| net.connected(handle));
         match result {
             Ok(me) => {
                 let me = me.unwrap_or(IpEndpoint::new(remote.addr, port));
@@ -583,7 +844,7 @@ impl Socket for InetSocket {
             }
             Err(e) => {
                 with(|net| {
-                    net.remove(handle);
+                    net.t_forget(handle);
                     if local.is_none() {
                         net.ports.remove(&(Proto::Tcp, port));
                     }
@@ -622,7 +883,7 @@ impl Socket for InetSocket {
         }
         if how != Shutdown::Read {
             let h = *handle;
-            with(|net| net.tcp(h).close()); // FIN を送る
+            with(|net| net.t_close(h)); // FIN を送る
         }
         Ok(())
     }
@@ -643,37 +904,20 @@ impl File for InetSocket {
         if read_shut || buf.is_empty() {
             return Ok(0);
         }
-        wait(false, |net| {
-            let s = net.tcp(h);
-            if s.can_recv() {
-                return Some(s.recv_slice(buf).map_err(|_| Errno::ECONNRESET));
-            }
-            // 相手が FIN を送った(か、接続が終わった):終わり
-            if !s.may_recv() {
-                return Some(Ok(0));
-            }
-            None
-        })
+        wait(false, |net| net.t_recv(h, buf))
     }
 
     fn write(&self, _offset: u64, buf: &[u8]) -> Result<usize, Errno> {
         // つながっていない TCP に書くのは EPIPE(Linux と同じ。AF_UNIX は ENOTCONN)
         let (h, _) = self.connection().map_err(|_| Errno::EPIPE)?;
         let mut done = 0;
-        wait(false, |net| {
-            let s = net.tcp(h);
-            if !s.may_send() {
-                // 自分が shutdown した、相手が切った
-                return Some(if done > 0 {
-                    Ok(done)
-                } else {
-                    Err(Errno::EPIPE)
-                });
+        wait(false, |net| match net.t_send(h, &buf[done..]) {
+            // 自分が shutdown した、相手が切った
+            Err(e) => Some(if done > 0 { Ok(done) } else { Err(e) }),
+            Ok(n) => {
+                done += n;
+                (done == buf.len()).then_some(Ok(done))
             }
-            if s.can_send() {
-                done += s.send_slice(&buf[done..]).unwrap_or(0);
-            }
-            (done == buf.len()).then_some(Ok(done))
         })
     }
 
@@ -683,13 +927,12 @@ impl File for InetSocket {
                 handle, read_shut, ..
             } => {
                 let h = *handle;
-                *read_shut
-                    || with(|net| {
-                        let s = net.tcp(h);
-                        s.can_recv() || !s.may_recv()
-                    })
+                *read_shut || with(|net| net.t_readable(h))
             }
-            State::Listening { pending, .. } => with(|net| ready(net, pending).is_some()),
+            State::Listening { pending, .. } => with(|net| match pending {
+                Listen::Smol(p) => ready(net, p).is_some(),
+                Listen::Own(l) => net.own.ready(*l),
+            }),
             State::Idle { .. } => false,
         }
     }
@@ -713,8 +956,13 @@ impl Drop for InetSocket {
                 }
             }
             State::Listening { local, pending } => {
-                for h in pending {
-                    net.remove(h);
+                match pending {
+                    Listen::Smol(pending) => {
+                        for h in pending {
+                            net.remove(h);
+                        }
+                    }
+                    Listen::Own(l) => net.own.unlisten(l),
                 }
                 net.ports.remove(&(Proto::Tcp, local.port));
             }
@@ -725,8 +973,7 @@ impl Drop for InetSocket {
                 ..
             } => {
                 // FIN を送り、やりとりが終わるまで poll で面倒を見る
-                net.tcp(handle).close();
-                net.closing.push(handle);
+                net.t_release(handle);
                 if owns_port {
                     net.ports.remove(&(Proto::Tcp, local.port));
                 }

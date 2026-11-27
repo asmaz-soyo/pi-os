@@ -71,7 +71,8 @@ fn remote_host(end: WireEnd) {
         s.listen(7).unwrap();
         s
     };
-    let mut t = stack.sockets.add(new_tcp());
+    // 何本でも受けられるように、つながったら待ち受けを足す(下のループ)
+    let mut ts = Vec::new();
     let mut u = udp::Socket::new(
         udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 8], vec![0; 4096]),
         udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 8], vec![0; 4096]),
@@ -80,18 +81,29 @@ fn remote_host(end: WireEnd) {
     let u = stack.sockets.add(u);
     loop {
         stack.poll(now());
-        let s = stack.sockets.get_mut::<tcp::Socket>(t);
-        if s.can_recv() && s.can_send() {
-            let mut buf = [0u8; 512];
-            let n = s.recv_slice(&mut buf).unwrap();
-            s.send_slice(&buf[..n]).unwrap();
-        } else if s.state() == tcp::State::CloseWait {
-            // 相手が閉じた:こちらも閉じる
-            s.close();
-        } else if matches!(s.state(), tcp::State::Closed | tcp::State::TimeWait) {
-            // 終わった:次の接続を待つソケットに替える
-            stack.sockets.remove(t);
-            t = stack.sockets.add(new_tcp());
+        ts.retain(|&t| {
+            let s = stack.sockets.get_mut::<tcp::Socket>(t);
+            if s.can_recv() && s.can_send() {
+                let mut buf = [0u8; 512];
+                let n = s.recv_slice(&mut buf).unwrap();
+                s.send_slice(&buf[..n]).unwrap();
+            } else if s.state() == tcp::State::CloseWait {
+                // 相手が閉じた:こちらも閉じる
+                s.close();
+            } else if matches!(s.state(), tcp::State::Closed | tcp::State::TimeWait) {
+                // 終わった
+                stack.sockets.remove(t);
+                return false;
+            }
+            true
+        });
+        // 待ち受けは常に 4 本(つながってから足すまでの隙間に、次の SYN が来ても受けられるように)
+        let listening = ts
+            .iter()
+            .filter(|&&t| stack.sockets.get::<tcp::Socket>(t).state() == tcp::State::Listen)
+            .count();
+        for _ in listening..4 {
+            ts.push(stack.sockets.add(new_tcp()));
         }
         let s = stack.sockets.get_mut::<udp::Socket>(u);
         if let Ok((data, meta)) = s.recv() {
@@ -136,16 +148,31 @@ fn sin(ip: [u8; 4], port: u16) -> [u8; 16] {
 }
 
 fn socket(p: &mut Process, ty: u64) -> u64 {
-    let fd = call(p, nr::SOCKET, [AF_INET, ty, 0, 0, 0, 0]);
+    socket_with(p, ty, 0)
+}
+
+/// `proto`:0 は smoltcp の TCP、253 は自作の TCP
+fn socket_with(p: &mut Process, ty: u64, proto: u64) -> u64 {
+    let fd = call(p, nr::SOCKET, [AF_INET, ty, proto, 0, 0, 0]);
     assert!((fd as i64) >= 0);
     fd
 }
 
 #[test]
 fn tcp_reaches_another_host_over_ethernet() {
+    tcp_echo_over_ethernet(0);
+}
+
+#[test]
+fn own_tcp_reaches_another_host_over_ethernet() {
+    // 自作の TCP が、ARP を通って別のホスト(smoltcp)とやりとりする
+    tcp_echo_over_ethernet(253);
+}
+
+fn tcp_echo_over_ethernet(proto: u64) {
     link_up();
     let (mut p, _) = process();
-    let c = socket(&mut p, SOCK_STREAM);
+    let c = socket_with(&mut p, SOCK_STREAM, proto);
     put(&mut p, SCRATCH + 0x3000, &sin(REMOTE, 7));
     assert_eq!(
         call(&mut p, nr::CONNECT, [c, SCRATCH + 0x3000, 16, 0, 0, 0]),

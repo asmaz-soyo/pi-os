@@ -14,9 +14,11 @@ use alloc::vec::Vec;
 use hal::net::{LinkType, NetDev};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
-use smoltcp::socket::dhcpv4;
+use smoltcp::socket::{dhcpv4, raw};
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr, Ipv4Address, Ipv4Cidr};
+use smoltcp::wire::{
+    EthernetAddress, HardwareAddress, IpCidr, IpProtocol, IpVersion, Ipv4Address, Ipv4Cidr,
+};
 
 /// インターフェースごとに取っておくパケットの記録の大きさ(中身の合計)
 const CAPTURE_LIMIT: usize = 256 * 1024;
@@ -124,6 +126,8 @@ pub struct Stack {
     pub dns: Vec<Ipv4Address>,
     /// 行き来したフレームの記録(pcap)
     pub capture: Capture,
+    /// TCP の raw ソケット(自作の TCP が使う。smoltcp はこれが受けた TCP には RST を返さない)
+    raw: Option<SocketHandle>,
 }
 
 impl Stack {
@@ -156,6 +160,46 @@ impl Stack {
             dhcp: None,
             dns: Vec::new(),
             capture,
+            raw: None,
+        }
+    }
+
+    /// 届いた TCP の IP パケットを、すべて raw ソケットでも受け取るようにする(自作の TCP のため)
+    pub fn enable_raw_tcp(&mut self) {
+        let buffer =
+            || raw::PacketBuffer::new(vec![raw::PacketMetadata::EMPTY; 64], vec![0; 128 * 1024]);
+        let s = raw::Socket::new(
+            Some(IpVersion::Ipv4),
+            Some(IpProtocol::Tcp),
+            buffer(),
+            buffer(),
+        );
+        self.raw = Some(self.sockets.add(s));
+    }
+
+    /// smoltcp の TCP のソケットが使っているポート(待ち受け、つながっているもの、閉じている途中のもの)
+    pub fn tcp_ports(&self) -> impl Iterator<Item = u16> + '_ {
+        self.sockets.iter().filter_map(|(_, s)| match s {
+            smoltcp::socket::Socket::Tcp(t) if t.state() != smoltcp::socket::tcp::State::Closed => {
+                Some(
+                    t.local_endpoint()
+                        .map_or(t.listen_endpoint().port, |e| e.port),
+                )
+            }
+            _ => None,
+        })
+    }
+
+    /// raw ソケットに届いた IP パケット(ヘッダから)を 1 つ取り出す
+    pub fn recv_raw(&mut self) -> Option<Vec<u8>> {
+        let s = self.sockets.get_mut::<raw::Socket>(self.raw?);
+        s.recv().ok().map(|p| p.to_vec())
+    }
+
+    /// IP パケット(ヘッダから)を raw ソケットで送る(実際に出るのは次の poll)。いっぱいなら捨てる
+    pub fn send_raw(&mut self, packet: &[u8]) {
+        if let Some(h) = self.raw {
+            let _ = self.sockets.get_mut::<raw::Socket>(h).send_slice(packet);
         }
     }
 

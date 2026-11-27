@@ -487,6 +487,11 @@ impl Conn {
         .emit(self.local.addr, self.remote.addr)
     }
 
+    /// まだ書ける(close していない、切れていない)
+    pub fn may_send(&self) -> bool {
+        !self.fin_queued && !matches!(self.state, State::Closed | State::TimeWait)
+    }
+
     /// 送るデータを積む。積めた数を返す(バッファがいっぱいなら 0)
     pub fn send(&mut self, data: &[u8]) -> usize {
         if self.fin_queued || self.state == State::Closed {
