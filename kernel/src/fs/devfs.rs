@@ -78,7 +78,7 @@ impl File for ConsoleFile {
         if let Some(rearm) = INPUT_IRQ.get() {
             // 受信割り込みで起こしてもらう。登録してから UART を空にし、それでも読めるものが
             // なければ割り込みを戻して眠る(戻したときにデータが残っていれば、すぐ割り込みが来る)
-            let n = crate::wait::wait_event(&[&TTY_WQ], None, || {
+            let n = crate::wait::wait_event_intr(&[&TTY_WQ], || {
                 self.poll_input();
                 let n = self.tty.lock().read(buf);
                 if n.is_none() {
@@ -86,12 +86,15 @@ impl File for ConsoleFile {
                 }
                 n
             });
-            return Ok(n.unwrap_or(0));
+            return n;
         }
         loop {
             self.poll_input();
             if let Some(n) = self.tty.lock().read(buf) {
                 return Ok(n);
+            }
+            if crate::wait::interrupted() {
+                return Err(Errno::EINTR);
             }
             crate::sched::sleep_until(crate::time::now_ns() + INPUT_CHECK_NS);
         }

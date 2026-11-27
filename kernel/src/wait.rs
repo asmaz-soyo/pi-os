@@ -135,6 +135,29 @@ pub fn wait_event<R>(
     }
 }
 
+/// `cond` が Some を返すまで眠って待つ。マスクされていないシグナルが来たら EINTR
+/// (ユーザーのプロセスの待ち。シグナルは、ユーザーに戻る直前に配られる)
+pub fn wait_event_intr<R>(
+    queues: &[&WaitQueue],
+    mut cond: impl FnMut() -> Option<R>,
+) -> Result<R, crate::Errno> {
+    loop {
+        let reg = register(queues);
+        if let Some(r) = cond() {
+            return Ok(r);
+        }
+        if interrupted() {
+            return Err(crate::Errno::EINTR);
+        }
+        reg.sleep(None);
+    }
+}
+
+/// 今のスレッドに、待ちを中断するシグナルが来ているか
+pub fn interrupted() -> bool {
+    sched::running() && crate::process::PROCESSES.interrupted(sched::current())
+}
+
 /// 2 つの期限の早いほう
 pub fn earliest(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     match (a, b) {

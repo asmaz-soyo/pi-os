@@ -81,6 +81,7 @@ pub mod nr {
     pub const KILL: u64 = 129;
     pub const TKILL: u64 = 130;
     pub const TGKILL: u64 = 131;
+    pub const RT_SIGSUSPEND: u64 = 133;
     pub const RT_SIGACTION: u64 = 134;
     pub const RT_SIGPROCMASK: u64 = 135;
     pub const RT_SIGPENDING: u64 = 136;
@@ -315,6 +316,7 @@ table! {
     nr::TGKILL, "tgkill", 3 => |p, a| result(signal::tgkill(p, Some(a[0]), a[1], a[2]));
     nr::SIGALTSTACK, "sigaltstack", 2 => |p, a| result(misc::sigaltstack(p, a[0], a[1]));
     // シグナルはまだ配送しないので、設定は受け付けるだけ
+    nr::RT_SIGSUSPEND, "rt_sigsuspend", 2 => |p, a| result(signal::rt_sigsuspend(p, a[0], a[1]));
     nr::RT_SIGACTION, "rt_sigaction", 4 => |p, a| result(signal::rt_sigaction(p, a[0], a[1], a[2], a[3]));
     nr::RT_SIGPROCMASK, "rt_sigprocmask", 4
         => |p, a| result(signal::rt_sigprocmask(p, a[0], a[1], a[2], a[3]));
@@ -407,6 +409,23 @@ pub fn dispatch(p: &mut Process, nr: u64, a: [u64; 6]) -> Action {
         return Action::Return(crate::Errno::ENOSYS.as_syscall_return());
     };
     let action = (syscall.handler)(p, a);
+    // 読む人のいないパイプやソケットに書いた:SIGPIPE も送る(send の MSG_NOSIGNAL を除く)
+    const MSG_NOSIGNAL: u64 = 0x4000;
+    if action == Action::Return(crate::Errno::EPIPE.as_syscall_return()) {
+        let flags = match nr {
+            nr::SENDTO => a[3],
+            nr::SENDMSG => a[2],
+            _ => 0,
+        };
+        let writes = matches!(
+            nr,
+            nr::WRITE | nr::WRITEV | nr::PWRITE64 | nr::SENDTO | nr::SENDMSG
+        );
+        // 番号 0 は本物のスレッドではない(カーネルが直接作ったプロセス、ホストのテスト)
+        if writes && flags & MSG_NOSIGNAL == 0 && p.pid != 0 {
+            crate::process::PROCESSES.send(p.pid, crate::signal::SIGPIPE);
+        }
+    }
     if TRACE.load(Ordering::Relaxed) {
         match &action {
             &Action::Return(ret) => crate::println!("{}", trace_line(syscall, &a, ret)),

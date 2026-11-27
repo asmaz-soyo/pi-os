@@ -22,7 +22,7 @@ use crate::Errno;
 use crate::fs::pipe::{self, ReadEnd, WriteEnd};
 use crate::fs::vfs::{File, FileKind, Stat};
 use crate::sync::SpinLock;
-use crate::wait::{WaitQueue, wait_event};
+use crate::wait::{WaitQueue, wait_event_intr};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -342,7 +342,7 @@ impl Socket for UnixSocket {
             take().ok_or(Errno::EAGAIN)?
         } else {
             // つながってくるのを眠って待つ
-            wait_event(&[&listener.wq], None, take).ok_or(Errno::EAGAIN)?
+            wait_event_intr(&[&listener.wq], take)?
         };
         listener.wq.wake_all(); // 列が空いた:いっぱいで待っている connect
         let bytes = peer.to_bytes();
@@ -379,7 +379,7 @@ impl Socket for UnixSocket {
             offer().unwrap_or(Err(Errno::EAGAIN))?;
         } else {
             // accept されて列が空くのを眠って待つ
-            wait_event(&[&listener.wq], None, offer).unwrap_or(Err(Errno::EAGAIN))?;
+            wait_event_intr(&[&listener.wq], offer)??;
         }
         listener.wq.wake_all(); // accept を待っている側
         *self.state.lock() = State::Connected {

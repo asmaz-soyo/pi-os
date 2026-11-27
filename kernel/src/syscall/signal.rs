@@ -3,7 +3,7 @@
 
 use crate::Errno;
 use crate::process::{PROCESSES, Pid, Process};
-use crate::signal::{SigAction, UNBLOCKABLE, valid};
+use crate::signal::{SigAction, valid};
 use hal::addr::VirtAddr;
 
 /// sigset_t の大きさ(カーネルの見方は 64 ビット)
@@ -63,12 +63,27 @@ pub fn rt_sigprocmask(
             SIG_SETMASK => m,
             _ => return Err(Errno::EINVAL),
         };
-        p.sig_blocked = blocked & !UNBLOCKABLE;
+        p.set_sig_blocked(blocked);
     }
     if old != 0 {
         p.mem.copy_to_user(VirtAddr(old), &prev.to_le_bytes())?;
     }
     Ok(0)
+}
+
+/// rt_sigsuspend(mask, sigsetsize):マスクを一時的に `mask` にして、シグナルを待つ。
+/// いつも EINTR で戻る(ハンドラが動いたあと、マスクは元に戻る)
+pub fn rt_sigsuspend(p: &mut Process, mask: u64, size: u64) -> Result<u64, Errno> {
+    if size != SIGSET_SIZE {
+        return Err(Errno::EINVAL);
+    }
+    let mut b = [0u8; 8];
+    p.mem.copy_from_user(VirtAddr(mask), &mut b)?;
+    p.saved_mask = Some(p.sig_blocked);
+    p.set_sig_blocked(u64::from_le_bytes(b));
+    // 待ち行列には登録しない(シグナルを送る側が、スレッドを直接起こす)
+    crate::wait::wait_event_intr(&[], || None::<()>)?;
+    Err(Errno::EINTR)
 }
 
 /// rt_sigpending(set, sigsetsize):マスクされて保留になっているもの

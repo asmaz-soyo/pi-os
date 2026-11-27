@@ -101,9 +101,9 @@ impl File for TimerFd {
             match next {
                 Some(t) => crate::sched::sleep_until(t),
                 None => {
-                    crate::wait::wait_event(&[&self.wq], None, || {
+                    crate::wait::wait_event_intr(&[&self.wq], || {
                         self.state.lock().next.map(|_| ())
-                    });
+                    })?;
                 }
             }
         }

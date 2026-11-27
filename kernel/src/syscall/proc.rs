@@ -208,10 +208,10 @@ pub fn wait4(p: &mut Process, pid: i64, status: u64, options: u64) -> Result<u64
     } else {
         // 子が終わるのを眠って待つ(終わった子があれば、すぐ返る)
         let me = p.pid;
-        let r = crate::wait::wait_event(&[&crate::process::CHILD_WQ], None, || {
-            PROCESSES.wait_child(me, filter).transpose()
-        });
-        r.transpose()?
+        Some(crate::wait::wait_event_intr(
+            &[&crate::process::CHILD_WQ],
+            || PROCESSES.wait_child(me, filter).transpose(),
+        )??)
     };
     let Some((child, st)) = found else {
         return Ok(0);

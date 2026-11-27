@@ -199,10 +199,15 @@ pub(crate) fn user_synchronous(frame: &mut TrapFrame) {
         ExceptionClass::Svc64 => {
             let pid = kernel::sched::current();
             let x = &frame.x;
+            let (nr, orig_x0) = (x[8], x[0]);
             // システムコールの間は、プロセスを表から取り出して使う(待っている間も表を使えるように)
             let mut process = PROCESSES.take(pid).expect("a user process is running");
             let action =
                 kernel::syscall::dispatch(&mut process, x[8], [x[0], x[1], x[2], x[3], x[4], x[5]]);
+            // シグナルで中断された:あとでやり直すかもしれないので、番号と元の x0 を覚えておく
+            if action == Action::Return(Errno::EINTR.as_syscall_return()) {
+                process.restart = Some((nr, orig_x0));
+            }
             PROCESSES.put_back(pid, process);
             match action {
                 Action::Return(value) => frame.x[0] = value,
@@ -253,12 +258,13 @@ pub(crate) fn user_synchronous(frame: &mut TrapFrame) {
 /// ハンドラを呼ぶものは 1 つだけ(残りは、ハンドラから戻ってユーザーに戻るときに)
 pub(crate) fn before_return_to_user(frame: &mut TrapFrame) {
     let pid = kernel::sched::current();
+    let Some(restart) = PROCESSES.with(pid, |p| p.restart.take()) else {
+        return;
+    };
     loop {
-        let Some(blocked) = PROCESSES.with(pid, |p| p.sig_blocked) else {
-            return;
-        };
+        let blocked = PROCESSES.with(pid, |p| p.sig_blocked).unwrap_or(0);
         let Some(sig) = PROCESSES.take_signal(pid, blocked) else {
-            return;
+            break;
         };
         let disposition = PROCESSES
             .with(pid, |p| p.sig_actions.lock().disposition(sig))
@@ -267,6 +273,14 @@ pub(crate) fn before_return_to_user(frame: &mut TrapFrame) {
             Disposition::Ignore => {}
             Disposition::Terminate => terminate(pid, sig),
             Disposition::Handle(act) => {
+                // SA_RESTART:ハンドラから戻ったら、中断されたシステムコールをやり直す
+                // (フレームに積む前に、pc を svc に、x0 を元に戻しておく)
+                if let Some((nr, x0)) = restart
+                    && act.flags & kernel::signal::SA_RESTART != 0
+                    && kernel::signal::restartable(nr)
+                {
+                    rewind(frame, x0);
+                }
                 if !deliver(pid, frame, sig, act) {
                     // フレームを積めない(スタックが壊れている):Linux と同じく SIGSEGV で終わる
                     terminate(pid, kernel::signal::SIGSEGV);
@@ -275,6 +289,22 @@ pub(crate) fn before_return_to_user(frame: &mut TrapFrame) {
             }
         }
     }
+    // ハンドラは動かなかった(シグナルが無視された、など):中断されたシステムコールは
+    // そのままやり直す。rt_sigsuspend で差し替えたマスクは元に戻す
+    if let Some((_, x0)) = restart {
+        rewind(frame, x0);
+    }
+    PROCESSES.with(pid, |p| {
+        if let Some(mask) = p.saved_mask.take() {
+            p.set_sig_blocked(mask);
+        }
+    });
+}
+
+/// システムコールをやり直すように戻す:pc を svc の命令に(4 バイト前)、x0 を元の引数に
+fn rewind(frame: &mut TrapFrame, x0: u64) {
+    frame.elr -= 4;
+    frame.x[0] = x0;
 }
 
 /// シグナルの既定の動作で、グループごと終わる(終了ステータスは 128 + 番号)
@@ -289,7 +319,7 @@ fn terminate(pid: kernel::process::Pid, sig: u32) -> ! {
 /// マスクを足して、ハンドラから始めるようにレジスタを変える
 fn deliver(pid: kernel::process::Pid, frame: &mut TrapFrame, sig: u32, act: SigAction) -> bool {
     use arch_aarch64::signal::{FRAME_SIZE, SigInfo, Stack};
-    use kernel::signal::{SA_NODEFER, SA_ONSTACK, SA_RESETHAND, UNBLOCKABLE, bit};
+    use kernel::signal::{SA_NODEFER, SA_ONSTACK, SA_RESETHAND, bit};
     const SS_ONSTACK: i32 = 1;
     const SS_DISABLE: i32 = 2;
     let done = PROCESSES.with(pid, |p| {
@@ -317,14 +347,16 @@ fn deliver(pid: kernel::process::Pid, frame: &mut TrapFrame, sig: u32, act: SigA
         };
         let addr = arch_aarch64::signal::frame_address(top);
         let mut buf = Box::new([0u8; FRAME_SIZE]);
-        arch_aarch64::signal::write_frame(&mut buf, frame, &info, p.sig_blocked, &stack);
+        // フレームに残すのは、ハンドラから戻ったときのマスク(rt_sigsuspend の中なら、差し替える前のもの)
+        let restore_mask = p.saved_mask.take().unwrap_or(p.sig_blocked);
+        arch_aarch64::signal::write_frame(&mut buf, frame, &info, restore_mask, &stack);
         p.mem.copy_to_user(VirtAddr(addr), &buf[..]).ok()?;
         // ハンドラの間は sa_mask と(SA_NODEFER でなければ)同じシグナルもマスクする
         let mut blocked = p.sig_blocked | act.mask;
         if act.flags & SA_NODEFER == 0 {
             blocked |= bit(sig);
         }
-        p.sig_blocked = blocked & !UNBLOCKABLE;
+        p.set_sig_blocked(blocked);
         if act.flags & SA_RESETHAND != 0 {
             let _ = p.sig_actions.lock().set(sig, SigAction::default());
         }
@@ -350,7 +382,7 @@ fn sigreturn(pid: kernel::process::Pid, frame: &mut TrapFrame) {
         terminate(pid, kernel::signal::SIGSEGV);
     }
     let mask = arch_aarch64::signal::read_frame(&buf, frame);
-    PROCESSES.with(pid, |p| p.sig_blocked = mask & !kernel::signal::UNBLOCKABLE);
+    PROCESSES.with(pid, |p| p.set_sig_blocked(mask));
 }
 
 /// 新しいプロセスのタスクの入口。アドレス空間を有効にして EL0 に入る。

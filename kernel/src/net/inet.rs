@@ -33,7 +33,7 @@ use super::{
 use crate::Errno;
 use crate::fs::vfs::{File, FileKind, Stat};
 use crate::sync::SpinLock;
-use crate::wait::{WaitQueue, wait_event};
+use crate::wait::{WaitQueue, wait_event_intr};
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::string::String;
@@ -625,7 +625,7 @@ fn wait<R>(
     if nonblock {
         return with(&mut f).unwrap_or(Err(Errno::EAGAIN));
     }
-    wait_event(&[&NET_WQ], None, || with(&mut f)).unwrap_or(Err(Errno::EAGAIN))
+    wait_event_intr(&[&NET_WQ], || with(&mut f))?
 }
 
 pub struct Inet;

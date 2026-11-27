@@ -11,7 +11,7 @@
 use crate::Errno;
 use crate::fs::vfs::{File, FileKind, Stat};
 use crate::sync::SpinLock;
-use crate::wait::{WaitQueue, wait_event};
+use crate::wait::{WaitQueue, wait_event_intr};
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 
@@ -102,16 +102,16 @@ pub fn open_fifo(key: (u64, u64), write: bool, nonblock: bool) -> Result<Arc<dyn
             return Err(Errno::ENXIO);
         }
         let end = WriteEnd::open(pipe.clone());
-        wait_event(&[&pipe.wq], None, || {
+        wait_event_intr(&[&pipe.wq], || {
             (pipe.state.lock().readers > 0).then_some(())
-        });
+        })?;
         Ok(Arc::new(end))
     } else {
         let end = ReadEnd::open(pipe.clone());
         if !nonblock {
-            wait_event(&[&pipe.wq], None, || {
+            wait_event_intr(&[&pipe.wq], || {
                 (pipe.state.lock().writers > 0).then_some(())
-            });
+            })?;
         }
         Ok(Arc::new(end))
     }
@@ -127,7 +127,7 @@ impl File for ReadEnd {
             return Ok(0);
         }
         // まだ何もなければ、書かれる(か、書く側が全部閉じる)のを眠って待つ
-        let n = wait_event(&[&self.0.wq], None, || {
+        let n = wait_event_intr(&[&self.0.wq], || {
             let mut s = self.0.state.lock();
             if !s.buf.is_empty() {
                 let n = buf.len().min(s.buf.len());
@@ -140,7 +140,7 @@ impl File for ReadEnd {
         });
         // 空きができた:いっぱいで待っている書く側を起こす
         self.0.wq.wake_all();
-        Ok(n.unwrap_or(0))
+        n
     }
 
     fn poll_readable(&self) -> bool {
@@ -164,7 +164,7 @@ impl File for WriteEnd {
     fn write(&self, _offset: u64, buf: &[u8]) -> Result<usize, Errno> {
         let mut done = 0;
         // 書けるだけ書き、いっぱいなら読まれるのを眠って待つ
-        let r = wait_event(&[&self.0.wq], None, || {
+        let r = wait_event_intr(&[&self.0.wq], || {
             let mut s = self.0.state.lock();
             if s.readers == 0 {
                 // 少しでも書けていればその分を返す
@@ -183,7 +183,12 @@ impl File for WriteEnd {
             }
             (done == buf.len()).then_some(Ok(done))
         });
-        r.unwrap_or(Ok(done))
+        // シグナルで中断:少しでも書けていればその分(Linux と同じ)
+        r.unwrap_or(if done > 0 {
+            Ok(done)
+        } else {
+            Err(Errno::EINTR)
+        })
     }
 }
 

@@ -260,6 +260,24 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn signals_interrupt_and_restart_waits() {
+            assert_eq!(boot::run_program("/bin/sigwait", &[b"sigwait"]), Ok(0));
+        }
+
+        #[test_case]
+        fn the_shell_can_wait_for_a_background_job() {
+            // ash の wait は、SIGCHLD を待つのに sigsuspend を使う
+            let script = b"/bin/busybox sleep 1 &
+                wait $!
+                test $? = 0 || exit 3
+                /bin/busybox sh -c 'exit 5' &
+                wait $!
+                test $? = 5";
+            let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
+            assert_eq!(boot::run_program("/bin/busybox", &argv), Ok(0));
+        }
+
+        #[test_case]
         fn rust_std_threads_work() {
             assert_eq!(boot::run_program("/bin/rthreads", &[b"rthreads"]), Ok(0));
         }

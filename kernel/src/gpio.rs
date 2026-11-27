@@ -75,11 +75,11 @@ impl File for GpioFile {
         }
         // 出来事があるまで眠って待つ(割り込みのハンドラが起こす)
         let pending = &self.events.pending[self.line];
-        let n = crate::wait::wait_event(&[&self.events.wq], None, || {
+        let n = crate::wait::wait_event_intr(&[&self.events.wq], || {
             let n = pending.swap(0, Ordering::Relaxed);
             (n > 0).then_some(n)
         });
-        buf[..8].copy_from_slice(&n.unwrap_or(0).to_le_bytes());
+        buf[..8].copy_from_slice(&n?.to_le_bytes());
         Ok(8)
     }
 

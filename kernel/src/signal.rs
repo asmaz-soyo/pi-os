@@ -166,6 +166,31 @@ pub fn next(pending: u64, blocked: u64) -> Option<u32> {
     (ready != 0).then(|| ready.trailing_zeros() + 1)
 }
 
+/// シグナルで EINTR になったとき、SA_RESTART のハンドラのあとでやり直すシステムコール
+/// (Linux で ERESTARTSYS を返すもの。nanosleep・poll・sigsuspend などは、やり直さずに EINTR)
+pub fn restartable(nr: u64) -> bool {
+    use crate::syscall::nr::*;
+    matches!(
+        nr,
+        READ | WRITE
+            | READV
+            | WRITEV
+            | PREAD64
+            | PWRITE64
+            | OPENAT
+            | IOCTL
+            | WAIT4
+            | ACCEPT
+            | ACCEPT4
+            | CONNECT
+            | RECVFROM
+            | SENDTO
+            | RECVMSG
+            | SENDMSG
+            | FUTEX
+    )
+}
+
 /// 番号が正しいか(1〜64)
 pub fn valid(sig: u64) -> bool {
     (1..=NSIG as u64).contains(&sig)

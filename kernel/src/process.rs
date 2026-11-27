@@ -75,6 +75,10 @@ pub struct Process {
     pub sig_blocked: u64,
     /// シグナル用の別のスタック(sigaltstack):(場所, フラグ, 大きさ)。大きさ 0 はなし
     pub sig_altstack: (u64, i32, u64),
+    /// rt_sigsuspend で差し替える前のマスク(ハンドラから戻るときに、これに戻す)
+    pub saved_mask: Option<u64>,
+    /// シグナルで EINTR になったシステムコール:(番号, 元の x0)。SA_RESTART ならやり直す
+    pub restart: Option<(u64, u64)>,
     /// リアルタイム優先度(0 = 通常 SCHED_OTHER、1〜99 = SCHED_FIFO)
     pub rt_priority: u8,
     /// 作るときに消す権限のビット(umask)
@@ -107,9 +111,18 @@ impl Process {
             sig_actions: Arc::new(SpinLock::new(crate::signal::Actions::default())),
             sig_blocked: 0,
             sig_altstack: (0, 0, 0),
+            saved_mask: None,
+            restart: None,
             rt_priority: 0,
             umask: 0o022,
         }
+    }
+
+    /// マスクを変える(SIGKILL と SIGSTOP は外す)。待ちを中断するかを判断するため、プロセスの
+    /// 表にも写しを置く(システムコールの途中は、`Process` が表から取り出されているので)
+    pub fn set_sig_blocked(&mut self, mask: u64) {
+        self.sig_blocked = mask & !crate::signal::UNBLOCKABLE;
+        PROCESSES.set_blocked(self.pid, self.sig_blocked);
     }
 
     /// 同じグループのスレッドを作る(clone の CLONE_VM | CLONE_FILES | CLONE_THREAD)。
@@ -130,6 +143,8 @@ impl Process {
             sig_actions: self.sig_actions.clone(),
             sig_blocked: self.sig_blocked,
             sig_altstack: (0, 0, 0), // 別のスタックはスレッドごと(新しいスレッドは持たない)
+            saved_mask: None,
+            restart: None,
             cred: self.cred.clone(),
             rt_priority: self.rt_priority,
             umask: self.umask,
@@ -155,6 +170,8 @@ impl Process {
             sig_actions: Arc::new(SpinLock::new(self.sig_actions.lock().clone())),
             sig_blocked: self.sig_blocked,
             sig_altstack: self.sig_altstack, // fork は受け継ぐ
+            saved_mask: None,
+            restart: None,
             cred: self.cred.clone(),
             rt_priority: self.rt_priority,
             umask: self.umask,
@@ -177,6 +194,8 @@ pub struct ProcessTable {
     /// 保留中のシグナル(スレッドごとのビットの集まり。ユーザーに戻る直前に配る)。
     /// システムコールの途中で表から取り出されているスレッドにも送れるように、表とは別に持つ
     signals: SpinLock<BTreeMap<Pid, u64>>,
+    /// スレッドのマスクの写し(`Process::set_sig_blocked` が書く)
+    masks: SpinLock<BTreeMap<Pid, u64>>,
     /// 終わったプロセス:番号 → (親の番号, 終わり方)
     zombies: SpinLock<BTreeMap<Pid, (Pid, ExitStatus)>>,
 }
@@ -187,6 +206,7 @@ impl ProcessTable {
             live: SpinLock::new(BTreeMap::new()),
             info: SpinLock::new(BTreeMap::new()),
             signals: SpinLock::new(BTreeMap::new()),
+            masks: SpinLock::new(BTreeMap::new()),
             zombies: SpinLock::new(BTreeMap::new()),
         }
     }
@@ -198,6 +218,7 @@ impl ProcessTable {
         self.info
             .lock()
             .insert(pid, (p.ppid, p.name.clone(), p.tgid));
+        self.masks.lock().insert(pid, p.sig_blocked);
         self.live.lock().insert(pid, p);
     }
 
@@ -258,6 +279,17 @@ impl ProcessTable {
         Some(sig)
     }
 
+    /// マスクの写しを書く
+    pub fn set_blocked(&self, tid: Pid, mask: u64) {
+        self.masks.lock().insert(tid, mask);
+    }
+
+    /// 待っているスレッド `tid` を中断するか(マスクされていない保留中のシグナルがある。マスクは写しで見る)
+    pub fn interrupted(&self, tid: Pid) -> bool {
+        let blocked = self.masks.lock().get(&tid).copied().unwrap_or(0);
+        self.has_signal(tid, blocked)
+    }
+
     /// マスクされていない保留中のシグナルがあるか(待っているシステムコールを中断するか)
     pub fn has_signal(&self, tid: Pid, blocked: u64) -> bool {
         crate::signal::next(self.pending(tid), blocked).is_some()
@@ -303,6 +335,7 @@ impl ProcessTable {
     pub fn exit(&self, pid: Pid, status: ExitStatus) {
         let info = self.info.lock().remove(&pid);
         self.signals.lock().remove(&pid);
+        self.masks.lock().remove(&pid);
         let process = self.live.lock().remove(&pid);
         // 表から取り出されたまま終わることもあるので、親は info からも引く
         let ppid = process
