@@ -339,7 +339,7 @@ pub fn write(p: &mut Process, fd: u64, buf: u64, count: u64) -> Result<u64, Errn
 }
 
 /// ユーザーの iovec 配列(`{ base: u64, len: u64 }` の並び)を読む。
-fn iovecs(p: &mut Process, iov: u64, count: u64) -> Result<vec::Vec<(u64, u64)>, Errno> {
+pub(super) fn iovecs(p: &mut Process, iov: u64, count: u64) -> Result<vec::Vec<(u64, u64)>, Errno> {
     if count > 1024 {
         return Err(Errno::EINVAL);
     }

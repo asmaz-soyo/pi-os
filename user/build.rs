@@ -57,7 +57,7 @@ fn main() {
             links.push((path, "busybox".to_string()));
         }
     }
-    collect(&root.join("rootfs"), "", &mut files);
+    collect(&root.join("rootfs"), "", &mut files, &mut links);
     std::fs::write(out.join("initramfs.tar"), tar(&files, &links)).unwrap();
 }
 
@@ -71,11 +71,20 @@ fn sorted(dir: &Path) -> Vec<PathBuf> {
     v
 }
 
-fn collect(dir: &Path, prefix: &str, files: &mut Vec<(String, Vec<u8>)>) {
+fn collect(
+    dir: &Path,
+    prefix: &str,
+    files: &mut Vec<(String, Vec<u8>)>,
+    links: &mut Vec<(String, String)>,
+) {
     for path in sorted(dir) {
         let name = format!("{prefix}{}", path.file_name().unwrap().to_str().unwrap());
-        if path.is_dir() {
-            collect(&path, &format!("{name}/"), files);
+        if path.is_symlink() {
+            // リンクはたどらずにリンクのまま入れる(/etc/resolv.conf → /proc/pios/resolv.conf)
+            let target = std::fs::read_link(&path).unwrap();
+            links.push((name, target.to_str().unwrap().to_string()));
+        } else if path.is_dir() {
+            collect(&path, &format!("{name}/"), files, links);
         } else {
             files.push((name, std::fs::read(&path).unwrap()));
         }

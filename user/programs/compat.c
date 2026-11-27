@@ -374,6 +374,17 @@ int main(int argc, char **argv) {
     show("udp write", write(uc, "hi", 2));
     show("udp read at server", read(us, buf, sizeof buf));
     show("udp listen", listen(us, 1));
+    // sendmsg / recvmsg:バッファを分けて送り、分けて受け取る(DNS の問い合わせで musl が使う)
+    struct iovec out_iov[2] = {{"gath", 4}, {"ered", 4}};
+    struct msghdr out = {.msg_name = &ua, .msg_namelen = sizeof ua, .msg_iov = out_iov, .msg_iovlen = 2};
+    show("udp sendmsg", sendmsg(uc, &out, 0));
+    char p1[3] = {0}, p2[8] = {0};
+    struct iovec in_iov[2] = {{p1, 3}, {p2, 8}};
+    struct sockaddr_in mfrom;
+    struct msghdr rmsg = {.msg_name = &mfrom, .msg_namelen = sizeof mfrom, .msg_iov = in_iov, .msg_iovlen = 2};
+    show("udp recvmsg", recvmsg(us, &rmsg, 0));
+    printf("recvmsg parts = %.3s/%.5s, namelen = %d, controllen = %d\n", p1, p2, (int)rmsg.msg_namelen,
+           (int)rmsg.msg_controllen);
     int one = 1, val = -1;
     socklen_t vlen = sizeof val;
     show("setsockopt reuseaddr", setsockopt(us, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one));

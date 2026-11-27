@@ -89,6 +89,8 @@
 | 208 | `setsockopt` | 5 |
 | 209 | `getsockopt` | 5 |
 | 210 | `shutdown` | 2 |
+| 211 | `sendmsg` | 3 |
+| 212 | `recvmsg` | 3 |
 | 214 | `brk` | 1 |
 | 215 | `munmap` | 2 |
 | 216 | `mremap` | 5 |
@@ -102,4 +104,4 @@
 | 276 | `renameat2` | 5 |
 | 278 | `getrandom` | 3 |
 
-合計 96 個
+合計 98 個

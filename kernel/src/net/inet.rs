@@ -280,6 +280,19 @@ pub fn dns_of(iface: usize) -> Vec<Ipv4Address> {
         .unwrap_or_default()
 }
 
+/// すべてのインターフェースの DNS サーバー(重なりは1つにする)
+pub fn dns_servers() -> Vec<Ipv4Address> {
+    let mut all: Vec<Ipv4Address> = Vec::new();
+    if let Some(n) = NET.lock().as_ref() {
+        for s in n.stacks.iter().flat_map(|s| s.dns.iter()) {
+            if !all.contains(s) {
+                all.push(*s);
+            }
+        }
+    }
+    all
+}
+
 /// インターフェース `iface` の IPv4 アドレス
 pub fn ipv4_of(iface: usize) -> Option<Ipv4Address> {
     NET.lock()

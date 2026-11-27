@@ -180,6 +180,15 @@ mod tests {
     }
 
     #[test_case]
+    fn musl_resolves_names_with_the_dns_server_from_dhcp() {
+        assert!(wait_for_dhcp().is_some());
+        // /etc/resolv.conf は /proc/pios/resolv.conf へのリンク(DHCP でもらった DNS サーバー)
+        let script = b"test \"$(cat /etc/resolv.conf)\" = \"nameserver 10.0.2.3\" && resolve localhost | grep -qx 127.0.0.1";
+        let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
+        assert_eq!(boot::run_program("/bin/busybox", &argv), Ok(0));
+    }
+
+    #[test_case]
     fn virtio_disk_is_readable_and_writable_through_dev_vda() {
         assert_eq!(boot::run_program("/bin/diskread", &[b"diskread"]), Ok(0));
     }

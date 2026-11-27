@@ -245,3 +245,90 @@ fn sendto_and_recvfrom_work_on_tcp_too() {
     assert_eq!(n, 10);
     assert_eq!(get(&mut p, SCRATCH + 0x200, 10), b"via sendto");
 }
+
+/// struct msghdr(aarch64):name, namelen(+詰め物), iov, iovlen, control, controllen, flags
+fn msghdr(name: u64, namelen: u32, iov: u64, iovlen: u64, controllen: u64) -> [u8; 56] {
+    let mut m = [0u8; 56];
+    m[0..8].copy_from_slice(&name.to_le_bytes());
+    m[8..12].copy_from_slice(&namelen.to_le_bytes());
+    m[16..24].copy_from_slice(&iov.to_le_bytes());
+    m[24..32].copy_from_slice(&iovlen.to_le_bytes());
+    m[40..48].copy_from_slice(&controllen.to_le_bytes());
+    m
+}
+
+fn iov(p: &mut Process, at: u64, parts: &[(u64, u64)]) {
+    let mut raw = std::vec::Vec::new();
+    for (base, len) in parts {
+        raw.extend_from_slice(&base.to_le_bytes());
+        raw.extend_from_slice(&len.to_le_bytes());
+    }
+    put(p, at, &raw);
+}
+
+#[test]
+fn sendmsg_gathers_and_recvmsg_scatters_with_the_sender() {
+    let (mut p, _) = process();
+    let a = socket(&mut p, SOCK_DGRAM);
+    assert_eq!(bind(&mut p, a, 7231), 0);
+    let b = socket(&mut p, SOCK_DGRAM);
+    // 2つのバッファをつないで、1つのデータグラムとして送る
+    put(&mut p, SCRATCH + 0x100, b"hello, ");
+    put(&mut p, SCRATCH + 0x180, b"msg");
+    iov(
+        &mut p,
+        SCRATCH + 0x2000,
+        &[(SCRATCH + 0x100, 7), (SCRATCH + 0x180, 3)],
+    );
+    put(&mut p, SCRATCH + 0x3100, &sin(LO, 7231));
+    put(
+        &mut p,
+        SCRATCH + 0x2100,
+        &msghdr(SCRATCH + 0x3100, 16, SCRATCH + 0x2000, 2, 0),
+    );
+    assert_eq!(
+        call(&mut p, nr::SENDMSG, [b, SCRATCH + 0x2100, 0, 0, 0, 0]),
+        10
+    );
+    let bport = local_port(&mut p, b);
+    // 4 バイトと 16 バイトのバッファに分けて受け取る
+    iov(
+        &mut p,
+        SCRATCH + 0x2200,
+        &[(SCRATCH + 0x200, 4), (SCRATCH + 0x280, 16)],
+    );
+    put(
+        &mut p,
+        SCRATCH + 0x2300,
+        &msghdr(SCRATCH + 0x500, 16, SCRATCH + 0x2200, 2, 0),
+    );
+    assert_eq!(
+        call(&mut p, nr::RECVMSG, [a, SCRATCH + 0x2300, 0, 0, 0, 0]),
+        10
+    );
+    assert_eq!(get(&mut p, SCRATCH + 0x200, 4), b"hell");
+    assert_eq!(get(&mut p, SCRATCH + 0x280, 6), b"o, msg");
+    let m = get(&mut p, SCRATCH + 0x2300, 56);
+    // 送り元が name に入り、namelen が本当の長さになる。補助データはない
+    assert_eq!(u32::from_le_bytes(m[8..12].try_into().unwrap()), 16);
+    assert_eq!(u64::from_le_bytes(m[40..48].try_into().unwrap()), 0);
+    let from = get(&mut p, SCRATCH + 0x500, 16);
+    assert_eq!(u16::from_be_bytes([from[2], from[3]]), bport);
+}
+
+#[test]
+fn ancillary_data_is_not_supported_yet() {
+    let (mut p, _) = process();
+    let b = socket(&mut p, SOCK_DGRAM);
+    put(&mut p, SCRATCH + 0x3100, &sin(LO, 7232));
+    iov(&mut p, SCRATCH + 0x2000, &[(SCRATCH + 0x100, 1)]);
+    put(
+        &mut p,
+        SCRATCH + 0x2100,
+        &msghdr(SCRATCH + 0x3100, 16, SCRATCH + 0x2000, 1, 24),
+    );
+    assert_eq!(
+        call(&mut p, nr::SENDMSG, [b, SCRATCH + 0x2100, 0, 0, 0, 0]),
+        err(Errno::EOPNOTSUPP)
+    );
+}

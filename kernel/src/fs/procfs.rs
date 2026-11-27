@@ -96,6 +96,15 @@ fn mounts() -> String {
     text
 }
 
+/// /proc/pios/resolv.conf:DHCP でもらった DNS サーバー(`/etc/resolv.conf` がここを指す)
+fn resolv_conf(servers: &[crate::net::inet::Ipv4Address]) -> String {
+    let mut text = String::new();
+    for s in servers {
+        text.push_str(&format!("nameserver {s}\n"));
+    }
+    text
+}
+
 fn status(pid: crate::process::Pid, ppid: crate::process::Pid, name: &str) -> String {
     format!("Name:\t{name}\nState:\tR (running)\nPid:\t{pid}\nPPid:\t{ppid}\nUid:\t0\t0\t0\t0\n")
 }
@@ -156,6 +165,7 @@ impl FileSystem for Procfs {
             "/mounts" => file(mounts()),
             "/version" => file(String::from("Pi-OS version 0.1.0 (aarch64)\n")),
             "/pios/unimplemented" => file(unimplemented()),
+            "/pios/resolv.conf" => file(resolv_conf(&crate::net::inet::dns_servers())),
             other => {
                 let mut parts = other.trim_start_matches('/').splitn(2, '/');
                 let pid: crate::process::Pid = parts
@@ -187,7 +197,10 @@ impl FileSystem for Procfs {
                 }
                 Ok(entries)
             }
-            "/pios" => Ok(alloc::vec![entry("unimplemented", FileKind::Regular)]),
+            "/pios" => Ok(alloc::vec![
+                entry("resolv.conf", FileKind::Regular),
+                entry("unimplemented", FileKind::Regular),
+            ]),
             other => {
                 let pid: crate::process::Pid = other
                     .trim_start_matches('/')
@@ -273,6 +286,23 @@ mod tests {
                 "{want} missing from {names:?}"
             );
         }
+    }
+
+    #[test]
+    fn resolv_conf_lists_one_nameserver_per_line() {
+        use crate::net::inet::Ipv4Address;
+        let text = resolv_conf(&[Ipv4Address::new(10, 0, 2, 3), Ipv4Address::new(1, 1, 1, 1)]);
+        assert_eq!(text, "nameserver 10.0.2.3\nnameserver 1.1.1.1\n");
+        // DHCP の前(サーバーがない)は空のファイル(musl は 127.0.0.1 に聞きに行く)
+        assert_eq!(resolv_conf(&[]), "");
+        let fs = Procfs::new();
+        assert!(fs.lookup("/pios/resolv.conf").is_ok());
+        assert!(
+            fs.readdir("/pios")
+                .unwrap()
+                .iter()
+                .any(|e| e.name == "resolv.conf")
+        );
     }
 
     #[test]

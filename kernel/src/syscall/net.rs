@@ -252,6 +252,80 @@ pub fn recvfrom(
     Ok(n as u64)
 }
 
+/// ユーザーの struct msghdr(aarch64 では 56 バイト)のうち、使うところ
+struct MsgHdr {
+    name: u64,
+    namelen: u32,
+    iov: u64,
+    iovlen: u64,
+    controllen: u64,
+}
+
+/// msg_namelen は 8 バイト目、msg_controllen は 40 バイト目、msg_flags は 48 バイト目
+const MSG_NAMELEN: u64 = 8;
+const MSG_CONTROLLEN: u64 = 40;
+const MSG_FLAGS: u64 = 48;
+
+fn read_msghdr(p: &mut Process, msg: u64) -> Result<MsgHdr, Errno> {
+    let mut raw = [0u8; 56];
+    p.mem.copy_from_user(VirtAddr(msg), &mut raw)?;
+    let w = |i: usize| u64::from_le_bytes(raw[i..i + 8].try_into().unwrap());
+    Ok(MsgHdr {
+        name: w(0),
+        namelen: u32::from_le_bytes(raw[8..12].try_into().unwrap()),
+        iov: w(16),
+        iovlen: w(24),
+        controllen: w(40),
+    })
+}
+
+/// sendmsg(fd, msg, flags):iovec のバッファをつないで1回の send_to にする。
+/// 補助データ(SCM_RIGHTS など)はまだ扱わない
+pub fn sendmsg(p: &mut Process, fd: u64, msg: u64, flags: u64) -> Result<u64, Errno> {
+    let (f, nonblock) = socket_of(p, fd)?;
+    let m = read_msghdr(p, msg)?;
+    if m.controllen != 0 {
+        return Err(Errno::EOPNOTSUPP);
+    }
+    let mut data = Vec::new();
+    for (base, len) in super::fs::iovecs(p, m.iov, m.iovlen)? {
+        let len = len.min(IO_MAX - data.len() as u64) as usize;
+        let start = data.len();
+        data.resize(start + len, 0);
+        p.mem.copy_from_user(VirtAddr(base), &mut data[start..])?;
+    }
+    let to = if m.name != 0 {
+        Some(read_addr(p, m.name, m.namelen as u64)?)
+    } else {
+        None
+    };
+    let n = sock(&f).send_to(&data, to.as_deref(), nonblock || flags & MSG_DONTWAIT != 0)?;
+    Ok(n as u64)
+}
+
+/// recvmsg(fd, msg, flags):1回の recv_from で受け取り、iovec のバッファに順に分けて書く
+pub fn recvmsg(p: &mut Process, fd: u64, msg: u64, flags: u64) -> Result<u64, Errno> {
+    let (f, nonblock) = socket_of(p, fd)?;
+    let m = read_msghdr(p, msg)?;
+    let iovs = super::fs::iovecs(p, m.iov, m.iovlen)?;
+    let room = iovs.iter().map(|(_, len)| *len).sum::<u64>().min(IO_MAX);
+    let mut data = alloc::vec![0u8; room as usize];
+    let (n, from) = sock(&f).recv_from(&mut data, nonblock || flags & MSG_DONTWAIT != 0)?;
+    let mut done = 0;
+    for (base, len) in iovs {
+        let k = (len as usize).min(n - done);
+        p.mem.copy_to_user(VirtAddr(base), &data[done..done + k])?;
+        done += k;
+    }
+    write_addr(p, m.name, msg + MSG_NAMELEN, &from)?;
+    // 補助データは返さない。フラグもなし
+    p.mem
+        .copy_to_user(VirtAddr(msg + MSG_CONTROLLEN), &0u64.to_le_bytes())?;
+    p.mem
+        .copy_to_user(VirtAddr(msg + MSG_FLAGS), &0u32.to_le_bytes())?;
+    Ok(n as u64)
+}
+
 /// setsockopt(fd, level, name, value, len)。値は int のものだけ
 pub fn setsockopt(
     p: &mut Process,
