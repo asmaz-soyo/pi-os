@@ -273,6 +273,26 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn a_shell_waiting_for_its_child_sleeps() {
+            // 右の sh は、子(/bin/busybox sleep 2。パスを書くので fork と exec になる)の終わりを wait4 で待つ
+            let script = b"{ sleep 1; cat /proc/$(cat /tmp/wait_pid)/status > /tmp/wait_state; true; } \
+                | sh -c 'echo $$ > /tmp/wait_pid; /bin/busybox sleep 2; true'
+                grep -q 'S (sleeping)' /tmp/wait_state || { cat /tmp/wait_state; exit 1; }";
+            let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
+            assert_eq!(boot::run_program("/bin/busybox", &argv), Ok(0));
+        }
+
+        #[test_case]
+        fn a_process_waiting_in_poll_sleeps() {
+            // ash の read -t は、標準入力(空のパイプ)を poll で待つ
+            let script = b"{ sleep 1; cat /proc/$(cat /tmp/poll_pid)/status > /tmp/poll_state; true; } \
+                | sh -c 'echo $$ > /tmp/poll_pid; read -t 5 x; true'
+                grep -q 'S (sleeping)' /tmp/poll_state || { cat /tmp/poll_state; exit 1; }";
+            let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
+            assert_eq!(boot::run_program("/bin/busybox", &argv), Ok(0));
+        }
+
+        #[test_case]
         fn sleep_through_ignores_an_early_wake() {
             // 待ち行列では、関係のない「起こされた」印が残ることがある(登録してから条件を見るまでの
             // あいだに起こされ、眠らずに済んだとき)。nanosleep はそれで早く起きてはいけない

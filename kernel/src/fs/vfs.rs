@@ -134,6 +134,12 @@ pub trait File: Send + Sync {
         true
     }
 
+    /// 待ち行列で起こされずに、時間で読めるようになる時刻(timerfd の満了など)。
+    /// poll / select / epoll は、この時刻までに目を覚まして見直す
+    fn next_event_at(&self) -> Option<u64> {
+        None
+    }
+
     /// 端末の設定(端末だけ)
     fn termios(&self) -> Option<crate::tty::Termios> {
         None

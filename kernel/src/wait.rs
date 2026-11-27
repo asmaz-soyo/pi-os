@@ -11,6 +11,11 @@
 //! 「登録してから条件を見る」順番が大事。条件を見た直後(眠る前)に起こされても、
 //! `sched::wake` が「次の眠りをすぐ終わらせる」印を付けるので、起こしたことが失われない。
 //! スケジューラが動いていないとき(ホストのテスト、起動の途中)は、条件を見ながら回って待つ。
+//!
+//! poll / select / epoll は、いくつものファイルを同時に待つ。Linux はファイルごとの待ち行列に
+//! 登録するが、ここでは簡単に、どの待ち行列が起こされても [`POLL_WQ`] も起こす(関係のない
+//! 目覚めは増えるが、それぞれが見直すので正しい)。時間で変わるファイル(timerfd など)は
+//! `File::next_event_at` の時刻を期限に入れる。
 
 use crate::sched::{self, Tid};
 use crate::sync::SpinLock;
@@ -19,6 +24,9 @@ use alloc::vec::Vec;
 pub struct WaitQueue {
     waiters: SpinLock<Vec<Tid>>,
 }
+
+/// poll / select / epoll が待つ列。ほかのどの待ち行列が起こされても、これも起こされる
+pub static POLL_WQ: WaitQueue = WaitQueue::new();
 
 impl Default for WaitQueue {
     fn default() -> Self {
@@ -39,6 +47,9 @@ impl WaitQueue {
         for tid in waiters {
             sched::wake(tid);
         }
+        if !core::ptr::eq(self, &POLL_WQ) {
+            POLL_WQ.wake_all();
+        }
     }
 
     fn add(&self, tid: Tid) {
@@ -58,6 +69,50 @@ impl WaitQueue {
     }
 }
 
+/// 待ち行列への登録。作ると登録し、捨てると外す。登録してから条件を見て、満たされなければ
+/// [`Registration::sleep`] で眠る(`wait_event` の中身。poll のように、条件を関数で渡しにくいときに使う)
+pub struct Registration<'a> {
+    queues: &'a [&'a WaitQueue],
+    me: Option<Tid>,
+}
+
+/// poll / select / epoll の登録([`POLL_WQ`] だけ)
+pub fn register_poll() -> Registration<'static> {
+    static QUEUES: [&WaitQueue; 1] = [&POLL_WQ];
+    register(&QUEUES)
+}
+
+pub fn register<'a>(queues: &'a [&'a WaitQueue]) -> Registration<'a> {
+    let me = sched::running().then(sched::current);
+    if let Some(tid) = me {
+        for q in queues {
+            q.add(tid);
+        }
+    }
+    Registration { queues, me }
+}
+
+impl Registration<'_> {
+    /// 起こされるか、期限まで眠る(スケジューラが動いていなければ、少し回るだけ)
+    pub fn sleep(&self, deadline: Option<u64>) {
+        if self.me.is_none() {
+            core::hint::spin_loop();
+            return;
+        }
+        sched::sleep_until(deadline.unwrap_or(u64::MAX));
+    }
+}
+
+impl Drop for Registration<'_> {
+    fn drop(&mut self) {
+        if let Some(tid) = self.me {
+            for q in self.queues {
+                q.remove(tid);
+            }
+        }
+    }
+}
+
 /// `cond` が Some を返すまで、`queues` のどれかで起こされるのを眠って待つ。
 /// `deadline`(ナノ秒の時刻)を過ぎたら None
 pub fn wait_event<R>(
@@ -65,39 +120,26 @@ pub fn wait_event<R>(
     deadline: Option<u64>,
     mut cond: impl FnMut() -> Option<R>,
 ) -> Option<R> {
-    if !sched::running() {
-        // 眠れない:条件を見ながら回る
-        loop {
-            if let Some(r) = cond() {
-                return Some(r);
-            }
-            if deadline.is_some_and(|d| crate::time::now_ns() >= d) {
-                return None;
-            }
-            core::hint::spin_loop();
-        }
-    }
-    let me = sched::current();
     loop {
         // 1. 先に登録する(条件を見たあと、眠る前に起こされても失わないように)
-        for q in queues {
-            q.add(me);
-        }
+        let reg = register(queues);
         // 2. 条件を見る
-        let r = cond();
-        let expired = deadline.is_some_and(|d| crate::time::now_ns() >= d);
-        if r.is_some() || expired {
-            for q in queues {
-                q.remove(me);
-            }
-            return r;
+        if let Some(r) = cond() {
+            return Some(r);
         }
-        // 3. 眠る(起こされるか、期限まで)
-        sched::sleep_until(deadline.unwrap_or(u64::MAX));
-        // 4. 登録を外して、もう一度見る(起こされても、条件が満たされたとは限らない)
-        for q in queues {
-            q.remove(me);
+        if deadline.is_some_and(|d| crate::time::now_ns() >= d) {
+            return None;
         }
+        // 3. 眠る(起こされるか、期限まで)。4. 登録を外して(reg を捨てて)もう一度見る
+        reg.sleep(deadline);
+    }
+}
+
+/// 2 つの期限の早いほう
+pub fn earliest(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (x, y) => x.or(y),
     }
 }
 

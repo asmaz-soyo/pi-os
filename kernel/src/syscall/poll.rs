@@ -4,6 +4,7 @@
 
 use crate::Errno;
 use crate::process::Process;
+use crate::wait::{earliest, register_poll};
 use alloc::vec;
 use alloc::vec::Vec;
 use hal::addr::VirtAddr;
@@ -69,12 +70,16 @@ pub fn pselect6(
     let want_w = read_set(p, wr, words)?;
     let deadline = deadline(p, ts)?;
     loop {
+        // 登録してから見る(見たあと、眠る前に読めるようになっても、起こしてもらえる)
+        let reg = register_poll();
+        let mut wake_at = deadline;
         let mut got_r = vec![0u64; words];
         let mut got_w = vec![0u64; words];
         let mut count = 0;
         for fd in 0..nfds {
             let (w, bit) = ((fd / 64) as usize, 1u64 << (fd % 64));
             if want_r[w] & bit != 0 {
+                wake_at = earliest(wake_at, event_at(p, fd));
                 match readable(p, fd) {
                     Some(true) => {
                         got_r[w] |= bit;
@@ -97,7 +102,7 @@ pub fn pselect6(
             write_set(p, ex, &vec![0; words])?;
             return Ok(count);
         }
-        crate::sched::relax();
+        reg.sleep(wake_at);
     }
 }
 
@@ -110,10 +115,15 @@ pub fn ppoll(p: &mut Process, fds: u64, nfds: u64, ts: u64) -> Result<u64, Errno
     p.mem.copy_from_user(VirtAddr(fds), &mut raw)?;
     let deadline = deadline(p, ts)?;
     loop {
+        let reg = register_poll();
+        let mut wake_at = deadline;
         let mut count = 0;
         for entry in raw.chunks_mut(8) {
             let fd = i32::from_le_bytes(entry[..4].try_into().unwrap());
             let events = u16::from_le_bytes(entry[4..6].try_into().unwrap());
+            if fd >= 0 {
+                wake_at = earliest(wake_at, event_at(p, fd as u64));
+            }
             let revents = if fd < 0 {
                 0
             } else {
@@ -137,6 +147,11 @@ pub fn ppoll(p: &mut Process, fds: u64, nfds: u64, ts: u64) -> Result<u64, Errno
             p.mem.copy_to_user(VirtAddr(fds), &raw)?;
             return Ok(count);
         }
-        crate::sched::relax();
+        reg.sleep(wake_at);
     }
+}
+
+/// fd のファイルが、時間で読めるようになる時刻(timerfd など)
+pub(super) fn event_at(p: &Process, fd: u64) -> Option<u64> {
+    p.fds.get(fd).ok().and_then(|f| f.file.next_event_at())
 }

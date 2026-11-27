@@ -148,17 +148,22 @@ const WNOHANG: u64 = 1;
 /// wait4(pid, status, options, rusage)
 pub fn wait4(p: &mut Process, pid: i64, status: u64, options: u64) -> Result<u64, Errno> {
     let filter = if pid > 0 { Some(pid as u32) } else { None };
-    loop {
-        if let Some((child, st)) = PROCESSES.wait_child(p.pid, filter)? {
-            if status != 0 {
-                p.mem
-                    .copy_to_user(VirtAddr(status), &st.wait_status().to_le_bytes())?;
-            }
-            return Ok(child as u64);
-        }
-        if options & WNOHANG != 0 {
-            return Ok(0);
-        }
-        crate::sched::relax();
+    let found = if options & WNOHANG != 0 {
+        PROCESSES.wait_child(p.pid, filter)?
+    } else {
+        // 子が終わるのを眠って待つ(終わった子があれば、すぐ返る)
+        let me = p.pid;
+        let r = crate::wait::wait_event(&[&crate::process::CHILD_WQ], None, || {
+            PROCESSES.wait_child(me, filter).transpose()
+        });
+        r.transpose()?
+    };
+    let Some((child, st)) = found else {
+        return Ok(0);
+    };
+    if status != 0 {
+        p.mem
+            .copy_to_user(VirtAddr(status), &st.wait_status().to_le_bytes())?;
     }
+    Ok(child as u64)
 }

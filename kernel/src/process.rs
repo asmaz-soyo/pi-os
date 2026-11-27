@@ -131,6 +131,9 @@ impl Process {
 pub type Pid = crate::sched::Tid;
 
 /// プロセスの表。動いているプロセスと、終わって終了ステータスだけが残ったもの(ゾンビ)を持つ。
+/// 子が終わるのを待つ(wait4)タスクの待ち行列
+pub static CHILD_WQ: crate::wait::WaitQueue = crate::wait::WaitQueue::new();
+
 pub struct ProcessTable {
     live: SpinLock<BTreeMap<Pid, Process>>,
     /// 動いているプロセスの (親, 名前)。システムコールで取り出されている間も引ける(/proc 用)
@@ -208,6 +211,7 @@ impl ProcessTable {
 
     pub fn add_zombie(&self, pid: Pid, ppid: Pid, status: ExitStatus) {
         self.zombies.lock().insert(pid, (ppid, status));
+        CHILD_WQ.wake_all(); // wait4 で待っている親
     }
 
     /// 終わっていれば終わり方を返し、ゾンビを片付ける。

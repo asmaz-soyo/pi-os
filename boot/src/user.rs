@@ -280,12 +280,10 @@ pub fn spawn_user(
 
 /// プロセスが終わるのを待ち、終了ステータス(シグナルなら 128 + 番号)を返す。
 pub fn wait(pid: kernel::process::Pid) -> i32 {
-    loop {
-        if let Some(status) = PROCESSES.try_wait(pid) {
-            return status.shell_code();
-        }
-        kernel::sched::relax();
-    }
+    let status = kernel::wait::wait_event(&[&kernel::process::CHILD_WQ], None, || {
+        PROCESSES.try_wait(pid)
+    });
+    status.expect("no deadline").shell_code()
 }
 
 /// プロセスを強制終了する(次にユーザーに戻るときに、終了ステータス 128 + sig で終わる)。

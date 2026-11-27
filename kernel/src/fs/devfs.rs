@@ -9,6 +9,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use hal::console::Console;
 
+/// 端末の入力を確かめ直す間隔(UART の受信割り込みを使うまで)
+const INPUT_CHECK_NS: u64 = 10_000_000;
+
 /// 端末(UART + 行規律)。
 pub struct ConsoleFile {
     dev: SpinLock<Box<dyn Console + Send>>,
@@ -52,16 +55,21 @@ impl File for ConsoleFile {
 
     /// 1 行(raw モードなら届いた分)が読めるまで待つ。
     ///
-    /// 待つ間はほかのタスクに譲る(UART を繰り返し確かめる)。
-    /// UART の受信割り込みで起こしてもらう形にするのは、後で。
+    /// UART の受信割り込みはまだ使っていないので、10ms ずつ眠っては UART を確かめる
+    /// (回り続けるより軽い。割り込みで起こしてもらう形にするのは、後で)。
     fn read(&self, _offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
         loop {
             self.poll_input();
             if let Some(n) = self.tty.lock().read(buf) {
                 return Ok(n);
             }
-            crate::sched::relax();
+            crate::sched::sleep_until(crate::time::now_ns() + INPUT_CHECK_NS);
         }
+    }
+
+    /// poll / select も、10ms ごとに UART を確かめ直す
+    fn next_event_at(&self) -> Option<u64> {
+        Some(crate::time::now_ns() + INPUT_CHECK_NS)
     }
 
     fn write(&self, _offset: u64, buf: &[u8]) -> Result<usize, Errno> {

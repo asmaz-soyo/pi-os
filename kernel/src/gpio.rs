@@ -12,12 +12,15 @@ pub const LINES: usize = 32;
 /// 線ごとの、まだ読まれていない出来事の数
 pub struct GpioEvents {
     pending: [AtomicU64; LINES],
+    /// 読むのを待っているタスク(割り込みのハンドラが起こす)
+    wq: crate::wait::WaitQueue,
 }
 
 impl GpioEvents {
     pub const fn new() -> Self {
         Self {
             pending: [const { AtomicU64::new(0) }; LINES],
+            wq: crate::wait::WaitQueue::new(),
         }
     }
 
@@ -28,6 +31,7 @@ impl GpioEvents {
                 count.fetch_add(1, Ordering::Relaxed);
             }
         }
+        self.wq.wake_all();
     }
 }
 
@@ -69,14 +73,14 @@ impl File for GpioFile {
         if buf.len() < 8 {
             return Err(Errno::EINVAL);
         }
-        loop {
-            let n = self.events.pending[self.line].swap(0, Ordering::Relaxed);
-            if n > 0 {
-                buf[..8].copy_from_slice(&n.to_le_bytes());
-                return Ok(8);
-            }
-            crate::sched::relax();
-        }
+        // 出来事があるまで眠って待つ(割り込みのハンドラが起こす)
+        let pending = &self.events.pending[self.line];
+        let n = crate::wait::wait_event(&[&self.events.wq], None, || {
+            let n = pending.swap(0, Ordering::Relaxed);
+            (n > 0).then_some(n)
+        });
+        buf[..8].copy_from_slice(&n.unwrap_or(0).to_le_bytes());
+        Ok(8)
     }
 
     fn poll_readable(&self) -> bool {

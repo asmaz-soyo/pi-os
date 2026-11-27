@@ -200,11 +200,15 @@ pub fn epoll_pwait(
         .expect("checked above");
     let deadline = (timeout >= 0).then(|| crate::time::now_ns() + timeout as u64 * 1_000_000);
     loop {
+        // 登録してから見る(見たあと、眠る前に読めるようになっても、起こしてもらえる)
+        let reg = crate::wait::register_poll();
+        let mut wake_at = deadline;
         let interest: Vec<(u64, (u32, u64))> =
             e.interest.lock().iter().map(|(k, v)| (*k, *v)).collect();
         let mut out = Vec::new();
         for (fd, (want, data)) in interest {
             let Ok(f) = p.fds.get(fd) else { continue };
+            wake_at = crate::wait::earliest(wake_at, f.file.next_event_at());
             let mut got = 0;
             if want & EPOLLIN != 0 && f.file.poll_readable() {
                 got |= EPOLLIN;
@@ -225,6 +229,6 @@ pub fn epoll_pwait(
             p.mem.copy_to_user(VirtAddr(events), &out)?;
             return Ok(out.len() as u64 / 16);
         }
-        crate::sched::relax();
+        reg.sleep(wake_at);
     }
 }

@@ -20,6 +20,8 @@ struct State {
 #[derive(Default)]
 pub struct TimerFd {
     state: SpinLock<State>,
+    /// 止まっているタイマーを読んで待つタスク(settime で起こす)
+    wq: crate::wait::WaitQueue,
 }
 
 impl TimerFd {
@@ -55,6 +57,7 @@ impl TimerFd {
             interval,
             pending: 0,
         };
+        self.wq.wake_all();
     }
 
     /// (間隔, 次の満了までの残り)
@@ -94,10 +97,14 @@ impl File for TimerFd {
                 }
                 s.next
             };
-            // 次の満了まで眠る(止まっているタイマーなら譲って待つ)
+            // 次の満了まで眠る(止まっているタイマーなら、settime で動き出すのを待つ)
             match next {
                 Some(t) => crate::sched::sleep_until(t),
-                None => crate::sched::relax(),
+                None => {
+                    crate::wait::wait_event(&[&self.wq], None, || {
+                        self.state.lock().next.map(|_| ())
+                    });
+                }
             }
         }
     }
@@ -106,6 +113,11 @@ impl File for TimerFd {
         let mut s = self.state.lock();
         Self::update(&mut s, crate::time::now_ns());
         s.pending > 0
+    }
+
+    /// 次の満了の時刻(poll / epoll はそこで目を覚ます)
+    fn next_event_at(&self) -> Option<u64> {
+        self.state.lock().next
     }
 
     fn as_any(&self) -> Option<&dyn core::any::Any> {
