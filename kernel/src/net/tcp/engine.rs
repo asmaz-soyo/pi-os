@@ -261,6 +261,19 @@ impl Engine {
         self.conns.values().filter_map(|e| e.conn.poll_at()).min()
     }
 
+    /// 待ち受けと接続の一覧(観察用):(ローカル, リモート, 状態, RTO のミリ秒)
+    pub fn table(&self) -> Vec<(Endpoint, Option<Endpoint>, &'static str, u64)> {
+        let listeners = self
+            .listeners
+            .values()
+            .map(|l| (l.local, None, "LISTEN", 0));
+        let conns = self.conns.values().map(|e| {
+            let c = &e.conn;
+            (c.local, Some(c.remote), c.state.name(), c.rto() / 1_000_000)
+        });
+        listeners.chain(conns).collect()
+    }
+
     /// 生きている接続の数(片付いたかどうかを見るため)
     pub fn conn_count(&self) -> usize {
         self.conns.len()
@@ -470,5 +483,21 @@ mod tests {
         run(&mut client, &mut server, 0);
         assert_eq!(client.conn(c).unwrap().error(), Some(Errno::ECONNRESET));
         assert_eq!(server.conn_count(), 0);
+    }
+
+    #[test]
+    fn the_table_lists_listeners_and_connections() {
+        let mut client = Engine::new(1, 4096);
+        let mut server = Engine::new(2, 4096);
+        server.listen(ep(ANY, 80), 4);
+        client.connect(ep(A, 40000), ep(B, 80), 0);
+        run(&mut client, &mut server, 0);
+        let rows = server.table();
+        assert_eq!(rows[0], (ep(ANY, 80), None, "LISTEN", 0));
+        assert_eq!(
+            (rows[1].0, rows[1].1, rows[1].2),
+            (ep(B, 80), Some(ep(A, 40000)), "ESTABLISHED")
+        );
+        assert_eq!(rows[1].3, server.conn(2).unwrap().rto() / 1_000_000);
     }
 }

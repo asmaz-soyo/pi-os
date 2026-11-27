@@ -28,3 +28,4 @@
 - 依存クレートが増える(smoltcp と、heapless、managed、byteorder、bitflags、cfg-if など小さいもの)
 - smoltcp は自分では動かないので、カーネルが `poll` を呼ぶ仕組み(タイマーと受信の割り込み)が要る
 - smoltcp の API(`SocketSet`、`Interface`)が Linux のソケットと違うところ(listen したソケットが 1 本の接続にしかならない、など)は、`net` の層で埋める
+- 差し替え方(TCP だけを raw ソケットで横に置き、ソケットごとに選ぶ)は ADR-0008

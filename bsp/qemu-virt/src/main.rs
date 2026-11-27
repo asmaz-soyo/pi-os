@@ -184,6 +184,17 @@ mod tests {
     }
 
     #[test_case]
+    fn own_tcp_talks_to_the_host_through_virtio_net() {
+        assert!(wait_for_dhcp().is_some());
+        // 相手は QEMU の slirp(ホストの cat につながる)。smoltcp とも自作とも違う、3 つ目の TCP の実装
+        let script = b"echo own > /proc/sys/net/pios/tcp && test \"$(echo hello own tcp through virtio-net | nc 10.0.2.100 7)\" = \"hello own tcp through virtio-net\"";
+        let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
+        let r = boot::run_program("/bin/busybox", &argv);
+        kernel::net::inet::set_default_tcp(b"smoltcp").unwrap();
+        assert_eq!(r, Ok(0));
+    }
+
+    #[test_case]
     fn musl_resolves_names_with_the_dns_server_from_dhcp() {
         assert!(wait_for_dhcp().is_some());
         // /etc/resolv.conf は /proc/pios/resolv.conf へのリンク(DHCP でもらった DNS サーバー)

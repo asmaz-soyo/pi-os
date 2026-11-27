@@ -61,6 +61,8 @@ cargo xtask ci                     # 上のすべて(push の前に必ず通す)
 cargo xtask disk-get /a target/a   # QEMU virt のディスクのルートからファイルを取り出す
 ```
 
+TCP は smoltcp と自作(`kernel/src/net/tcp/`)の 2 つがあり、Pi-OS の中で `echo own > /proc/sys/net/pios/tcp` とすると、そのあとに作る TCP のソケットが自作の TCP を使う(`echo smoltcp > ...` で戻す。ADR-0008)。自作の TCP の接続の一覧は `cat /proc/pios/tcp`、速さは `tcpbulk 7000 262144 253`(253 = 自作、0 = 既定)で見られる。
+
 パケットを見るには、Pi-OS の中で `cp /proc/pios/net/eth0.pcap /eth0.pcap` としてから終わり、`cargo xtask disk-get /eth0.pcap target/eth0.pcap` で取り出して Wireshark か `tcpdump -nr` で開く(`docs/notes/p2-68-pcap.md`)。
 
 実機用のイメージは `cargo xtask build` で `target/hw/kernel8.img` にできる(セミホスティングを外したビルド。終わると「system halted」と出して止まる)。

@@ -52,6 +52,34 @@ const BUFFER: usize = 16 * 1024;
 const BACKLOG_MAX: usize = 8;
 /// 自作の TCP を選ぶプロトコル番号(IANA の実験用。RFC 3692)
 pub const IPPROTO_OWN_TCP: u32 = 253;
+/// protocol 0 / 6 の TCP のソケットに自作の TCP を使うか(`/proc/sys/net/pios/tcp`)
+static DEFAULT_OWN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// 既定の TCP の実装の名前
+pub fn default_tcp() -> &'static str {
+    if DEFAULT_OWN.load(core::sync::atomic::Ordering::Relaxed) {
+        "own"
+    } else {
+        "smoltcp"
+    }
+}
+
+/// 既定の TCP の実装を変える(`smoltcp` か `own`。後ろの改行は無視)。変わるのは、これから作るソケット
+pub fn set_default_tcp(value: &[u8]) -> Result<(), Errno> {
+    let own = match value.trim_ascii_end() {
+        b"smoltcp" => false,
+        b"own" => true,
+        _ => return Err(Errno::EINVAL),
+    };
+    DEFAULT_OWN.store(own, core::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+/// 自作の TCP の待ち受けと接続の一覧(`/proc/pios/tcp`)
+pub fn own_tcp_table() -> Vec<(Endpoint, Option<Endpoint>, &'static str, u64)> {
+    with_net(|n| n.own.table())
+}
+
 /// 自動で振るポートの範囲(Linux の既定の ip_local_port_range に近い)
 const EPHEMERAL: core::ops::RangeInclusive<u16> = 49152..=65535;
 
@@ -602,7 +630,7 @@ impl ProtocolFamily for Inet {
             (SOCK_STREAM, 0 | IPPROTO_TCP | IPPROTO_OWN_TCP) => Ok(Arc::new(InetSocket {
                 state: SpinLock::new(State::Idle { local: None }),
                 options: Options::default(),
-                own: protocol == IPPROTO_OWN_TCP,
+                own: protocol == IPPROTO_OWN_TCP || default_tcp() == "own",
             })),
             (SOCK_DGRAM, 0 | IPPROTO_UDP) => Ok(Arc::new(UdpSocket {
                 state: SpinLock::new(UdpState::default()),

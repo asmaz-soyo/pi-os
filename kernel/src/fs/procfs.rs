@@ -2,6 +2,7 @@
 //!
 //! 中身は、パスを引いたときにその時点の値で作る。Linux と同じ形のもの(`uptime`、`meminfo`、
 //! `<pid>/status`)に加えて、Pi-OS 独自の観察用のファイルを `/proc/pios/` に置く。
+//! `/proc/sys/net/pios/` の下は書ける(設定を変える)。
 
 use crate::Errno;
 use crate::fs::vfs::{DirEntry, File, FileKind, FileSystem, Stat};
@@ -142,6 +143,69 @@ fn find(pid: crate::process::Pid) -> Option<(crate::process::Pid, String)> {
         .map(|(_, ppid, name)| (ppid, name))
 }
 
+/// 自作の TCP の一覧(`/pios/tcp`)
+pub fn tcp_table(
+    rows: &[(
+        crate::net::tcp::conn::Endpoint,
+        Option<crate::net::tcp::conn::Endpoint>,
+        &str,
+        u64,
+    )],
+) -> String {
+    let mut text = format!(
+        "{:<23}{:<23}{:<13}{}\n",
+        "local", "remote", "state", "rto_ms"
+    );
+    for (local, remote, state, rto) in rows {
+        let local = format!("{}:{}", local.addr, local.port);
+        let remote = remote.map_or(String::from("-"), |r| format!("{}:{}", r.addr, r.port));
+        let rto = if remote == "-" {
+            String::from("-")
+        } else {
+            format!("{rto}")
+        };
+        text += &format!("{local:<23}{remote:<23}{state:<13}{rto}\n");
+    }
+    text
+}
+
+/// 読むと今の値、書くと設定が変わるファイル(Linux の `/proc/sys` と同じ)
+struct SysFile {
+    get: fn() -> &'static str,
+    set: fn(&[u8]) -> Result<(), Errno>,
+}
+
+impl File for SysFile {
+    fn stat(&self) -> Stat {
+        Stat {
+            kind: FileKind::Regular,
+            mode: 0o644,
+            size: 0,
+            ino: 0x4_0003,
+            uid: 0,
+            gid: 0,
+            ..Default::default()
+        }
+    }
+
+    fn read(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        ProcFile {
+            data: format!("{}\n", (self.get)()).into_bytes(),
+        }
+        .read(offset, buf)
+    }
+
+    fn write(&self, _offset: u64, buf: &[u8]) -> Result<usize, Errno> {
+        (self.set)(buf)?;
+        Ok(buf.len())
+    }
+
+    /// `echo x > file` は O_TRUNC で開くので、切り詰めは何もせずに受ける
+    fn truncate(&self, _len: u64) -> Result<(), Errno> {
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 pub struct Procfs;
 
@@ -168,7 +232,14 @@ impl FileSystem for Procfs {
     fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
         let path = resolve_self(path);
         match path.as_str() {
-            "/" | "/pios" | "/pios/net" => Ok(Arc::new(ProcDir)),
+            "/" | "/pios" | "/pios/net" | "/sys" | "/sys/net" | "/sys/net/pios" => {
+                Ok(Arc::new(ProcDir))
+            }
+            "/sys/net/pios/tcp" => Ok(Arc::new(SysFile {
+                get: crate::net::inet::default_tcp,
+                set: crate::net::inet::set_default_tcp,
+            })),
+            "/pios/tcp" => file(tcp_table(&crate::net::inet::own_tcp_table())),
             "/uptime" => file(uptime()),
             "/meminfo" => file(meminfo()),
             "/mounts" => file(mounts()),
@@ -210,6 +281,7 @@ impl FileSystem for Procfs {
                         .collect();
                 entries.push(entry("pios", FileKind::Directory));
                 entries.push(entry("self", FileKind::Directory));
+                entries.push(entry("sys", FileKind::Directory));
                 for (pid, _, _) in PROCESSES.infos() {
                     entries.push(entry(&format!("{pid}"), FileKind::Directory));
                 }
@@ -222,8 +294,12 @@ impl FileSystem for Procfs {
             "/pios" => Ok(alloc::vec![
                 entry("net", FileKind::Directory),
                 entry("resolv.conf", FileKind::Regular),
+                entry("tcp", FileKind::Regular),
                 entry("unimplemented", FileKind::Regular),
             ]),
+            "/sys" => Ok(alloc::vec![entry("net", FileKind::Directory)]),
+            "/sys/net" => Ok(alloc::vec![entry("pios", FileKind::Directory)]),
+            "/sys/net/pios" => Ok(alloc::vec![entry("tcp", FileKind::Regular)]),
             other => {
                 let pid: crate::process::Pid = other
                     .trim_start_matches('/')
@@ -371,5 +447,62 @@ mod tests {
         let fs = Procfs::new();
         let text = read_all(&fs, "/pios/unimplemented");
         assert!(text.starts_with("# nr count\n"), "{text}");
+    }
+
+    #[test]
+    fn the_default_tcp_can_be_read_and_switched_through_sys() {
+        let fs = Procfs::new();
+        // 既定は smoltcp。ほかのテストと共有なので、ここでは今と同じ値を書くことと、だめな値だけを試す
+        assert_eq!(read_all(&fs, "/sys/net/pios/tcp"), "smoltcp\n");
+        let f = fs.lookup("/sys/net/pios/tcp").unwrap();
+        assert!(!f.is_read_only());
+        assert_eq!(f.stat().mode, 0o644);
+        assert_eq!(f.write(0, b"smoltcp\n"), Ok(8));
+        assert_eq!(f.write(0, b"lwip\n"), Err(Errno::EINVAL));
+        // シェルの `echo own > ...` は O_TRUNC で開く
+        assert_eq!(f.truncate(0), Ok(()));
+        assert_eq!(read_all(&fs, "/sys/net/pios/tcp"), "smoltcp\n");
+        for (dir, want) in [
+            ("/", "sys"),
+            ("/sys", "net"),
+            ("/sys/net", "pios"),
+            ("/sys/net/pios", "tcp"),
+        ] {
+            assert!(
+                fs.readdir(dir).unwrap().iter().any(|e| e.name == want),
+                "{dir}"
+            );
+        }
+    }
+
+    #[test]
+    fn own_tcp_connections_are_listed() {
+        use crate::net::tcp::conn::Endpoint;
+        use core::net::Ipv4Addr;
+        let any = Endpoint {
+            addr: Ipv4Addr::UNSPECIFIED,
+            port: 7300,
+        };
+        let me = Endpoint {
+            addr: Ipv4Addr::new(127, 0, 0, 1),
+            port: 49152,
+        };
+        let peer = Endpoint {
+            addr: Ipv4Addr::new(127, 0, 0, 1),
+            port: 7300,
+        };
+        let text = tcp_table(&[
+            (any, None, "LISTEN", 0),
+            (me, Some(peer), "ESTABLISHED", 200),
+        ]);
+        assert_eq!(
+            text,
+            "local                  remote                 state        rto_ms\n\
+             0.0.0.0:7300           -                      LISTEN       -\n\
+             127.0.0.1:49152        127.0.0.1:7300         ESTABLISHED  200\n"
+        );
+        let fs = Procfs::new();
+        assert!(read_all(&fs, "/pios/tcp").starts_with("local "));
+        assert!(fs.readdir("/pios").unwrap().iter().any(|e| e.name == "tcp"));
     }
 }

@@ -390,6 +390,34 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn programs_use_the_own_tcp_after_switching_the_default() {
+            // 既定の TCP を自作に切り替えると、ふつうのプログラム(protocol 0 で作る nc)も自作の TCP を使う。
+            // 待ち受けが /proc/pios/tcp(自作の TCP の一覧)に出ることで確かめる
+            let script = b"echo own > /proc/sys/net/pios/tcp
+                test \"$(cat /proc/sys/net/pios/tcp)\" = own || exit 7
+                nc -l -p 7310 < /dev/null > /tmp/got_own &
+                ok=no
+                for i in $(seq 200); do grep -q '^0.0.0.0:7310 .*LISTEN' /proc/pios/tcp && ok=yes && break; done
+                test $ok = yes || exit 9
+                echo hello over own tcp | nc 127.0.0.1 7310 || exit 8
+                for i in $(seq 1000); do test -s /tmp/got_own && break; done
+                test \"$(cat /tmp/got_own)\" = \"hello over own tcp\"";
+            let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
+            let r = boot::run_program("/bin/busybox", &argv);
+            kernel::net::inet::set_default_tcp(b"smoltcp").unwrap();
+            assert_eq!(r, Ok(0));
+        }
+
+        #[test_case]
+        fn both_tcps_carry_a_bulk_transfer_over_loopback() {
+            // 256KB を流し、全部が正しく届くことを確かめる。かかった時間は tcpbulk が出す(比べるため)
+            for (proto, port) in [(&b"0"[..], &b"7320"[..]), (b"253", b"7321")] {
+                let argv: [&[u8]; 4] = [b"tcpbulk", port, b"262144", proto];
+                assert_eq!(boot::run_program("/bin/tcpbulk", &argv), Ok(0));
+            }
+        }
+
+        #[test_case]
         fn dynamically_linked_programs_run_through_ld_musl() {
             assert_eq!(boot::run_program("/bin/dynhello", &[b"dynhello"]), Ok(0));
         }

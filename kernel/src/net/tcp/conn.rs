@@ -26,6 +26,24 @@ pub enum State {
     TimeWait,
 }
 
+impl State {
+    /// 表示用の名前(netstat と同じ)
+    pub fn name(self) -> &'static str {
+        match self {
+            State::Closed => "CLOSE",
+            State::SynSent => "SYN_SENT",
+            State::SynReceived => "SYN_RECV",
+            State::Established => "ESTABLISHED",
+            State::FinWait1 => "FIN_WAIT1",
+            State::FinWait2 => "FIN_WAIT2",
+            State::CloseWait => "CLOSE_WAIT",
+            State::Closing => "CLOSING",
+            State::LastAck => "LAST_ACK",
+            State::TimeWait => "TIME_WAIT",
+        }
+    }
+}
+
 /// アドレスとポートの組
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Endpoint {
