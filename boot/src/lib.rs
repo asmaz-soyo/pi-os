@@ -44,6 +44,10 @@ pub trait Board: 'static {
     }
     /// GPIO コントローラの割り込み番号(ないボードは None)
     const GPIO_IRQ: Option<u32> = None;
+    /// UART の受信割り込みの番号(なければ、端末の入力は 10ms ごとに確かめる)
+    const UART_IRQ: Option<u32> = None;
+    /// UART の受信割り込みを入れる・止める(割り込みのハンドラから呼ぶので、コンソールのロックを取らない)
+    fn uart_rx_irq(_on: bool) {}
     /// GPIO の割り込みの要因(線のビット)を読んで消す
     fn gpio_take_pending() -> u32 {
         0
@@ -387,6 +391,21 @@ impl<B: Board> Handler for Exceptions<B> {
     }
 }
 
+/// UART の受信割り込み:受信割り込みを止めて(データが残っているあいだ立ち続けるので)、
+/// 端末の入力を待っているタスクを起こす。UART を読むのは、起こされたタスク
+fn uart_irq<B: Board>() {
+    B::uart_rx_irq(false);
+    kernel::fs::devfs::input_arrived();
+}
+
+/// 止めておいた受信割り込みを戻す(読む側が UART を空にしたあと)。割り込みのハンドラも同じ
+/// レジスタを触るので、そのあいだは割り込みを止める
+fn uart_rearm<B: Board>() {
+    let flags = arch_aarch64::cpu::irq_save();
+    B::uart_rx_irq(true);
+    arch_aarch64::cpu::irq_restore(flags);
+}
+
 fn gpio_irq<B: Board>() {
     kernel::gpio::GPIO.record(B::gpio_take_pending());
 }
@@ -405,6 +424,13 @@ fn start_timer<B: Board>() {
         .register(B::TIMER_IRQ, "timer", timer_tick)
         .expect("timer irq number is valid");
     B::intc().lock().enable(B::TIMER_IRQ);
+    if let Some(irq) = B::UART_IRQ {
+        kernel::irq::IRQS
+            .register(irq, "uart", uart_irq::<B>)
+            .expect("uart irq number is valid");
+        B::intc().lock().enable(irq);
+        kernel::fs::devfs::use_input_irq(uart_rearm::<B>);
+    }
     if let Some(irq) = B::GPIO_IRQ {
         kernel::irq::IRQS
             .register(irq, "gpio", gpio_irq::<B>)

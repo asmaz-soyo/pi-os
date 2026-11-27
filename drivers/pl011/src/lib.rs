@@ -14,6 +14,7 @@ pub const IBRD: usize = 0x24; // ボーレート分周比の整数部
 pub const FBRD: usize = 0x28; // ボーレート分周比の小数部(1/64 単位)
 pub const LCR_H: usize = 0x2c; // 回線制御(データ長、FIFO)
 pub const CR: usize = 0x30; // 制御(有効化、送受信の許可)
+pub const IMSC: usize = 0x38; // 割り込みのマスク(1 = 知らせる)
 pub const ICR: usize = 0x44; // 割り込みのクリア
 
 // ビット
@@ -24,6 +25,21 @@ pub const LCR_H_WLEN_8: u32 = 0b11 << 5; // 8 ビット
 pub const CR_UARTEN: u32 = 1 << 0;
 pub const CR_TXE: u32 = 1 << 8;
 pub const CR_RXE: u32 = 1 << 9;
+/// 受信(FIFO が半分たまった)と、受信のタイムアウト(データがあるまま 32 ビット分の時間が過ぎた。
+/// 1 文字だけ打ったときはこちらで知らせる)
+pub const INT_RX: u32 = 1 << 4;
+pub const INT_RT: u32 = 1 << 6;
+
+/// 受信の割り込みを入れる・止める(止めるときは、立っている印も消す)。
+/// 割り込みのハンドラから呼べるように、`Pl011` を通さずレジスタに直接書く
+pub fn set_rx_interrupt<M: Mmio>(regs: &mut M, on: bool) {
+    if on {
+        regs.write(IMSC, INT_RX | INT_RT);
+    } else {
+        regs.write(IMSC, 0);
+        regs.write(ICR, INT_RX | INT_RT);
+    }
+}
 
 /// UART のクロック `clock_hz` で `baud` を出すための分周比(整数部, 小数部)。
 ///
@@ -167,5 +183,16 @@ mod tests {
         mmio.queue_reads(DR, &[0x0f00 | b'a' as u32]);
         let mut uart = Pl011::new(mmio);
         assert_eq!(uart.read_byte(), Some(b'a'));
+    }
+
+    #[test]
+    fn the_receive_interrupt_is_unmasked_and_masked_with_its_flags_cleared() {
+        let mut m = FakeMmio::new();
+        set_rx_interrupt(&mut m, true);
+        set_rx_interrupt(&mut m, false);
+        assert_eq!(
+            m.writes(),
+            [(IMSC, INT_RX | INT_RT), (IMSC, 0), (ICR, INT_RX | INT_RT)]
+        );
     }
 }

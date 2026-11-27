@@ -9,8 +9,25 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use hal::console::Console;
 
-/// 端末の入力を確かめ直す間隔(UART の受信割り込みを使うまで)
+/// 端末の入力を確かめ直す間隔(UART の受信割り込みがない BSP)
 const INPUT_CHECK_NS: u64 = 10_000_000;
+
+/// 端末の入力を待つタスクの待ち行列(UART の受信割り込みで起こす)
+pub static TTY_WQ: crate::wait::WaitQueue = crate::wait::WaitQueue::new();
+
+/// UART の受信割り込みを戻す関数(BSP が登録する。登録がなければ 10ms ごとに確かめる)
+static INPUT_IRQ: spin::Once<fn()> = spin::Once::new();
+
+/// UART の受信割り込みを使う。`rearm` は止めておいた受信割り込みを戻す関数
+pub fn use_input_irq(rearm: fn()) {
+    INPUT_IRQ.call_once(|| rearm);
+}
+
+/// UART の受信割り込みのハンドラから呼ぶ(ハンドラは受信割り込みを止めてから呼ぶ。読む側が
+/// UART を空にしてから戻す。データが残っているあいだ割り込みが立ち続けるので)
+pub fn input_arrived() {
+    TTY_WQ.wake_all();
+}
 
 /// 端末(UART + 行規律)。
 pub struct ConsoleFile {
@@ -55,9 +72,22 @@ impl File for ConsoleFile {
 
     /// 1 行(raw モードなら届いた分)が読めるまで待つ。
     ///
-    /// UART の受信割り込みはまだ使っていないので、10ms ずつ眠っては UART を確かめる
-    /// (回り続けるより軽い。割り込みで起こしてもらう形にするのは、後で)。
+    /// UART の受信割り込みがあれば、それで起こしてもらう。なければ(raspi3 はまだ)10ms ずつ
+    /// 眠っては UART を確かめる。
     fn read(&self, _offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        if let Some(rearm) = INPUT_IRQ.get() {
+            // 受信割り込みで起こしてもらう。登録してから UART を空にし、それでも読めるものが
+            // なければ割り込みを戻して眠る(戻したときにデータが残っていれば、すぐ割り込みが来る)
+            let n = crate::wait::wait_event(&[&TTY_WQ], None, || {
+                self.poll_input();
+                let n = self.tty.lock().read(buf);
+                if n.is_none() {
+                    rearm();
+                }
+                n
+            });
+            return Ok(n.unwrap_or(0));
+        }
         loop {
             self.poll_input();
             if let Some(n) = self.tty.lock().read(buf) {
@@ -67,8 +97,13 @@ impl File for ConsoleFile {
         }
     }
 
-    /// poll / select も、10ms ごとに UART を確かめ直す
+    /// 受信割り込みがなければ、poll / select も 10ms ごとに UART を確かめ直す
+    /// (あれば、割り込みで TTY_WQ が起こされ、POLL_WQ も起こされる)
     fn next_event_at(&self) -> Option<u64> {
+        if let Some(rearm) = INPUT_IRQ.get() {
+            rearm();
+            return None;
+        }
         Some(crate::time::now_ns() + INPUT_CHECK_NS)
     }
 

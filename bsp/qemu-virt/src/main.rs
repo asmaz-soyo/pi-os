@@ -26,8 +26,14 @@ const GPIO_PHYS: usize = 0x0903_0000;
 const POWER_BUTTON: u32 = 3;
 
 // SAFETY: 各アドレスは virt のデバイス。この static 以外から同じ領域を触らない
+// (UART の IMSC と ICR だけは、下の UART_IRQ_REGS が触る)
 static UART: SpinLock<Pl011<MmioRegion>> =
     SpinLock::new(Pl011::new(unsafe { MmioRegion::new(device_va(UART_PHYS)) }));
+/// UART の割り込みのマスク(IMSC)とクリア(ICR)だけを触る窓口。割り込みのハンドラから使うので、
+/// コンソール(`UART`)のロックとは別にする
+// SAFETY: 同じ UART のレジスタだが、こちらは IMSC と ICR だけ、`UART` は送受信のレジスタだけを触る
+static UART_IRQ_REGS: SpinLock<MmioRegion> =
+    SpinLock::new(unsafe { MmioRegion::new(device_va(UART_PHYS)) });
 static INTC: SpinLock<GicV2<MmioRegion>> = SpinLock::new(GicV2::new(
     unsafe { MmioRegion::new(device_va(GICD_PHYS)) },
     unsafe { MmioRegion::new(device_va(GICC_PHYS)) },
@@ -82,6 +88,13 @@ impl boot::Board for Board {
     }
 
     const GPIO_IRQ: Option<u32> = Some(39);
+
+    /// PL011 は SPI 1(GIC の番号で 33)
+    const UART_IRQ: Option<u32> = Some(33);
+
+    fn uart_rx_irq(on: bool) {
+        pl011::set_rx_interrupt(&mut *UART_IRQ_REGS.lock(), on);
+    }
 
     fn gpio_take_pending() -> u32 {
         GPIO_CTRL.lock().take_pending()
@@ -141,6 +154,18 @@ mod tests {
     #[test_case]
     fn the_ext2_partition_of_the_disk_is_the_root() {
         assert_eq!(boot::run_program("/bin/ext2read", &[b"ext2read"]), Ok(0));
+    }
+
+    #[test_case]
+    fn the_uart_receive_interrupt_is_registered() {
+        // PL011 は SPI 1(GIC の番号で 33)。端末の入力は、この割り込みで待っているタスクを起こす
+        let counts = kernel::irq::IRQS.counts();
+        assert!(
+            counts
+                .iter()
+                .any(|&(irq, name, _)| irq == 33 && name == "uart"),
+            "{counts:?}"
+        );
     }
 
     #[test_case]
