@@ -10,7 +10,9 @@ const SIGCHLD: u64 = 17;
 
 fn fork(p: &mut crate::process::Process) -> crate::process::Process {
     match dispatch(p, nr::CLONE, [SIGCHLD, 0, 0, 0, 0, 0]) {
-        Action::Fork { child, sp: None } => *child,
+        Action::Fork {
+            child, sp: None, ..
+        } => *child,
         other => panic!("expected fork, got {other:?}"),
     }
 }
@@ -47,6 +49,7 @@ fn getpid_and_gettid_return_the_process_number() {
     // 以前は決め打ちで 1 を返していた(シェルの $$ がいつも 1 になった)
     let (mut p, _) = process();
     p.pid = 42;
+    p.tgid = 42; // スレッドが 1 つのプロセスは、グループの番号 = スレッドの番号
     assert_eq!(call(&mut p, nr::GETPID, [0; 6]), 42);
     assert_eq!(call(&mut p, nr::GETTID, [0; 6]), 42);
     assert_eq!(
@@ -268,4 +271,101 @@ fn clone_with_a_new_stack_starts_the_child_on_it() {
         Action::Fork { sp, .. } => assert_eq!(sp, Some(0x7000_0000)),
         other => panic!("expected fork, got {other:?}"),
     }
+}
+
+/// musl の pthread_create が clone に渡すフラグ
+const THREAD_FLAGS: u64 = 0x100 // CLONE_VM
+    | 0x200 // CLONE_FS
+    | 0x400 // CLONE_FILES
+    | 0x800 // CLONE_SIGHAND
+    | 0x10000 // CLONE_THREAD
+    | 0x40000 // CLONE_SYSVSEM
+    | 0x80000 // CLONE_SETTLS
+    | 0x100000 // CLONE_PARENT_SETTID
+    | 0x200000 // CLONE_CHILD_CLEARTID
+    | 0x400000; // CLONE_DETACHED
+
+#[test]
+fn clone_with_thread_flags_makes_a_thread_that_shares_memory_and_files() {
+    let (mut p, _) = process();
+    p.pid = 50;
+    p.tgid = 50;
+    // clone(flags, newsp, parent_tid, tls, child_tid)
+    let action = dispatch(
+        &mut p,
+        nr::CLONE,
+        [
+            THREAD_FLAGS,
+            0x7000_0000,
+            SCRATCH + 0x10,
+            0x7100_0000,
+            SCRATCH + 0x20,
+            0,
+        ],
+    );
+    let Action::Fork {
+        child,
+        sp,
+        tls,
+        set_tid,
+    } = action
+    else {
+        panic!("expected a new task, got {action:?}");
+    };
+    assert_eq!(sp, Some(0x7000_0000));
+    assert_eq!(tls, Some(0x7100_0000), "CLONE_SETTLS");
+    // 番号はまだ決まっていない。決まったら parent_tid に書く(同じメモリ)
+    assert_eq!(set_tid, Some(SCRATCH + 0x10));
+    assert_eq!(child.tgid, 50, "同じスレッドのグループ");
+    assert_eq!(child.mem.id(), p.mem.id(), "CLONE_VM");
+    assert_eq!(
+        child.clear_child_tid,
+        SCRATCH + 0x20,
+        "CLONE_CHILD_CLEARTID"
+    );
+    // fd 表も共有(CLONE_FILES):親が開いたものが子に見える
+    let fd = call(&mut p, nr::DUP, [1, 0, 0, 0, 0, 0]);
+    assert!(child.fds.get(fd).is_ok());
+}
+
+#[test]
+fn a_thread_without_shared_memory_is_rejected() {
+    // CLONE_THREAD には CLONE_SIGHAND が、CLONE_SIGHAND には CLONE_VM が要る(Linux と同じ)
+    let (mut p, _) = process();
+    assert_eq!(
+        call(&mut p, nr::CLONE, [0x10000 | 0x800, 0, 0, 0, 0, 0]),
+        err(Errno::EINVAL)
+    );
+    assert_eq!(
+        call(&mut p, nr::CLONE, [0x10000, 0, 0, 0, 0, 0]),
+        err(Errno::EINVAL)
+    );
+}
+
+#[test]
+fn getpid_is_the_thread_group_and_gettid_the_thread() {
+    let (mut p, _) = process();
+    p.pid = 43;
+    p.tgid = 42;
+    assert_eq!(call(&mut p, nr::GETPID, [0; 6]), 42);
+    assert_eq!(call(&mut p, nr::GETTID, [0; 6]), 43);
+    // set_tid_address:終わるときに 0 を書いて futex で起こす場所。返すのはスレッドの番号
+    assert_eq!(
+        call(&mut p, nr::SET_TID_ADDRESS, [SCRATCH + 8, 0, 0, 0, 0, 0]),
+        43
+    );
+    assert_eq!(p.clear_child_tid, SCRATCH + 8);
+}
+
+#[test]
+fn exit_ends_the_thread_and_exit_group_the_whole_group() {
+    let (mut p, _) = process();
+    assert_eq!(
+        dispatch(&mut p, nr::EXIT, [3, 0, 0, 0, 0, 0]),
+        Action::Exit(3)
+    );
+    assert_eq!(
+        dispatch(&mut p, nr::EXIT_GROUP, [4, 0, 0, 0, 0, 0]),
+        Action::ExitGroup(4)
+    );
 }

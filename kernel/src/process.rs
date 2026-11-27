@@ -50,7 +50,12 @@ fn no_space() -> Result<alloc::boxed::Box<dyn hal::mmu::AddressSpace>, crate::Er
 }
 
 pub struct Process {
+    /// スレッドの番号(gettid)。タスクの番号と同じ
     pub pid: Pid,
+    /// スレッドのグループ(= プロセス)の番号(getpid)。最初のスレッドの番号
+    pub tgid: Pid,
+    /// スレッドが終わるときに 0 を書いて futex で起こす場所(set_tid_address、CLONE_CHILD_CLEARTID)
+    pub clear_child_tid: u64,
     /// プログラムの名前(/proc/<pid>/status の Name)
     pub name: String,
     /// 親のプロセス(カーネルが直接動かしたものは 0)
@@ -64,8 +69,6 @@ pub struct Process {
     pub vfs: Arc<Vfs>,
     /// 誰として動いているか(ADR-0005)
     pub cred: Credentials,
-    /// 保留中のシグナル(今は強制終了だけ。ユーザーに戻る直前に処理する)
-    pub pending_kill: Option<i32>,
     /// リアルタイム優先度(0 = 通常 SCHED_OTHER、1〜99 = SCHED_FIFO)
     pub rt_priority: u8,
     /// 作るときに消す権限のビット(umask)
@@ -84,6 +87,8 @@ impl Process {
         }
         Self {
             pid: 0,
+            tgid: 0,
+            clear_child_tid: 0,
             name: String::new(),
             ppid: 0,
             new_space: no_space,
@@ -93,9 +98,29 @@ impl Process {
             cwd: String::from("/"),
             vfs,
             cred: Credentials::root(),
-            pending_kill: None,
             rt_priority: 0,
             umask: 0o022,
+        }
+    }
+
+    /// 同じグループのスレッドを作る(clone の CLONE_VM | CLONE_FILES | CLONE_THREAD)。
+    /// メモリと fd の表は共有し、親(wait4 で待つのは親のプロセスの親)も同じ
+    pub fn thread(&self) -> Process {
+        Process {
+            pid: 0,
+            tgid: self.tgid,
+            clear_child_tid: 0,
+            name: self.name.clone(),
+            ppid: self.ppid,
+            new_space: self.new_space,
+            mem: self.mem.share(),
+            entry: self.entry,
+            fds: self.fds.share(),
+            cwd: self.cwd.clone(),
+            vfs: self.vfs.clone(),
+            cred: self.cred.clone(),
+            rt_priority: self.rt_priority,
+            umask: self.umask,
         }
     }
 
@@ -105,6 +130,8 @@ impl Process {
         let mem = self.mem.fork(space)?;
         Ok(Process {
             pid: 0,
+            tgid: 0, // 新しいグループ(番号が決まったら、それと同じにする)
+            clear_child_tid: 0,
             name: self.name.clone(),
             ppid: self.pid,
             new_space: self.new_space,
@@ -114,7 +141,6 @@ impl Process {
             cwd: self.cwd.clone(),
             vfs: self.vfs.clone(),
             cred: self.cred.clone(),
-            pending_kill: None,
             rt_priority: self.rt_priority,
             umask: self.umask,
         })
@@ -130,8 +156,12 @@ pub static CHILD_WQ: crate::wait::WaitQueue = crate::wait::WaitQueue::new();
 
 pub struct ProcessTable {
     live: SpinLock<BTreeMap<Pid, Process>>,
-    /// 動いているプロセスの (親, 名前)。システムコールで取り出されている間も引ける(/proc 用)
-    info: SpinLock<BTreeMap<Pid, (Pid, String)>>,
+    /// 動いているスレッドの (親, 名前, スレッドのグループ)。システムコールで取り出されている間も
+    /// 引ける(/proc 用、グループのスレッドを探すため)
+    info: SpinLock<BTreeMap<Pid, (Pid, String, Pid)>>,
+    /// 保留中のシグナル(今は強制終了だけ。ユーザーに戻る直前に処理する)。システムコールの途中で
+    /// 表から取り出されているスレッドにも付けられるように、表とは別に持つ
+    kills: SpinLock<BTreeMap<Pid, i32>>,
     /// 終わったプロセス:番号 → (親の番号, 終わり方)
     zombies: SpinLock<BTreeMap<Pid, (Pid, ExitStatus)>>,
 }
@@ -141,17 +171,48 @@ impl ProcessTable {
         Self {
             live: SpinLock::new(BTreeMap::new()),
             info: SpinLock::new(BTreeMap::new()),
+            kills: SpinLock::new(BTreeMap::new()),
             zombies: SpinLock::new(BTreeMap::new()),
         }
     }
 
-    pub fn insert(&self, pid: Pid, p: Process) {
-        self.add_info(pid, p.ppid, &p.name);
+    pub fn insert(&self, pid: Pid, mut p: Process) {
+        if p.tgid == 0 {
+            p.tgid = pid; // グループがまだない:スレッドが 1 つのプロセス
+        }
+        self.info
+            .lock()
+            .insert(pid, (p.ppid, p.name.clone(), p.tgid));
         self.live.lock().insert(pid, p);
     }
 
     pub fn add_info(&self, pid: Pid, ppid: Pid, name: &str) {
-        self.info.lock().insert(pid, (ppid, String::from(name)));
+        self.info
+            .lock()
+            .insert(pid, (ppid, String::from(name), pid));
+    }
+
+    /// グループ `tgid` のスレッドの番号
+    pub fn threads_of(&self, tgid: Pid) -> alloc::vec::Vec<Pid> {
+        self.info
+            .lock()
+            .iter()
+            .filter(|(_, (_, _, g))| *g == tgid)
+            .map(|(pid, _)| *pid)
+            .collect()
+    }
+
+    /// 強制終了の印を付ける(次にユーザーに戻るときに終わる)
+    pub fn kill(&self, pid: Pid, sig: i32) {
+        self.kills.lock().insert(pid, sig);
+    }
+
+    pub fn take_kill(&self, pid: Pid) -> Option<i32> {
+        self.kills.lock().remove(&pid)
+    }
+
+    pub fn is_killed(&self, pid: Pid) -> bool {
+        self.kills.lock().contains_key(&pid)
     }
 
     /// 名前を変える(execve のとき)
@@ -166,7 +227,7 @@ impl ProcessTable {
         self.info
             .lock()
             .iter()
-            .map(|(pid, (ppid, name))| (*pid, *ppid, name.clone()))
+            .map(|(pid, (ppid, name, _))| (*pid, *ppid, name.clone()))
             .collect()
     }
 
@@ -189,18 +250,44 @@ impl ProcessTable {
         self.live.lock().get_mut(&pid).map(f)
     }
 
-    /// プロセスを終える。メモリはここで返し、終わり方だけを残す。
+    /// スレッドを終える。メモリはここで返し(ほかのスレッドが使っていなければ)、グループの
+    /// 最初のスレッドなら終わり方を残す(親が wait4 で受け取る)。ほかのスレッドは何も残さない
     pub fn exit(&self, pid: Pid, status: ExitStatus) {
         let info = self.info.lock().remove(&pid);
+        self.kills.lock().remove(&pid);
         let process = self.live.lock().remove(&pid);
         // 表から取り出されたまま終わることもあるので、親は info からも引く
         let ppid = process
             .as_ref()
             .map(|p| p.ppid)
-            .or(info.map(|(ppid, _)| ppid))
+            .or(info.as_ref().map(|(ppid, _, _)| *ppid))
             .unwrap_or(0);
+        let tgid = process
+            .as_ref()
+            .map(|p| p.tgid)
+            .or(info.as_ref().map(|(_, _, g)| *g))
+            .unwrap_or(pid);
         drop(process);
-        self.add_zombie(pid, ppid, status);
+        // exit_group で、終わり方はもう残してある
+        if tgid == pid && !self.zombies.lock().contains_key(&pid) {
+            self.add_zombie(pid, ppid, status);
+        }
+    }
+
+    /// スレッドのグループ全体を終える(exit_group)。終わり方をすぐ残し、ほかのスレッドには
+    /// 強制終了の印を付けて起こす(眠っていれば、目を覚まして印に気づく)。呼んだスレッドは
+    /// このあと自分で `exit` する
+    pub fn exit_group(&self, me: Pid, tgid: Pid, status: ExitStatus) {
+        let ppid = self.info.lock().get(&tgid).map_or(0, |(ppid, _, _)| *ppid);
+        if !self.zombies.lock().contains_key(&tgid) {
+            self.add_zombie(tgid, ppid, status);
+        }
+        for t in self.threads_of(tgid) {
+            if t != me {
+                self.kill(t, 9);
+                crate::sched::wake(t);
+            }
+        }
     }
 
     pub fn add_zombie(&self, pid: Pid, ppid: Pid, status: ExitStatus) {
@@ -238,7 +325,8 @@ impl ProcessTable {
             .info
             .lock()
             .iter()
-            .any(|(child, (parent, _))| *parent == ppid && matches(*child));
+            // 子のプロセスのスレッドも親は同じなので、グループの最初のスレッドだけを数える
+            .any(|(child, (parent, _, tgid))| *parent == ppid && tgid == child && matches(*child));
         // 番号を指定されたときは、スケジューラのタスクとして生きているかでも確かめる
         let alive = alive || pid.is_some_and(crate::sched::is_alive);
         if alive {

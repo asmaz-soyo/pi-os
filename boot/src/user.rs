@@ -132,9 +132,19 @@ const SIGSEGV: i32 = 11;
 /// ユーザーのフォールトで終わったときの終了ステータス(128 + SIGSEGV)
 pub const STATUS_SEGV: i32 = 128 + SIGSEGV;
 
-/// 今のプロセスを終える(ゾンビにしてタスクを終える)。
+/// 今のスレッドを終える(グループの最初のスレッドならゾンビにして)、タスクを終える。
 fn finish(status: ExitStatus) -> ! {
-    PROCESSES.exit(kernel::sched::current(), status);
+    let pid = kernel::sched::current();
+    // set_tid_address / CLONE_CHILD_CLEARTID の場所に 0 を書いて、そこで待っている
+    // スレッド(pthread_join)を起こす
+    PROCESSES.with(pid, |p| {
+        if p.clear_child_tid != 0 {
+            let _ = p
+                .mem
+                .copy_to_user(VirtAddr(p.clear_child_tid), &0u32.to_le_bytes());
+        }
+    });
+    PROCESSES.exit(pid, status);
     kernel::sched::exit_current()
 }
 
@@ -143,12 +153,22 @@ fn new_user_space() -> Result<Box<dyn AddressSpace>, Errno> {
     Ok(Box::new(UserSpace::new()?))
 }
 
-/// 子プロセスを、親のトラップフレームの写し(x0 = 0)から動かし始める。
-fn start_child(mut child: Process, frame: &TrapFrame, sp: Option<u64>) -> Result<u64, Errno> {
+/// 子プロセス(かスレッド)を、親のトラップフレームの写し(x0 = 0)から動かし始める。
+/// `tls` があれば子の TPIDR_EL0 に、`set_tid` があれば子のメモリのそこに子の番号を書く
+fn start_child(
+    mut child: Process,
+    frame: &TrapFrame,
+    sp: Option<u64>,
+    tls: Option<u64>,
+    set_tid: Option<u64>,
+) -> Result<u64, Errno> {
     let mut child_frame = Box::new(frame.clone());
     child_frame.x[0] = 0; // 子には 0 を返す
     if let Some(sp) = sp {
         child_frame.sp_el0 = sp;
+    }
+    if let Some(tls) = tls {
+        child_frame.tpidr_el0 = tls;
     }
     let arg = Box::into_raw(child_frame) as usize;
     let Some(pid) = kernel::sched::spawn_paused(user_task_entry, arg) else {
@@ -157,6 +177,12 @@ fn start_child(mut child: Process, frame: &TrapFrame, sp: Option<u64>) -> Result
         return Err(Errno::EAGAIN);
     };
     child.pid = pid;
+    if child.tgid == 0 {
+        child.tgid = pid; // fork:新しいグループ
+    }
+    if let Some(addr) = set_tid {
+        let _ = child.mem.copy_to_user(VirtAddr(addr), &pid.to_le_bytes());
+    }
     // 優先度は親から受け継ぐ
     kernel::sched::set_priority(pid, child.rt_priority);
     PROCESSES.insert(pid, child);
@@ -179,8 +205,19 @@ pub(crate) fn user_synchronous(frame: &mut TrapFrame) {
             match action {
                 Action::Return(value) => frame.x[0] = value,
                 Action::Exit(status) => finish(ExitStatus::Code(status)),
-                Action::Fork { child, sp } => {
-                    frame.x[0] = match start_child(*child, frame, sp) {
+                Action::ExitGroup(status) => {
+                    let tgid = PROCESSES.with(pid, |p| p.tgid).unwrap_or(pid);
+                    let status = ExitStatus::Code(status);
+                    PROCESSES.exit_group(pid, tgid, status);
+                    finish(status)
+                }
+                Action::Fork {
+                    child,
+                    sp,
+                    tls,
+                    set_tid,
+                } => {
+                    frame.x[0] = match start_child(*child, frame, sp, tls, set_tid) {
                         Ok(pid) => pid,
                         Err(e) => e.as_syscall_return(),
                     }
@@ -213,7 +250,7 @@ pub(crate) fn user_synchronous(frame: &mut TrapFrame) {
 pub(crate) fn before_return_to_user() {
     let pid = kernel::sched::current();
     // 保留中のシグナル(今は「強制終了」だけ)
-    if let Some(Some(sig)) = PROCESSES.with(pid, |p| p.pending_kill.take()) {
+    if let Some(sig) = PROCESSES.take_kill(pid) {
         finish(ExitStatus::Signal(sig));
     }
 }
@@ -273,6 +310,7 @@ pub fn spawn_user(
     // 止めたまま作ったので、表に入れてから動かす(カーネルのプリエンプションがあるので、
     // 普通に作ると、表に入れる前に割り込みで切り替わって動き出すことがある)
     process.pid = pid;
+    process.tgid = pid;
     PROCESSES.insert(pid, process);
     kernel::sched::wake(pid);
     Ok(pid)
@@ -288,7 +326,7 @@ pub fn wait(pid: kernel::process::Pid) -> i32 {
 
 /// プロセスを強制終了する(次にユーザーに戻るときに、終了ステータス 128 + sig で終わる)。
 pub fn kill(pid: kernel::process::Pid, sig: i32) {
-    PROCESSES.with(pid, |p| p.pending_kill = Some(sig));
+    PROCESSES.kill(pid, sig);
 }
 
 /// プログラム `image` を `argv` で実行し、終了ステータスを返す。

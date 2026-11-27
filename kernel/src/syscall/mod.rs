@@ -131,7 +131,13 @@ pub enum Action {
     Fork {
         child: alloc::boxed::Box<Process>,
         sp: Option<u64>,
+        /// 子の TLS(TPIDR_EL0。clone の CLONE_SETTLS)
+        tls: Option<u64>,
+        /// 子の番号が決まったら、子のメモリのここに書く(CLONE_PARENT_SETTID / CLONE_CHILD_SETTID)
+        set_tid: Option<u64>,
     },
+    /// スレッドのグループ全体を終える(exit_group)
+    ExitGroup(i32),
     /// 新しいプログラムの入口から始める(execve)。ユーザー空間は差し替え済み
     Exec { entry: u64, sp: u64 },
 }
@@ -141,6 +147,7 @@ impl core::fmt::Debug for Action {
         match self {
             Self::Return(v) => write!(f, "Return({v:#x})"),
             Self::Exit(s) => write!(f, "Exit({s})"),
+            Self::ExitGroup(s) => write!(f, "ExitGroup({s})"),
             Self::Fork { sp, .. } => write!(f, "Fork {{ sp: {sp:x?} }}"),
             Self::Exec { entry, sp } => write!(f, "Exec {{ entry: {entry:#x}, sp: {sp:#x} }}"),
         }
@@ -152,6 +159,7 @@ impl PartialEq for Action {
         match (self, other) {
             (Self::Return(a), Self::Return(b)) => a == b,
             (Self::Exit(a), Self::Exit(b)) => a == b,
+            (Self::ExitGroup(a), Self::ExitGroup(b)) => a == b,
             (Self::Exec { entry: a, sp: b }, Self::Exec { entry: c, sp: d }) => a == c && b == d,
             _ => false,
         }
@@ -267,9 +275,13 @@ table! {
     nr::TIMERFD_GETTIME, "timerfd_gettime", 2 => |p, a| result(time::timerfd_gettime(p, a[0], a[1]));
     nr::UTIMENSAT, "utimensat", 4 => |p, a| result(fs::utimensat(p, a[0], a[1], a[2], a[3]));
     nr::EXIT, "exit", 1 => |p, a| Action::Exit(proc::exit_status(a[0]));
-    nr::EXIT_GROUP, "exit_group", 1 => |p, a| Action::Exit(proc::exit_status(a[0]));
+    nr::EXIT_GROUP, "exit_group", 1 => |p, a| Action::ExitGroup(proc::exit_status(a[0]));
     // フェーズ1はプロセスもスレッドも1つ
-    nr::SET_TID_ADDRESS, "set_tid_address", 1 => |p, a| Action::Return(p.pid as u64);
+    nr::SET_TID_ADDRESS, "set_tid_address", 1 => |p, a| {
+        // スレッドが終わるときに 0 を書いて futex で起こす場所(pthread_join が待つ)
+        p.clear_child_tid = a[0];
+        Action::Return(p.pid as u64)
+    };
     nr::NANOSLEEP, "nanosleep", 2 => |p, a| result(time::nanosleep(p, a[0]));
     nr::CLOCK_GETTIME, "clock_gettime", 2 => |p, a| result(misc::clock_gettime(p, a[0], a[1]));
     nr::CLOCK_NANOSLEEP, "clock_nanosleep", 4
@@ -295,14 +307,14 @@ table! {
         Action::Return(old as u64)
     };
     nr::PRCTL, "prctl", 5 => |p, a| result(misc::prctl(p, a[0], a[1]));
-    nr::GETPID, "getpid", 0 => |p, a| Action::Return(p.pid as u64);
+    nr::GETPID, "getpid", 0 => |p, a| Action::Return(p.tgid as u64); // スレッドのグループの番号
     // 資格情報(ADR-0005)
     nr::GETPPID, "getppid", 0 => |p, a| Action::Return(p.ppid as u64);
     nr::GETUID, "getuid", 0 => |p, a| Action::Return(p.cred.uid as u64);
     nr::GETEUID, "geteuid", 0 => |p, a| Action::Return(p.cred.euid as u64);
     nr::GETGID, "getgid", 0 => |p, a| Action::Return(p.cred.gid as u64);
     nr::GETEGID, "getegid", 0 => |p, a| Action::Return(p.cred.egid as u64);
-    nr::GETTID, "gettid", 0 => |p, a| Action::Return(p.pid as u64); // スレッドはまだないので、プロセスの番号
+    nr::GETTID, "gettid", 0 => |p, a| Action::Return(p.pid as u64);
     nr::SYSINFO, "sysinfo", 1 => |p, a| result(misc::sysinfo(p, a[0]));
     nr::SOCKET, "socket", 3 => |p, a| result(net::socket(p, a[0], a[1], a[2]));
     nr::SOCKETPAIR, "socketpair", 4 => |p, a| result(net::socketpair(p, a[0], a[1], a[2], a[3]));
@@ -323,7 +335,7 @@ table! {
     nr::MUNMAP, "munmap", 2 => |p, a| result(mm::munmap(p, a[0], a[1]));
     // 断ると、libc は「新しく確保してコピー」に切り替える
     nr::MREMAP, "mremap", 5 => |p, a| Action::Return(crate::Errno::ENOMEM.as_syscall_return());
-    nr::CLONE, "clone", 5 => |p, a| proc::clone(p, a[0], a[1]);
+    nr::CLONE, "clone", 5 => |p, a| proc::clone(p, a[0], a[1], a[2], a[3], a[4]);
     nr::EXECVE, "execve", 3 => |p, a| proc::execve(p, a[0], a[1], a[2]);
     nr::MMAP, "mmap", 6 => |p, a| result(mm::mmap(p, a[0], a[1], a[2], a[3], a[4], a[5]));
     nr::MPROTECT, "mprotect", 3 => |p, a| result(mm::mprotect(p, a[0], a[1], a[2]));
@@ -378,7 +390,9 @@ pub fn dispatch(p: &mut Process, nr: u64, a: [u64; 6]) -> Action {
     if TRACE.load(Ordering::Relaxed) {
         match &action {
             &Action::Return(ret) => crate::println!("{}", trace_line(syscall, &a, ret)),
-            Action::Exit(status) => crate::println!("[trace] {}({status}) = ?", syscall.name),
+            Action::Exit(status) | Action::ExitGroup(status) => {
+                crate::println!("[trace] {}({status}) = ?", syscall.name)
+            }
             Action::Fork { .. } => crate::println!("[trace] {}(…) = (child)", syscall.name),
             Action::Exec { .. } => crate::println!("[trace] {}(…) = (new program)", syscall.name),
         }
@@ -588,7 +602,7 @@ pub(crate) mod tests {
         let (mut p, _) = process();
         assert_eq!(
             dispatch(&mut p, nr::EXIT_GROUP, [3, 0, 0, 0, 0, 0]),
-            Action::Exit(3)
+            Action::ExitGroup(3)
         );
         assert_eq!(
             dispatch(&mut p, nr::EXIT, [0x1ff, 0, 0, 0, 0, 0]),

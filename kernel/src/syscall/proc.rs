@@ -17,22 +17,73 @@ pub fn exit_status(arg: u64) -> i32 {
 
 const CSIGNAL: u64 = 0xff;
 const CLONE_VM: u64 = 0x100;
+const CLONE_FS: u64 = 0x200;
+const CLONE_FILES: u64 = 0x400;
+const CLONE_SIGHAND: u64 = 0x800;
 const CLONE_VFORK: u64 = 0x4000;
+const CLONE_THREAD: u64 = 0x10000;
+const CLONE_SYSVSEM: u64 = 0x40000;
+const CLONE_SETTLS: u64 = 0x80000;
+const CLONE_PARENT_SETTID: u64 = 0x100000;
+const CLONE_CHILD_CLEARTID: u64 = 0x200000;
+const CLONE_DETACHED: u64 = 0x400000;
+const CLONE_CHILD_SETTID: u64 = 0x1000000;
+/// スレッドを作るときに受け付けるフラグ(CLONE_FS と CLONE_SYSVSEM は受け付けるだけで、まだ共有しない)
+const THREAD_ALLOWED: u64 = CLONE_VM
+    | CLONE_FS
+    | CLONE_FILES
+    | CLONE_SIGHAND
+    | CLONE_THREAD
+    | CLONE_SYSVSEM
+    | CLONE_SETTLS
+    | CLONE_PARENT_SETTID
+    | CLONE_CHILD_CLEARTID
+    | CLONE_DETACHED
+    | CLONE_CHILD_SETTID;
 
 /// clone(flags, newsp, …)。今は fork と vfork の形だけ(スレッドはまだ)。
 /// `newsp` が 0 でなければ、子はそのスタックで動き出す。
-pub fn clone(p: &mut Process, flags: u64, newsp: u64) -> Action {
-    // vfork(CLONE_VM | CLONE_VFORK)も、メモリを写す fork として扱う。
-    // vfork の子は exec か _exit しかしない約束なので、写しても結果は同じ
+/// clone(flags, newsp, parent_tid, tls, child_tid)(aarch64 の引数の順)
+///
+/// - CLONE_THREAD があればスレッド(メモリと fd の表を共有する。musl の pthread_create)
+/// - なければ fork。vfork(CLONE_VM | CLONE_VFORK)も、メモリを写す fork として扱う
+///   (vfork の子は exec か _exit しかしない約束なので、写しても結果は同じ)
+pub fn clone(p: &mut Process, flags: u64, newsp: u64, ptid: u64, tls: u64, ctid: u64) -> Action {
+    let fail = |e: Errno| Action::Return(e.as_syscall_return());
+    let sp = (newsp != 0).then_some(newsp);
+    if flags & CLONE_THREAD != 0 {
+        // スレッドはシグナルの扱いを、シグナルの扱いはメモリを共有する(Linux と同じ決まり)
+        let needs = CLONE_VM | CLONE_SIGHAND | CLONE_FILES;
+        if flags & needs != needs || flags & !THREAD_ALLOWED != 0 {
+            return fail(Errno::EINVAL);
+        }
+        let mut child = p.thread();
+        if flags & CLONE_CHILD_CLEARTID != 0 {
+            child.clear_child_tid = ctid;
+        }
+        let set_tid = if flags & CLONE_PARENT_SETTID != 0 {
+            Some(ptid)
+        } else {
+            (flags & CLONE_CHILD_SETTID != 0).then_some(ctid)
+        };
+        return Action::Fork {
+            child: Box::new(child),
+            sp,
+            tls: (flags & CLONE_SETTLS != 0).then_some(tls),
+            set_tid,
+        };
+    }
     if flags & !(CSIGNAL | CLONE_VM | CLONE_VFORK) != 0 {
-        return Action::Return(Errno::EINVAL.as_syscall_return());
+        return fail(Errno::EINVAL);
     }
     match p.fork() {
         Ok(child) => Action::Fork {
             child: Box::new(child),
-            sp: (newsp != 0).then_some(newsp),
+            sp,
+            tls: None,
+            set_tid: None,
         },
-        Err(e) => Action::Return(e.as_syscall_return()),
+        Err(e) => fail(e),
     }
 }
 

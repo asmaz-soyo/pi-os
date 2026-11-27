@@ -590,6 +590,7 @@ pub fn normalize_output(raw: &str) -> String {
 /// 互換テストで動かすもの:(/bin の下のプログラム, 引数)。出力が環境で変わらないものだけ
 pub const COMPAT_CASES: &[(&str, &[&str])] = &[
     ("compat", &["one"]),
+    ("thread0", &[]),
     ("busybox", &["echo", "hello", "world"]),
     ("busybox", &["seq", "3"]),
     ("busybox", &["expr", "6", "*", "7"]),

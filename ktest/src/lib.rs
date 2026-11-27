@@ -230,6 +230,11 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn a_thread_shares_memory_and_clears_its_tid_on_exit() {
+            assert_eq!(boot::run_program("/bin/thread0", &[b"thread0"]), Ok(0));
+        }
+
+        #[test_case]
         fn a_task_waiting_on_a_wait_queue_sleeps_until_woken() {
             use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
             static Q: kernel::wait::WaitQueue = kernel::wait::WaitQueue::new();
