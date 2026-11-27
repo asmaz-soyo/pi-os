@@ -22,6 +22,7 @@ use crate::Errno;
 use crate::fs::pipe::{self, ReadEnd, WriteEnd};
 use crate::fs::vfs::{File, FileKind, Stat};
 use crate::sync::SpinLock;
+use crate::wait::{WaitQueue, wait_event};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -127,6 +128,11 @@ struct Binding {
 
 impl Drop for Binding {
     fn drop(&mut self) {
+        // 待ち受けが閉じた:印を立ててから、列が空くのを待っている connect を起こす
+        if let Some(l) = self.listener.lock().as_ref() {
+            l.closed.store(true, core::sync::atomic::Ordering::SeqCst);
+            l.wq.wake_all();
+        }
         let mut bound = BOUND.lock();
         // 同じキーで別のソケットが登録し直していたら、そちらは消さない
         if bound.get(&self.key).is_some_and(|w| w.strong_count() == 0) {
@@ -143,6 +149,10 @@ struct Listener {
     /// (サーバー側の端, 相手の名前)
     queue: SpinLock<VecDeque<(Stream, Addr)>>,
     backlog: usize,
+    /// accept する側(つながるのを待つ)と、connect する側(列が空くのを待つ)が待つ
+    wq: WaitQueue,
+    /// 待ち受けていたソケットが閉じた(いっぱいで待っていた connect は ECONNREFUSED)
+    closed: core::sync::atomic::AtomicBool,
 }
 
 /// つながったストリームの片端。shutdown で片方ずつ閉じられるように、両端を Option で持つ
@@ -309,6 +319,8 @@ impl Socket for UnixSocket {
                     *l = Some(Arc::new(Listener {
                         queue: SpinLock::new(VecDeque::new()),
                         backlog: backlog.clamp(1, 4096),
+                        wq: WaitQueue::new(),
+                        closed: core::sync::atomic::AtomicBool::new(false),
                     }));
                 }
                 Ok(())
@@ -325,16 +337,16 @@ impl Socket for UnixSocket {
             _ => (None, Addr::Unnamed),
         };
         let listener = listener.ok_or(Errno::EINVAL)?;
-        loop {
-            if let Some((stream, peer)) = listener.queue.lock().pop_front() {
-                let bytes = peer.to_bytes();
-                return Ok((Arc::new(UnixSocket::connected(stream, local, peer)), bytes));
-            }
-            if nonblock {
-                return Err(Errno::EAGAIN);
-            }
-            crate::sched::relax();
-        }
+        let take = || listener.queue.lock().pop_front();
+        let (stream, peer) = if nonblock {
+            take().ok_or(Errno::EAGAIN)?
+        } else {
+            // つながってくるのを眠って待つ
+            wait_event(&[&listener.wq], None, take).ok_or(Errno::EAGAIN)?
+        };
+        listener.wq.wake_all(); // 列が空いた:いっぱいで待っている connect
+        let bytes = peer.to_bytes();
+        Ok((Arc::new(UnixSocket::connected(stream, local, peer)), bytes))
     }
 
     fn connect(&self, ns: &mut dyn Namespace, raw: &[u8], nonblock: bool) -> Result<(), Errno> {
@@ -353,24 +365,23 @@ impl Socket for UnixSocket {
         let listener = binding.listener.lock().clone().ok_or(Errno::ECONNREFUSED)?;
         let (mine, theirs) = Stream::pair();
         let mut theirs = Some(theirs);
-        loop {
-            {
-                let mut q = listener.queue.lock();
-                if q.len() < listener.backlog {
-                    q.push_back((theirs.take().unwrap(), local.clone()));
-                    break;
-                }
+        let mut offer = || {
+            let mut q = listener.queue.lock();
+            if q.len() < listener.backlog {
+                q.push_back((theirs.take().unwrap(), local.clone()));
+                return Some(Ok(()));
             }
-            // 待ち行列がいっぱい:accept されるのを待つ
-            if nonblock {
-                return Err(Errno::EAGAIN);
-            }
-            // 待ち受け側が閉じたら、つながらない
-            if Arc::strong_count(&listener) == 1 {
-                return Err(Errno::ECONNREFUSED);
-            }
-            crate::sched::relax();
+            // 待ち行列がいっぱい。待ち受け側が閉じていたら、つながらない
+            let closed = listener.closed.load(core::sync::atomic::Ordering::SeqCst);
+            closed.then_some(Err(Errno::ECONNREFUSED))
+        };
+        if nonblock {
+            offer().unwrap_or(Err(Errno::EAGAIN))?;
+        } else {
+            // accept されて列が空くのを眠って待つ
+            wait_event(&[&listener.wq], None, offer).unwrap_or(Err(Errno::EAGAIN))?;
         }
+        listener.wq.wake_all(); // accept を待っている側
         *self.state.lock() = State::Connected {
             stream: Arc::new(mine),
             local,

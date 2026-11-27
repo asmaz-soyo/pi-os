@@ -20,8 +20,9 @@
 //!   送るものには IPv4 のヘッダを付けて、宛先のインターフェースの raw ソケットに入れる。
 //!   smoltcp の TCP と同時に使える(ポートは共通の表で分ける)
 //!
-//! smoltcp は `poll` を呼んだときだけ動く。システムコールが待つあいだは自分で `poll` を呼び、
-//! だれも待っていないときに届くもののために、カーネルのスレッドが定期的に [`poll_all`] を呼ぶ。
+//! smoltcp は `poll` を呼んだときだけ動く。システムコールは見るたびに自分で `poll` を呼び、
+//! 答えがなければ `NET_WQ` で眠る。届いたもの・タイマーのために、カーネルのスレッドが
+//! [`poll_all`] を呼び、何か動いたら眠っているタスクを起こす。
 
 use super::stack::Stack;
 use super::tcp::conn::{Endpoint, State as OwnState};
@@ -32,6 +33,7 @@ use super::{
 use crate::Errno;
 use crate::fs::vfs::{File, FileKind, Stat};
 use crate::sync::SpinLock;
+use crate::wait::{WaitQueue, wait_event};
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::string::String;
@@ -186,12 +188,18 @@ impl Net {
         changed
     }
 
-    /// 届いたものを処理しきるまで poll し、閉じ終わったソケットを片付ける
+    /// 届いたものを処理しきるまで poll し、閉じ終わったソケットを片付ける。何か変わったら
+    /// 待っているタスクを起こす
     fn poll(&mut self) {
+        let mut changed = false;
         for _ in 0..32 {
             if !self.poll_once() {
                 break;
             }
+            changed = true;
+        }
+        if changed {
+            NET_WQ.wake_all();
         }
     }
 
@@ -504,6 +512,10 @@ impl Net {
 
 static NET: SpinLock<Option<Net>> = SpinLock::new(None);
 
+/// ソケットを待つタスクの待ち行列(ネットワーク全体で 1 つ)。ネットワークの状態が変わったら
+/// (poll で何か動いたら)全員を起こし、それぞれが自分のソケットを見直す
+static NET_WQ: WaitQueue = WaitQueue::new();
+
 /// インターフェースを足す。`addr` があればそのアドレスを、`gateway` があればデフォルトルートを設定する。
 /// `addr` が None なら、アドレスなどは DHCP でもらう。返すのはインターフェースの番号
 pub fn attach(
@@ -534,6 +546,7 @@ pub fn poll_all(max_ns: u64) -> u64 {
         return max_ns;
     };
     if net.poll_once() {
+        NET_WQ.wake_all();
         return 0;
     }
     let now = crate::time::now_ns();
@@ -603,20 +616,16 @@ fn with<R>(f: impl FnOnce(&mut Net) -> R) -> R {
     r
 }
 
-/// `f` が答え(Some)を返すまで、poll しながら待つ
+/// `f` が答え(Some)を返すまで待つ。見るたびに poll し、答えがなければ、ネットワークの状態が
+/// 変わる(届いた、送れた、タイマーで再送した)まで眠る
 fn wait<R>(
     nonblock: bool,
     mut f: impl FnMut(&mut Net) -> Option<Result<R, Errno>>,
 ) -> Result<R, Errno> {
-    loop {
-        if let Some(r) = with(&mut f) {
-            return r;
-        }
-        if nonblock {
-            return Err(Errno::EAGAIN);
-        }
-        crate::sched::relax();
+    if nonblock {
+        return with(&mut f).unwrap_or(Err(Errno::EAGAIN));
     }
+    wait_event(&[&NET_WQ], None, || with(&mut f)).unwrap_or(Err(Errno::EAGAIN))
 }
 
 pub struct Inet;

@@ -262,6 +262,17 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn a_process_waiting_in_tcp_accept_sleeps() {
+            // nc -l が accept で待っているあいだの State を写す。そのあと一度つないで閉じ、nc を終わらせる
+            let script = b"{ sleep 1; cat /proc/$(cat /tmp/accept_pid)/status > /tmp/accept_state; \
+                nc 127.0.0.1 7330 < /dev/null; true; } \
+                | sh -c 'echo $$ > /tmp/accept_pid; exec /bin/busybox nc -l -p 7330 > /dev/null'
+                grep -q 'S (sleeping)' /tmp/accept_state || { cat /tmp/accept_state; exit 1; }";
+            let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
+            assert_eq!(boot::run_program("/bin/busybox", &argv), Ok(0));
+        }
+
+        #[test_case]
         fn sleep_through_ignores_an_early_wake() {
             // 待ち行列では、関係のない「起こされた」印が残ることがある(登録してから条件を見るまでの
             // あいだに起こされ、眠らずに済んだとき)。nanosleep はそれで早く起きてはいけない
