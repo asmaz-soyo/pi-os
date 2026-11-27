@@ -591,6 +591,7 @@ pub fn normalize_output(raw: &str) -> String {
 pub const COMPAT_CASES: &[(&str, &[&str])] = &[
     ("compat", &["one"]),
     ("thread0", &[]),
+    ("threads", &[]),
     ("busybox", &["echo", "hello", "world"]),
     ("busybox", &["seq", "3"]),
     ("busybox", &["expr", "6", "*", "7"]),

@@ -137,13 +137,14 @@ fn finish(status: ExitStatus) -> ! {
     let pid = kernel::sched::current();
     // set_tid_address / CLONE_CHILD_CLEARTID の場所に 0 を書いて、そこで待っている
     // スレッド(pthread_join)を起こす
-    PROCESSES.with(pid, |p| {
-        if p.clear_child_tid != 0 {
-            let _ = p
-                .mem
-                .copy_to_user(VirtAddr(p.clear_child_tid), &0u32.to_le_bytes());
-        }
+    let cleared = PROCESSES.with(pid, |p| {
+        let addr = p.clear_child_tid;
+        let zero = &0u32.to_le_bytes();
+        (addr != 0 && p.mem.copy_to_user(VirtAddr(addr), zero).is_ok()).then(|| (p.mem.id(), addr))
     });
+    if let Some(Some(key)) = cleared {
+        kernel::futex::wake(key, 1);
+    }
     PROCESSES.exit(pid, status);
     kernel::sched::exit_current()
 }

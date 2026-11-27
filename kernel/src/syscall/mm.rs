@@ -83,6 +83,8 @@ pub fn mmap(
         start
     };
     let Some(map_flags) = flags_of(prot) else {
+        // PROT_NONE:場所だけ取っておく(ガードのページや、あとで mprotect で使う場所)
+        p.mem.reserve(VirtAddr(start), len);
         return Ok(start);
     };
     p.mem.map_zeroed(VirtAddr(start), len, map_flags)?;
@@ -118,7 +120,11 @@ pub fn mprotect(p: &mut Process, addr: u64, len: u64, prot: u64) -> Result<u64, 
     }
     match flags_of(prot) {
         Some(flags) => p.mem.protect(VirtAddr(addr), len, flags)?,
-        None => p.mem.unmap(VirtAddr(addr), len),
+        None => {
+            // 読めない・書けないページ(中身は捨てる)。予約として残す
+            p.mem.unmap(VirtAddr(addr), len);
+            p.mem.reserve(VirtAddr(addr), len);
+        }
     }
     Ok(0)
 }

@@ -55,6 +55,7 @@
 | 93 | `exit` | 1 |
 | 94 | `exit_group` | 1 |
 | 96 | `set_tid_address` | 1 |
+| 98 | `futex` | 6 |
 | 101 | `nanosleep` | 2 |
 | 113 | `clock_gettime` | 2 |
 | 115 | `clock_nanosleep` | 4 |
@@ -104,4 +105,4 @@
 | 276 | `renameat2` | 5 |
 | 278 | `getrandom` | 3 |
 
-合計 98 個
+合計 99 個

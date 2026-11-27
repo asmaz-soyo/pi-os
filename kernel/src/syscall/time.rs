@@ -9,7 +9,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use hal::addr::VirtAddr;
 
-fn read_timespec(p: &mut Process, va: u64) -> Result<u64, Errno> {
+pub(super) fn read_timespec(p: &mut Process, va: u64) -> Result<u64, Errno> {
     let mut b = [0u8; 16];
     p.mem.copy_from_user(VirtAddr(va), &mut b)?;
     let sec = u64::from_le_bytes(b[..8].try_into().unwrap());

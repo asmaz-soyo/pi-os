@@ -32,6 +32,8 @@ struct Space {
     phys: &'static dyn PhysMemory,
     /// マップしたページ(解放のため)
     pages: BTreeSet<u64>,
+    /// PROT_NONE で予約したページ(まだ用意していない。mprotect で使えるようにする)
+    reserved: BTreeSet<u64>,
     /// ヒープ(brk)の今の終わり
     brk: u64,
     /// 次に mmap で使うアドレス
@@ -89,6 +91,11 @@ impl UserMemory {
         self.inner.lock().protect(va, len, flags)
     }
 
+    /// PROT_NONE で予約する(mprotect で使えるようになる)
+    pub fn reserve(&mut self, va: VirtAddr, len: u64) {
+        self.inner.lock().reserve(va, len)
+    }
+
     pub fn phys(&self) -> &'static dyn PhysMemory {
         self.inner.lock().phys
     }
@@ -134,8 +141,21 @@ impl Space {
             space,
             phys,
             pages: BTreeSet::new(),
+            reserved: BTreeSet::new(),
             brk: 0,
             mmap_next: 0,
+        }
+    }
+
+    /// `va` から `len` バイトを予約する(PROT_NONE の mmap。ページはまだ用意しない)
+    fn reserve(&mut self, va: VirtAddr, len: u64) {
+        let mut page = va.align_down();
+        let end = (va + len).align_up();
+        while page < end {
+            if !self.pages.contains(&page.0) {
+                self.reserved.insert(page.0);
+            }
+            page = page + PAGE_SIZE;
         }
     }
 
@@ -173,6 +193,7 @@ impl Space {
         let mut page = va.align_down();
         let end = (va + len).align_up();
         while page < end {
+            self.reserved.remove(&page.0);
             if self.pages.remove(&page.0)
                 && let Some(frame) = self.space.unmap_page(page)
             {
@@ -182,12 +203,23 @@ impl Space {
         }
     }
 
-    /// `va` から `len` バイトのマップ済みのページの属性を変える(中身はそのまま)。
+    /// `va` から `len` バイトのページの属性を変える。マップ済みのページは中身をそのままに、
+    /// 予約しただけのページは 0 のページを用意する。どちらでもないページがあれば ENOMEM(Linux と同じ)
     pub fn protect(&mut self, va: VirtAddr, len: u64, flags: MapFlags) -> Result<(), Errno> {
-        let mut page = va.align_down();
+        let start = va.align_down();
         let end = (va + len).align_up();
+        let mut page = start;
         while page < end {
-            if self.pages.contains(&page.0) {
+            if !self.pages.contains(&page.0) && !self.reserved.contains(&page.0) {
+                return Err(Errno::ENOMEM);
+            }
+            page = page + PAGE_SIZE;
+        }
+        let mut page = start;
+        while page < end {
+            if self.reserved.remove(&page.0) {
+                self.map_zeroed(page, PAGE_SIZE, flags)?;
+            } else {
                 let frame = self.space.unmap_page(page).ok_or(Errno::EFAULT)?;
                 self.space
                     .map_page(page, frame, flags)

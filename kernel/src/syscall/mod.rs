@@ -5,6 +5,7 @@
 //! 未実装の番号は `ENOSYS` を返し、最初の1回だけログに出す(次に何を作るべきかが分かる)。
 
 mod fs;
+mod futex;
 mod misc;
 mod mm;
 mod net;
@@ -67,6 +68,7 @@ pub mod nr {
     pub const EXIT: u64 = 93;
     pub const EXIT_GROUP: u64 = 94;
     pub const SET_TID_ADDRESS: u64 = 96;
+    pub const FUTEX: u64 = 98;
     pub const NANOSLEEP: u64 = 101;
     pub const CLOCK_GETTIME: u64 = 113;
     pub const CLOCK_NANOSLEEP: u64 = 115;
@@ -282,6 +284,7 @@ table! {
         p.clear_child_tid = a[0];
         Action::Return(p.pid as u64)
     };
+    nr::FUTEX, "futex", 6 => |p, a| result(futex::futex(p, a[0], a[1], a[2], a[3], a[4], a[5]));
     nr::NANOSLEEP, "nanosleep", 2 => |p, a| result(time::nanosleep(p, a[0]));
     nr::CLOCK_GETTIME, "clock_gettime", 2 => |p, a| result(misc::clock_gettime(p, a[0], a[1]));
     nr::CLOCK_NANOSLEEP, "clock_nanosleep", 4
@@ -406,6 +409,8 @@ mod tests_chmod;
 mod tests_eth;
 #[cfg(test)]
 mod tests_fifo;
+#[cfg(test)]
+mod tests_futex;
 #[cfg(test)]
 mod tests_inet;
 #[cfg(test)]

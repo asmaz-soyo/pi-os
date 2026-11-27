@@ -438,3 +438,43 @@ fn sysinfo_reports_uptime_and_memory() {
         err(Errno::EFAULT)
     );
 }
+
+#[test]
+fn a_prot_none_reservation_becomes_usable_after_mprotect() {
+    // musl の pthread_create:スタックを PROT_NONE で取り、ガードの 1 ページを残して読み書きできるようにする
+    let (mut p, _) = process();
+    let a = call(
+        &mut p,
+        nr::MMAP,
+        [0, 0x4000, 0, MAP_PRIVATE | MAP_ANONYMOUS, u64::MAX, 0],
+    );
+    assert!((a as i64) > 0);
+    assert!(!p.mem.is_mapped(VirtAddr(a)), "PROT_NONE はまだ使えない");
+    assert_eq!(
+        call(
+            &mut p,
+            nr::MPROTECT,
+            [a + 0x1000, 0x3000, PROT_READ | PROT_WRITE, 0, 0, 0]
+        ),
+        0
+    );
+    assert!(!p.mem.is_mapped(VirtAddr(a)), "ガードのページ");
+    put(&mut p, a + 0x3ff8, b"stack!!!");
+    assert_eq!(get(&mut p, a + 0x3ff8, 8), b"stack!!!");
+    assert_eq!(get(&mut p, a + 0x1000, 8), [0; 8], "新しいページは 0");
+    // 予約していない場所の mprotect は ENOMEM(Linux と同じ)
+    assert_eq!(
+        call(
+            &mut p,
+            nr::MPROTECT,
+            [0x6000_0000, 0x1000, PROT_READ, 0, 0, 0]
+        ),
+        err(Errno::ENOMEM)
+    );
+    // munmap すると予約も消える
+    assert_eq!(call(&mut p, nr::MUNMAP, [a, 0x4000, 0, 0, 0, 0]), 0);
+    assert_eq!(
+        call(&mut p, nr::MPROTECT, [a, 0x1000, PROT_READ, 0, 0, 0]),
+        err(Errno::ENOMEM)
+    );
+}
