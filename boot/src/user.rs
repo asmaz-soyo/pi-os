@@ -151,7 +151,7 @@ fn start_child(mut child: Process, frame: &TrapFrame, sp: Option<u64>) -> Result
         child_frame.sp_el0 = sp;
     }
     let arg = Box::into_raw(child_frame) as usize;
-    let Some(pid) = kernel::sched::spawn(user_task_entry, arg) else {
+    let Some(pid) = kernel::sched::spawn_paused(user_task_entry, arg) else {
         // SAFETY: 渡せなかったので取り戻して捨てる
         drop(unsafe { Box::from_raw(arg as *mut TrapFrame) });
         return Err(Errno::EAGAIN);
@@ -160,6 +160,8 @@ fn start_child(mut child: Process, frame: &TrapFrame, sp: Option<u64>) -> Result
     // 優先度は親から受け継ぐ
     kernel::sched::set_priority(pid, child.rt_priority);
     PROCESSES.insert(pid, child);
+    // 表に入れてから動かす(入口で自分のアドレス空間を表から探すので)
+    kernel::sched::wake(pid);
     Ok(pid as u64)
 }
 
@@ -263,14 +265,16 @@ pub fn spawn_user(
         ..TrapFrame::default()
     });
     let arg = Box::into_raw(frame) as usize;
-    let Some(pid) = kernel::sched::spawn(user_task_entry, arg) else {
+    let Some(pid) = kernel::sched::spawn_paused(user_task_entry, arg) else {
         // SAFETY: 渡せなかったので取り戻して捨てる
         drop(unsafe { Box::from_raw(arg as *mut TrapFrame) });
         return Err(Errno::ENOMEM);
     };
-    // 新しいタスクは、このタスクが譲るまで動かないので、ここで表に入れてよい
+    // 止めたまま作ったので、表に入れてから動かす(カーネルのプリエンプションがあるので、
+    // 普通に作ると、表に入れる前に割り込みで切り替わって動き出すことがある)
     process.pid = pid;
     PROCESSES.insert(pid, process);
+    kernel::sched::wake(pid);
     Ok(pid)
 }
 

@@ -23,6 +23,9 @@ pub trait Handler: Sync {
     fn irq(&self, frame: &mut TrapFrame);
     /// EL0 に戻る直前に毎回呼ばれる(シグナル、プリエンプション、トレースの差し込み口)
     fn before_return_to_user(&self, _frame: &mut TrapFrame) {}
+    /// カーネルを実行中に来た割り込みの処理のあと、カーネルに戻る直前に呼ばれる
+    /// (カーネルのプリエンプションの差し込み口)
+    fn before_return_to_kernel(&self, _frame: &mut TrapFrame) {}
 }
 
 /// `frame` が EL0 から来た例外か(SPSR.M が EL0t)。
@@ -71,10 +74,12 @@ extern "C" fn arch_exception_entry(kind: u64, frame: &mut TrapFrame) {
         (1, Some(handler)) => handler.irq(frame),
         _ => unhandled(kind, frame),
     }
-    if let Some(handler) = handler
-        && from_user(frame)
-    {
-        handler.before_return_to_user(frame);
+    if let Some(handler) = handler {
+        if from_user(frame) {
+            handler.before_return_to_user(frame);
+        } else if kind % 4 == 1 {
+            handler.before_return_to_kernel(frame);
+        }
     }
 }
 

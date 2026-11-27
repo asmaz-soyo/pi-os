@@ -184,6 +184,17 @@ fn thread_exit() {
 
 /// カーネルスレッドを作り、実行待ちの列に入れる。
 pub fn spawn(entry: fn(usize), arg: usize) -> Option<Tid> {
+    spawn_in(entry, arg, true)
+}
+
+/// 止めたままタスクを作る。`wake(tid)` で動き出す。
+/// 作ってから表(プロセスの表など)に入れるまでのあいだに、割り込みで切り替わって
+/// 先に動き出さないようにするため
+pub fn spawn_paused(entry: fn(usize), arg: usize) -> Option<Tid> {
+    spawn_in(entry, arg, false)
+}
+
+fn spawn_in(entry: fn(usize), arg: usize, run: bool) -> Option<Tid> {
     let p = platform();
     let (bottom, top) = (p.alloc_stack)()?;
     let ctx = (p.new_context)(top, entry, arg, thread_exit);
@@ -196,7 +207,8 @@ pub fn spawn(entry: fn(usize), arg: usize) -> Option<Tid> {
         s.tasks.insert(
             tid,
             Box::new(Task {
-                state: State::Ready,
+                // 止めたままのタスクは、起きる時刻のない眠り(wake でだけ起きる)
+                state: if run { State::Ready } else { State::Blocked },
                 ctx,
                 stack: Some(bottom),
                 priority: 0,
@@ -205,7 +217,9 @@ pub fn spawn(entry: fn(usize), arg: usize) -> Option<Tid> {
                 woken: false,
             }),
         );
-        s.rq.push(tid);
+        if run {
+            s.rq.push(tid);
+        }
         tid
     };
     (p.irq_restore)(flags);
@@ -250,6 +264,13 @@ enum Pick {
 /// 次のタスクに切り替える。`new_state` が Running なら今のタスクはまだ動ける。
 /// Blocked なら `wake_at` まで眠る。Dead なら終わる。
 fn schedule(new_state: State, wake_at: Option<u64>, pick: Pick) {
+    // ロックを持ったまま切り替えると、数(preempt_count)が次のタスクに持ち越され、
+    // 同じロックを待つタスクが回り続ける
+    debug_assert_eq!(
+        crate::sync::preempt_count(),
+        0,
+        "switching tasks while holding a lock"
+    );
     let p = platform();
     let flags = (p.irq_save)();
     let switch = loop {

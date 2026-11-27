@@ -242,6 +242,55 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn a_paused_task_starts_only_when_woken() {
+            use core::sync::atomic::{AtomicBool, Ordering};
+            static RAN: AtomicBool = AtomicBool::new(false);
+            fn task(_: usize) {
+                RAN.store(true, Ordering::SeqCst);
+            }
+            // 作ってから表に入れるまでのあいだに動き出さないように、止めたまま作る
+            // (プリエンプションがあるので「譲るまで動かない」とは言えない)
+            let before = kernel::sched::task_count();
+            let tid = kernel::sched::spawn_paused(task, 0).unwrap();
+            kernel::sched::sleep_until(kernel::time::now_ns() + 20_000_000);
+            assert!(!RAN.load(Ordering::SeqCst));
+            kernel::sched::wake(tid);
+            while kernel::sched::task_count() > before {
+                kernel::sched::yield_now();
+            }
+            assert!(RAN.load(Ordering::SeqCst));
+        }
+
+        #[test_case]
+        fn a_kernel_thread_that_never_yields_is_preempted() {
+            use core::sync::atomic::{AtomicBool, Ordering};
+            static STOP: AtomicBool = AtomicBool::new(false);
+            fn spinner(_: usize) {
+                // 譲らずに回り続ける(ロックは持たない)。最大 2 秒
+                let start = kernel::time::now_ns();
+                while !STOP.load(Ordering::SeqCst)
+                    && kernel::time::now_ns() - start < 2_000_000_000
+                {
+                    core::hint::spin_loop();
+                }
+            }
+            STOP.store(false, Ordering::SeqCst);
+            let before = kernel::sched::task_count();
+            kernel::sched::spawn(spinner, 0).unwrap();
+            // 回っているスレッドに CPU を渡し、渡したときから数えて 20ms で起きるつもりで眠る
+            // (切り替えられなければ、yield_now から戻るのは spinner が回り終わったあと)
+            let start = kernel::time::now_ns();
+            kernel::sched::yield_now();
+            kernel::sched::sleep_until(start + 20_000_000);
+            let late = kernel::time::now_ns() - start - 20_000_000;
+            STOP.store(true, Ordering::SeqCst);
+            while kernel::sched::task_count() > before {
+                kernel::sched::yield_now();
+            }
+            assert!(late < 50_000_000, "woke {} ms late", late / 1_000_000);
+        }
+
+        #[test_case]
         fn spinning_user_programs_are_preempted_by_the_timer() {
             // 終わらないプログラムを 2 つ動かしても、このタスク(カーネル)が動き続け、
             // ほかのプログラムも最後まで動く

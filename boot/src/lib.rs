@@ -209,8 +209,8 @@ fn bring_up_network() -> bool {
 
 /// だれもシステムコールで待っていないときに届いたパケットや、再送のタイマーのために、
 /// ネットワークを poll する。smoltcp が「次はいつ poll が要るか」を教えてくれるので、それまで眠る
-/// (急ぎがなければ 50ms。受信の割り込みを使うようになれば、届いたときに起こせる)。
-/// カーネルのスレッドは途中で切り替わらないので、1 回起きたら 1 巡だけ poll する。まだやることが
+/// (急ぎがなければ 50ms。フレームが届けば、受信の割り込みが起こす)。
+/// NET のロックを持っているあいだは切り替わらないので、1 回起きたら 1 巡だけ poll する。まだやることが
 /// あれば 1ms 後に起き直す(その間にリアルタイムのタスクなどが動ける)
 fn net_poller(_: usize) {
     const MIN: u64 = 1_000_000;
@@ -374,6 +374,16 @@ impl<B: Board> Handler for Exceptions<B> {
 
     fn irq(&self, _frame: &mut TrapFrame) {
         kernel::irq::IRQS.dispatch(&mut *B::intc().lock());
+    }
+
+    /// カーネルのプリエンプション:カーネルのスレッドを実行中に割り込みが来て、切り替えが
+    /// 要る(タイマのティック、起きる時刻になったタスクがある)なら、ここで切り替える。
+    /// ロックを持っているあいだは切り替えない(`preempt_count`)。割り込みの終わり(EOI)は
+    /// dispatch で済ませてあるので、切り替えた先でも次の割り込みが来る
+    fn before_return_to_kernel(&self, _frame: &mut TrapFrame) {
+        if kernel::sync::preempt_count() == 0 && kernel::sched::take_resched() {
+            kernel::sched::yield_now();
+        }
     }
 }
 

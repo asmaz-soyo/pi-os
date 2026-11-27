@@ -6,7 +6,7 @@
 use core::fmt;
 use hal::console::Console;
 
-/// 複数のコアから共有できる出力先。`spin::Mutex<C>` に実装してある。
+/// 複数のコアから共有できる出力先。`SpinLock<C>` に実装してある。
 pub trait SharedConsole: Sync {
     fn write_bytes(&self, buf: &[u8]);
 
@@ -20,7 +20,7 @@ pub trait SharedConsole: Sync {
     unsafe fn force_unlock(&self);
 }
 
-impl<C: Console + Send> SharedConsole for spin::Mutex<C> {
+impl<C: Console + Send> SharedConsole for crate::sync::SpinLock<C> {
     fn write_bytes(&self, buf: &[u8]) {
         self.lock().write_bytes(buf);
     }
@@ -32,7 +32,7 @@ impl<C: Console + Send> SharedConsole for spin::Mutex<C> {
     unsafe fn force_unlock(&self) {
         if self.is_locked() {
             // SAFETY: 呼び出し元が保証する
-            unsafe { spin::Mutex::force_unlock(self) };
+            unsafe { crate::sync::SpinLock::force_unlock(self) };
         }
     }
 }
