@@ -115,8 +115,19 @@ fn resolv_conf(servers: &[crate::net::inet::Ipv4Address]) -> String {
     text
 }
 
-fn status(pid: crate::process::Pid, ppid: crate::process::Pid, name: &str) -> String {
-    format!("Name:\t{name}\nState:\tR (running)\nPid:\t{pid}\nPPid:\t{ppid}\nUid:\t0\t0\t0\t0\n")
+/// `/<pid>/status`。State は Linux と同じく、眠っていれば S、動いている(動ける)なら R
+fn status(
+    pid: crate::process::Pid,
+    ppid: crate::process::Pid,
+    name: &str,
+    sleeping: bool,
+) -> String {
+    let state = if sleeping {
+        "S (sleeping)"
+    } else {
+        "R (running)"
+    };
+    format!("Name:\t{name}\nState:\t{state}\nPid:\t{pid}\nPPid:\t{ppid}\nUid:\t0\t0\t0\t0\n")
 }
 
 fn unimplemented() -> String {
@@ -263,7 +274,9 @@ impl FileSystem for Procfs {
                 let (ppid, name) = find(pid).ok_or(Errno::ENOENT)?;
                 match parts.next() {
                     None => Ok(Arc::new(ProcDir)),
-                    Some("status") => file(status(pid, ppid, &name)),
+                    Some("status") => {
+                        file(status(pid, ppid, &name, crate::sched::is_sleeping(pid)))
+                    }
                     Some(_) => Err(Errno::ENOENT),
                 }
             }
@@ -504,5 +517,11 @@ mod tests {
         let fs = Procfs::new();
         assert!(read_all(&fs, "/pios/tcp").starts_with("local "));
         assert!(fs.readdir("/pios").unwrap().iter().any(|e| e.name == "tcp"));
+    }
+
+    #[test]
+    fn status_shows_whether_the_task_is_sleeping() {
+        assert!(status(5, 1, "cat", true).contains("State:\tS (sleeping)\n"));
+        assert!(status(5, 1, "cat", false).contains("State:\tR (running)\n"));
     }
 }

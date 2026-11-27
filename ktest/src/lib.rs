@@ -230,6 +230,62 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn a_task_waiting_on_a_wait_queue_sleeps_until_woken() {
+            use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+            static Q: kernel::wait::WaitQueue = kernel::wait::WaitQueue::new();
+            static READY: AtomicBool = AtomicBool::new(false);
+            static LOOKED: AtomicUsize = AtomicUsize::new(0);
+            static DONE: AtomicBool = AtomicBool::new(false);
+            fn waiter(_: usize) {
+                kernel::wait::wait_event(&[&Q], None, || {
+                    LOOKED.fetch_add(1, Ordering::SeqCst);
+                    READY.load(Ordering::SeqCst).then_some(())
+                });
+                DONE.store(true, Ordering::SeqCst);
+            }
+            let t = kernel::sched::spawn(waiter, 0).unwrap();
+            // 30ms のあいだ譲り続ける。回って待つなら、そのたびに条件を見る(何千回にもなる)
+            let start = kernel::time::now_ns();
+            while kernel::time::now_ns() - start < 30_000_000 {
+                kernel::sched::yield_now();
+            }
+            assert!(kernel::sched::is_sleeping(t), "waiting task should be blocked");
+            assert_eq!(Q.waiting(), 1);
+            READY.store(true, Ordering::SeqCst);
+            Q.wake_all();
+            while !DONE.load(Ordering::SeqCst) {
+                kernel::sched::yield_now();
+            }
+            let looked = LOOKED.load(Ordering::SeqCst);
+            assert!(looked <= 3, "condition was checked {looked} times");
+            assert_eq!(Q.waiting(), 0);
+        }
+
+        #[test_case]
+        fn sleep_through_ignores_an_early_wake() {
+            // 待ち行列では、関係のない「起こされた」印が残ることがある(登録してから条件を見るまでの
+            // あいだに起こされ、眠らずに済んだとき)。nanosleep はそれで早く起きてはいけない
+            kernel::sched::wake(kernel::sched::current());
+            let start = kernel::time::now_ns();
+            kernel::sched::sleep_through(start + 20_000_000);
+            let slept = kernel::time::now_ns() - start;
+            assert!(slept >= 20_000_000, "slept only {} us", slept / 1000);
+        }
+
+        #[test_case]
+        fn a_process_reading_an_empty_pipe_sleeps() {
+            // 右の sh は自分の番号を書いてから cat になる(exec なので番号は同じ)。cat は空のパイプを
+            // 読んで待つ。左は 1 秒待ってから、その cat の State を写し、終わる(パイプが閉じて cat も終わる)。
+            // 左の最後に true を置く:最後のコマンドは fork せずに exec され、そのリダイレクトで
+            // パイプが先に閉じて、cat が終わってしまうので
+            let script = b"{ sleep 1; cat /proc/$(cat /tmp/pipe_pid)/status > /tmp/pipe_state; true; } \
+                | sh -c 'echo $$ > /tmp/pipe_pid; exec /bin/busybox cat > /dev/null'
+                grep -q 'S (sleeping)' /tmp/pipe_state || { cat /tmp/pipe_state; exit 1; }";
+            let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
+            assert_eq!(boot::run_program("/bin/busybox", &argv), Ok(0));
+        }
+
+        #[test_case]
         fn wake_cuts_a_sleep_short_and_is_not_lost_when_early() {
             use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
             static WOKE_AFTER: AtomicU64 = AtomicU64::new(0);

@@ -368,6 +368,13 @@ pub fn sleep_until(deadline: u64) {
     }
 }
 
+/// `deadline` まで必ず眠る(起こされても、期限の前なら眠り直す。nanosleep 用)
+pub fn sleep_through(deadline: u64) {
+    while crate::time::now_ns() < deadline {
+        sleep_until(deadline);
+    }
+}
+
 /// 眠っているタスク `tid` を、起きる時刻の前に起こす(割り込みのハンドラから呼んでよい)。
 /// まだ眠っていなければ、次の眠りをすぐ終わらせる。ないタスクなら何もしない
 pub fn wake(tid: Tid) {
@@ -415,9 +422,23 @@ pub fn yield_now() {
     schedule(State::Running, None, Pick::ByPriority);
 }
 
+/// スケジューラが動いているか(動いていなければ、待つときは回って待つ)
+pub fn running() -> bool {
+    PLATFORM.get().is_some() && SCHED.lock().is_some()
+}
+
+/// タスクが眠っている(Blocked)か。/proc/<pid>/status の State に使う
+pub fn is_sleeping(tid: Tid) -> bool {
+    SCHED
+        .lock()
+        .as_ref()
+        .and_then(|s| s.tasks.get(&tid))
+        .is_some_and(|t| t.state == State::Blocked)
+}
+
 /// 何かを待っている間に呼ぶ:スケジューラが動いていれば譲り、なければその場で少し待つ。
 pub fn relax() {
-    if PLATFORM.get().is_some() && SCHED.lock().is_some() {
+    if running() {
         schedule(State::Running, None, Pick::Anyone);
     } else {
         core::hint::spin_loop();

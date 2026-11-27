@@ -24,6 +24,7 @@ pub mod sync;
 pub mod syscall;
 pub mod time;
 pub mod tty;
+pub mod wait;
 
 pub use errno::Errno;
 

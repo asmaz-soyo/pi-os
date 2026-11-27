@@ -28,8 +28,9 @@ fn timespec_bytes(ns: u64) -> [u8; 16] {
 }
 
 fn sleep_until(deadline: u64) {
-    // スケジューラに眠らせてもらう(待つ間、ほかのタスクが CPU を使える)
-    crate::sched::sleep_until(deadline);
+    // スケジューラに眠らせてもらう(待つ間、ほかのタスクが CPU を使える)。
+    // 待ち行列の「起こされた」印が残っていて早く起きても、期限まで眠り直す
+    crate::sched::sleep_through(deadline);
 }
 
 /// nanosleep(req, rem)

@@ -4,10 +4,14 @@
 //! fork したりすると同じ端が共有され、最後の 1 つが閉じられたとき(`Drop`)に「閉じた」と記録する。
 //! - 書く側がすべて閉じた:読むと、残りを読み切ったあと 0(ファイルの終わり)
 //! - 読む側がすべて閉じた:書くと `EPIPE`(Linux ならここで SIGPIPE も届く)
+//!
+//! 待つ(空で読む、いっぱいで書く、FIFO の相手を待つ)ときは、パイプの待ち行列で眠る。
+//! 状態を変えた側(書いた、読んだ、開いた、閉じた)が起こす。
 
 use crate::Errno;
 use crate::fs::vfs::{File, FileKind, Stat};
 use crate::sync::SpinLock;
+use crate::wait::{WaitQueue, wait_event};
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 
@@ -25,6 +29,8 @@ struct State {
 #[derive(Default)]
 struct Pipe {
     state: SpinLock<State>,
+    /// 読む側・書く側の両方が待つ(状態が変わったら全員起こし、それぞれが条件を見直す)
+    wq: WaitQueue,
 }
 
 fn stat() -> Stat {
@@ -45,6 +51,7 @@ pub struct WriteEnd(Arc<Pipe>);
 impl ReadEnd {
     fn open(pipe: Arc<Pipe>) -> Self {
         pipe.state.lock().readers += 1;
+        pipe.wq.wake_all(); // 読む側を待っている FIFO の書く側
         Self(pipe)
     }
 }
@@ -52,6 +59,7 @@ impl ReadEnd {
 impl WriteEnd {
     fn open(pipe: Arc<Pipe>) -> Self {
         pipe.state.lock().writers += 1;
+        pipe.wq.wake_all();
         Self(pipe)
     }
 }
@@ -94,14 +102,16 @@ pub fn open_fifo(key: (u64, u64), write: bool, nonblock: bool) -> Result<Arc<dyn
             return Err(Errno::ENXIO);
         }
         let end = WriteEnd::open(pipe.clone());
-        while pipe.state.lock().readers == 0 {
-            crate::sched::relax();
-        }
+        wait_event(&[&pipe.wq], None, || {
+            (pipe.state.lock().readers > 0).then_some(())
+        });
         Ok(Arc::new(end))
     } else {
         let end = ReadEnd::open(pipe.clone());
-        while !nonblock && pipe.state.lock().writers == 0 {
-            crate::sched::relax();
+        if !nonblock {
+            wait_event(&[&pipe.wq], None, || {
+                (pipe.state.lock().writers > 0).then_some(())
+            });
         }
         Ok(Arc::new(end))
     }
@@ -116,23 +126,21 @@ impl File for ReadEnd {
         if buf.is_empty() {
             return Ok(0);
         }
-        loop {
-            {
-                let mut s = self.0.state.lock();
-                if !s.buf.is_empty() {
-                    let n = buf.len().min(s.buf.len());
-                    for (dst, src) in buf.iter_mut().zip(s.buf.drain(..n)) {
-                        *dst = src;
-                    }
-                    return Ok(n);
+        // まだ何もなければ、書かれる(か、書く側が全部閉じる)のを眠って待つ
+        let n = wait_event(&[&self.0.wq], None, || {
+            let mut s = self.0.state.lock();
+            if !s.buf.is_empty() {
+                let n = buf.len().min(s.buf.len());
+                for (dst, src) in buf.iter_mut().zip(s.buf.drain(..n)) {
+                    *dst = src;
                 }
-                if s.writers == 0 {
-                    return Ok(0);
-                }
+                return Some(n);
             }
-            // まだ何もない:書かれるのを待つ
-            crate::sched::relax();
-        }
+            (s.writers == 0).then_some(0)
+        });
+        // 空きができた:いっぱいで待っている書く側を起こす
+        self.0.wq.wake_all();
+        Ok(n.unwrap_or(0))
     }
 
     fn poll_readable(&self) -> bool {
@@ -144,6 +152,7 @@ impl File for ReadEnd {
 impl Drop for ReadEnd {
     fn drop(&mut self) {
         self.0.state.lock().readers -= 1;
+        self.0.wq.wake_all(); // 書く側は EPIPE に
     }
 }
 
@@ -154,33 +163,33 @@ impl File for WriteEnd {
 
     fn write(&self, _offset: u64, buf: &[u8]) -> Result<usize, Errno> {
         let mut done = 0;
-        while done < buf.len() {
-            {
-                let mut s = self.0.state.lock();
-                if s.readers == 0 {
-                    // 少しでも書けていればその分を返す
-                    return if done > 0 {
-                        Ok(done)
-                    } else {
-                        Err(Errno::EPIPE)
-                    };
-                }
-                let room = CAPACITY - s.buf.len();
-                let n = room.min(buf.len() - done);
-                s.buf.extend(&buf[done..done + n]);
-                done += n;
+        // 書けるだけ書き、いっぱいなら読まれるのを眠って待つ
+        let r = wait_event(&[&self.0.wq], None, || {
+            let mut s = self.0.state.lock();
+            if s.readers == 0 {
+                // 少しでも書けていればその分を返す
+                return Some(if done > 0 {
+                    Ok(done)
+                } else {
+                    Err(Errno::EPIPE)
+                });
             }
-            if done < buf.len() {
-                // いっぱい:読まれるのを待つ
-                crate::sched::relax();
+            let n = (CAPACITY - s.buf.len()).min(buf.len() - done);
+            s.buf.extend(&buf[done..done + n]);
+            done += n;
+            if n > 0 {
+                drop(s);
+                self.0.wq.wake_all(); // 読む側を起こす
             }
-        }
-        Ok(done)
+            (done == buf.len()).then_some(Ok(done))
+        });
+        r.unwrap_or(Ok(done))
     }
 }
 
 impl Drop for WriteEnd {
     fn drop(&mut self) {
         self.0.state.lock().writers -= 1;
+        self.0.wq.wake_all(); // 読む側は終わり(0)を読む
     }
 }
