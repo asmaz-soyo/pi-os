@@ -38,6 +38,10 @@ pub trait Board: 'static {
     const TIMER_HZ: u64 = 100;
     /// virtio-mmio の枠の物理アドレス(ないボードは空)
     const VIRTIO_MMIO: &'static [usize] = &[];
+    /// `VIRTIO_MMIO` の `slot` 番目の枠の割り込み番号(ないボードは None)
+    fn virtio_irq(_slot: usize) -> Option<u32> {
+        None
+    }
     /// GPIO コントローラの割り込み番号(ないボードは None)
     const GPIO_IRQ: Option<u32> = None;
     /// GPIO の割り込みの要因(線のビット)を読んで消す
@@ -81,7 +85,8 @@ pub fn init<B: Board>() {
     }
     // 8. ネットワーク:見つけたカードをスタックにつなぎ、後ろで poll するスレッドを動かす
     if bring_up_network() {
-        kernel::sched::spawn(net_poller, 0).expect("start the network poller");
+        let tid = kernel::sched::spawn(net_poller, 0).expect("start the network poller");
+        NET_POLLER.store(tid, core::sync::atomic::Ordering::Relaxed);
     }
     if cfg!(feature = "trace-syscalls") {
         kernel::syscall::TRACE.store(true, core::sync::atomic::Ordering::Relaxed);
@@ -235,7 +240,7 @@ fn init_scheduler() {
 fn probe_virtio<B: Board>() {
     use hal::mmio::Mmio;
     let mut next_disk = b'a';
-    for &pa in B::VIRTIO_MMIO {
+    for (slot, &pa) in B::VIRTIO_MMIO.iter().enumerate() {
         // SAFETY: pa は virtio-mmio の枠で、デバイスの範囲としてマップ済み
         let mut regs = unsafe { hal::mmio::MmioRegion::new(device_va(pa)) };
         if regs.read(virtio_blk::MAGIC) != 0x7472_6976 {
@@ -247,7 +252,7 @@ fn probe_virtio<B: Board>() {
                     next_disk += 1;
                 }
             }
-            1 => probe_net(pa),
+            1 => probe_net::<B>(pa, B::virtio_irq(slot)),
             _ => {} // 空の枠(0)やまだ知らないデバイス
         }
     }
@@ -274,7 +279,28 @@ fn probe_blk(pa: usize, letter: u8) -> bool {
     true
 }
 
-fn probe_net(pa: usize) {
+/// eth0(virtio-net)の割り込みで起こす、poll のスレッド(0 = まだいない)
+static NET_POLLER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// eth0 のレジスタ(割り込みに応えるため。仮想アドレス、0 = なし)
+static NET_IRQ_REGS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// virtio-net の割り込み:フレームが届いた(か送り終わった)。応えて、poll のスレッドを起こす。
+/// 処理そのもの(smoltcp の poll)は重いので、割り込みの中ではしない
+fn net_irq() {
+    use core::sync::atomic::Ordering;
+    let va = NET_IRQ_REGS.load(Ordering::Relaxed);
+    if va != 0 {
+        // SAFETY: va は virtio-net の枠で、デバイスの範囲としてマップ済み
+        let mut regs = unsafe { hal::mmio::MmioRegion::new(va) };
+        virtio_net::ack_interrupt(&mut regs);
+    }
+    let tid = NET_POLLER.load(Ordering::Relaxed);
+    if tid != 0 {
+        kernel::sched::wake(tid);
+    }
+}
+
+fn probe_net<B: Board>(pa: usize, irq: Option<u32>) {
     // リングに 1 ページ、送り受けのバッファに QUEUE_SIZE ページ
     let mut frames = alloc::vec::Vec::new();
     for _ in 0..=virtio_net::QUEUE_SIZE {
@@ -301,6 +327,16 @@ fn probe_net(pa: usize) {
         Some(dev) => {
             let m = hal::net::NetDev::mac(&dev);
             let name = kernel::net::dev::register(alloc::boxed::Box::new(dev));
+            // 割り込みは最初のカード(eth0)だけ使う。ほかは poll のスレッドが定期的に見る
+            if let Some(irq) = irq
+                && name == "eth0"
+                && kernel::irq::IRQS
+                    .register(irq, "virtio-net", net_irq)
+                    .is_ok()
+            {
+                NET_IRQ_REGS.store(device_va(pa), core::sync::atomic::Ordering::Relaxed);
+                B::intc().lock().enable(irq);
+            }
             kernel::println!(
                 "virtio-net: {name}, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 m[0],
@@ -356,12 +392,12 @@ fn start_timer<B: Board>() {
     let handler: &'static Exceptions<B> = &Exceptions(PhantomData);
     exception::set_handler(Some(handler));
     kernel::irq::IRQS
-        .register(B::TIMER_IRQ, timer_tick)
+        .register(B::TIMER_IRQ, "timer", timer_tick)
         .expect("timer irq number is valid");
     B::intc().lock().enable(B::TIMER_IRQ);
     if let Some(irq) = B::GPIO_IRQ {
         kernel::irq::IRQS
-            .register(irq, gpio_irq::<B>)
+            .register(irq, "gpio", gpio_irq::<B>)
             .expect("gpio irq number is valid");
         B::intc().lock().enable(irq);
     }

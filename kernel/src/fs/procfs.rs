@@ -96,6 +96,15 @@ fn mounts() -> String {
     text
 }
 
+/// /proc/interrupts:登録した割り込みの、番号・届いた回数・名前(Linux と同じ並び。CPU は 1 つ)
+fn interrupts(counts: &[(u32, &str, usize)]) -> String {
+    let mut text = String::from("           CPU0\n");
+    for (irq, name, count) in counts {
+        text.push_str(&format!("{irq:>4}: {count:>10}  {name}\n"));
+    }
+    text
+}
+
 /// /proc/pios/resolv.conf:DHCP でもらった DNS サーバー(`/etc/resolv.conf` がここを指す)
 fn resolv_conf(servers: &[crate::net::inet::Ipv4Address]) -> String {
     let mut text = String::new();
@@ -163,6 +172,7 @@ impl FileSystem for Procfs {
             "/uptime" => file(uptime()),
             "/meminfo" => file(meminfo()),
             "/mounts" => file(mounts()),
+            "/interrupts" => file(interrupts(&crate::irq::IRQS.counts())),
             "/version" => file(String::from("Pi-OS version 0.1.0 (aarch64)\n")),
             "/pios/unimplemented" => file(unimplemented()),
             "/pios/resolv.conf" => file(resolv_conf(&crate::net::inet::dns_servers())),
@@ -193,10 +203,11 @@ impl FileSystem for Procfs {
         let path = resolve_self(path);
         match path.as_str() {
             "/" => {
-                let mut entries: Vec<DirEntry> = ["meminfo", "mounts", "uptime", "version"]
-                    .iter()
-                    .map(|n| entry(n, FileKind::Regular))
-                    .collect();
+                let mut entries: Vec<DirEntry> =
+                    ["interrupts", "meminfo", "mounts", "uptime", "version"]
+                        .iter()
+                        .map(|n| entry(n, FileKind::Regular))
+                        .collect();
                 entries.push(entry("pios", FileKind::Directory));
                 entries.push(entry("self", FileKind::Directory));
                 for (pid, _, _) in PROCESSES.infos() {
@@ -335,6 +346,24 @@ mod tests {
         assert_eq!(&head[..4], &0xa1b2_c3d4u32.to_le_bytes());
         assert_eq!(&head[20..24], &101u32.to_le_bytes());
         assert_eq!(fs.lookup("/pios/net/nope.pcap").err(), Some(Errno::ENOENT));
+    }
+
+    #[test]
+    fn interrupts_lists_counts_in_linux_format() {
+        let text = interrupts(&[(30, "timer", 1234), (48, "virtio-net", 7)]);
+        // 見出しは CPU ごとの列(今は CPU0 だけ)。各行は「番号: 回数 名前」
+        assert_eq!(
+            text,
+            "           CPU0\n  30:       1234  timer\n  48:          7  virtio-net\n"
+        );
+        let fs = Procfs::new();
+        assert!(read_all(&fs, "/interrupts").starts_with("           CPU0\n"));
+        assert!(
+            fs.readdir("/")
+                .unwrap()
+                .iter()
+                .any(|e| e.name == "interrupts")
+        );
     }
 
     #[test]

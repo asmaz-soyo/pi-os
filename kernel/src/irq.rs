@@ -2,6 +2,7 @@
 
 use crate::Errno;
 use crate::sync::SpinLock;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use hal::irq::IrqController;
 
@@ -12,7 +13,10 @@ pub const MAX_IRQS: usize = 128;
 pub type Handler = fn();
 
 pub struct IrqTable {
-    handlers: SpinLock<[Option<Handler>; MAX_IRQS]>,
+    /// 番号ごとのハンドラと名前(`/proc/interrupts` に出す)
+    handlers: SpinLock<[Option<(Handler, &'static str)>; MAX_IRQS]>,
+    /// 番号ごとの、届いた回数
+    counts: [AtomicUsize; MAX_IRQS],
     unhandled: AtomicUsize,
 }
 
@@ -20,15 +24,29 @@ impl IrqTable {
     pub const fn new() -> Self {
         Self {
             handlers: SpinLock::new([None; MAX_IRQS]),
+            counts: [const { AtomicUsize::new(0) }; MAX_IRQS],
             unhandled: AtomicUsize::new(0),
         }
     }
 
-    pub fn register(&self, irq: u32, handler: Handler) -> Result<(), Errno> {
+    pub fn register(&self, irq: u32, name: &'static str, handler: Handler) -> Result<(), Errno> {
         let mut handlers = self.handlers.lock();
         let slot = handlers.get_mut(irq as usize).ok_or(Errno::EINVAL)?;
-        *slot = Some(handler);
+        *slot = Some((handler, name));
         Ok(())
+    }
+
+    /// 登録した割り込みの(番号, 名前, 届いた回数)。番号の順
+    pub fn counts(&self) -> Vec<(u32, &'static str, usize)> {
+        let handlers = self.handlers.lock();
+        handlers
+            .iter()
+            .enumerate()
+            .filter_map(|(irq, h)| {
+                let (_, name) = (*h)?;
+                Some((irq as u32, name, self.counts[irq].load(Ordering::Relaxed)))
+            })
+            .collect()
     }
 
     /// 保留中の割り込みがなくなるまで、ハンドラを呼んで終了を伝える。
@@ -37,7 +55,10 @@ impl IrqTable {
             // ハンドラを呼ぶ前にロックを離す(ハンドラが登録を変えても固まらない)
             let handler = self.handlers.lock().get(irq as usize).copied().flatten();
             match handler {
-                Some(handler) => handler(),
+                Some((handler, _)) => {
+                    self.counts[irq as usize].fetch_add(1, Ordering::Relaxed);
+                    handler()
+                }
                 None => {
                     self.unhandled.fetch_add(1, Ordering::Relaxed);
                 }
@@ -100,8 +121,8 @@ mod tests {
     #[test]
     fn dispatch_calls_handlers_for_all_pending_irqs_and_acknowledges_them() {
         let table = IrqTable::new();
-        table.register(30, handler_a).unwrap();
-        table.register(31, handler_b).unwrap();
+        table.register(30, "a", handler_a).unwrap();
+        table.register(31, "b", handler_b).unwrap();
         let mut intc = FakeIntc {
             queue: std::vec![30, 31, 30],
             ..Default::default()
@@ -129,8 +150,22 @@ mod tests {
     fn register_rejects_out_of_range_irq() {
         let table = IrqTable::new();
         assert_eq!(
-            table.register(MAX_IRQS as u32, handler_a),
+            table.register(MAX_IRQS as u32, "a", handler_a),
             Err(crate::Errno::EINVAL)
         );
+    }
+
+    #[test]
+    fn each_irq_counts_how_often_it_came_and_keeps_its_name() {
+        let table = IrqTable::new();
+        table.register(3, "timer", handler_a).unwrap();
+        table.register(5, "virtio-net", handler_b).unwrap();
+        let mut intc = FakeIntc {
+            queue: std::vec![5, 3, 5],
+            ..Default::default()
+        };
+        table.dispatch(&mut intc);
+        // 登録したものだけ、番号の順に(番号, 名前, 回数)
+        assert_eq!(table.counts(), [(3, "timer", 1), (5, "virtio-net", 2)]);
     }
 }

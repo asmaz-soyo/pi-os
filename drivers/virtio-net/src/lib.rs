@@ -40,6 +40,8 @@ pub const QUEUE_NUM_MAX: usize = 0x034;
 pub const QUEUE_NUM: usize = 0x038;
 pub const QUEUE_READY: usize = 0x044;
 pub const QUEUE_NOTIFY: usize = 0x050;
+pub const INTERRUPT_STATUS: usize = 0x060;
+pub const INTERRUPT_ACK: usize = 0x064;
 pub const STATUS: usize = 0x070;
 pub const QUEUE_DESC_LOW: usize = 0x080;
 pub const QUEUE_DESC_HIGH: usize = 0x084;
@@ -64,6 +66,14 @@ pub const QUEUE_SIZE: usize = 8;
 pub const RX: u32 = 0;
 pub const TX: u32 = 1;
 /// キューごとの、リングのページの中の位置
+/// 割り込みに応える(割り込みのハンドラから呼ぶ)。理由(1 = キューに使い終わったものがある、
+/// 2 = 設定が変わった)を読み、同じ値を書いて消す。返すのは理由
+pub fn ack_interrupt<M: Mmio>(regs: &mut M) -> u32 {
+    let why = regs.read(INTERRUPT_STATUS);
+    regs.write(INTERRUPT_ACK, why);
+    why
+}
+
 pub const fn queue_base(q: u32) -> usize {
     q as usize * 512
 }
@@ -451,6 +461,15 @@ mod tests {
         f.ring.0[used + 2] = 1;
         assert_eq!(f.dev.send(b"x"), Ok(()));
         assert_eq!(f.dev.send(&[0; BUF_LEN]), Err(NetError::TooLarge));
+    }
+
+    #[test]
+    fn an_interrupt_is_acknowledged_with_the_reasons_it_had() {
+        let mut m = FakeMmio::new();
+        // 理由:1 = 使い終わったバッファがある(受信した・送り終わった)
+        m.queue_reads(INTERRUPT_STATUS, &[1]);
+        assert_eq!(ack_interrupt(&mut m), 1);
+        assert_eq!(m.writes(), [(INTERRUPT_ACK, 1)]);
     }
 
     #[test]

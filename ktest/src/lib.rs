@@ -211,6 +211,37 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn wake_cuts_a_sleep_short_and_is_not_lost_when_early() {
+            use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+            static WOKE_AFTER: AtomicU64 = AtomicU64::new(0);
+            static SLEPT: AtomicUsize = AtomicUsize::new(0);
+            fn sleeper(_: usize) {
+                // 10 秒眠るつもりで寝る(割り込みのハンドラなどが wake で起こす)
+                for _ in 0..2 {
+                    let start = kernel::time::now_ns();
+                    kernel::sched::sleep_until(start + 10_000_000_000);
+                    WOKE_AFTER.store(kernel::time::now_ns() - start, Ordering::SeqCst);
+                    SLEPT.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            let tid = kernel::sched::spawn(sleeper, 0).unwrap();
+            // 眠りに入るまで待ってから起こす
+            kernel::sched::sleep_until(kernel::time::now_ns() + 5_000_000);
+            kernel::sched::wake(tid);
+            while SLEPT.load(Ordering::SeqCst) < 1 {
+                kernel::sched::yield_now();
+            }
+            assert!(WOKE_AFTER.load(Ordering::SeqCst) < 100_000_000);
+            // 眠る前に起こされた分は取っておかれ、次の眠りがすぐ終わる(起こしたことを失わない)
+            kernel::sched::wake(tid);
+            let before = kernel::time::now_ns();
+            while SLEPT.load(Ordering::SeqCst) < 2 {
+                assert!(kernel::time::now_ns() - before < 1_000_000_000, "lost wake-up");
+                kernel::sched::yield_now();
+            }
+        }
+
+        #[test_case]
         fn spinning_user_programs_are_preempted_by_the_timer() {
             // 終わらないプログラムを 2 つ動かしても、このタスク(カーネル)が動き続け、
             // ほかのプログラムも最後まで動く

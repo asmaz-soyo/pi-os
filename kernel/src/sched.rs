@@ -128,6 +128,8 @@ struct Task {
     wake_at: Option<u64>,
     /// 待ちのループで譲った(次に動くまで、優先度を 0 として扱う)
     yielded: bool,
+    /// 眠っていないときに `wake` された(次の眠りをすぐ終わらせる。起こしたことを失わない)
+    woken: bool,
 }
 
 struct Scheduler {
@@ -159,6 +161,7 @@ pub fn init(p: Platform) {
             priority: 0,
             wake_at: None,
             yielded: false,
+            woken: false,
         }),
     );
     *SCHED.lock() = Some(Scheduler {
@@ -199,6 +202,7 @@ pub fn spawn(entry: fn(usize), arg: usize) -> Option<Tid> {
                 priority: 0,
                 wake_at: None,
                 yielded: false,
+                woken: false,
             }),
         );
         s.rq.push(tid);
@@ -270,6 +274,10 @@ fn schedule(new_state: State, wake_at: Option<u64>, pick: Pick) {
             if cur_task.state == State::Running {
                 cur_task.state = new_state;
                 cur_task.wake_at = wake_at;
+                // 眠る前に起こされていたら、すぐ起きる(下の wake_expired が列に戻す)
+                if new_state == State::Blocked && core::mem::take(&mut cur_task.woken) {
+                    cur_task.wake_at = Some(0);
+                }
                 if new_state == State::Dead {
                     s.dead.push(cur);
                 }
@@ -337,6 +345,30 @@ pub fn sleep_until(deadline: u64) {
     if crate::time::now_ns() < deadline {
         schedule(State::Blocked, Some(deadline), Pick::ByPriority);
     }
+}
+
+/// 眠っているタスク `tid` を、起きる時刻の前に起こす(割り込みのハンドラから呼んでよい)。
+/// まだ眠っていなければ、次の眠りをすぐ終わらせる。ないタスクなら何もしない
+pub fn wake(tid: Tid) {
+    let Some(p) = PLATFORM.get() else {
+        return;
+    };
+    let flags = (p.irq_save)();
+    if let Some(s) = SCHED.lock().as_mut()
+        && let Some(task) = s.tasks.get_mut(&tid)
+    {
+        match task.state {
+            State::Blocked => {
+                task.state = State::Ready;
+                task.wake_at = None;
+                s.rq.push(tid);
+            }
+            State::Dead => {}
+            _ => task.woken = true,
+        }
+    }
+    (p.irq_restore)(flags);
+    request_resched();
 }
 
 /// タスクの優先度を変える(0 = 通常、1〜99 = リアルタイム)。タスクがなければ false。

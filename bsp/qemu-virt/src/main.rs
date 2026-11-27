@@ -57,6 +57,10 @@ impl boot::Board for Board {
     const DEVICES: &'static [Range<u64>] = &[0x0800_0000..0x0a00_4000];
     /// virtio-mmio の枠 32 個(hw/arm/virt.c の VIRT_MMIO、0x200 ずつ)
     const VIRTIO_MMIO: &'static [usize] = &VIRTIO_SLOTS;
+    /// virtio-mmio の枠 i は SPI 16 + i(GIC の番号では 32 を足して 48 + i)
+    fn virtio_irq(slot: usize) -> Option<u32> {
+        Some(48 + slot as u32)
+    }
     /// EL1 物理タイマ(PPI 14 = INTID 30)
     const TIMER_IRQ: u32 = 30;
 
@@ -197,6 +201,15 @@ mod tests {
         let script = b"h=$(hexdump -v -e '1/1 \"%02x\"' /proc/pios/net/eth0.pcap); at() { echo ${h:$(($1 * 2)):$(($2 * 2))}; }; \
             test $(at 0 4) = d4c3b2a1 && test $(at 20 1) = 01 && test $(at 40 6) = ffffffffffff && \
             test $(at 52 2) = 0800 && test $(at 74 4) = 00440043";
+        let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
+        assert_eq!(boot::run_program("/bin/busybox", &argv), Ok(0));
+    }
+
+    #[test_case]
+    fn received_frames_raise_the_virtio_net_interrupt() {
+        // DHCP の答え(OFFER、ACK)を受け取ったときに割り込みが来て、/proc/interrupts で数えられている
+        assert!(wait_for_dhcp().is_some());
+        let script = b"set -- $(grep virtio-net /proc/interrupts) && test $2 -gt 0";
         let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
         assert_eq!(boot::run_program("/bin/busybox", &argv), Ok(0));
     }
