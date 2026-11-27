@@ -14,55 +14,25 @@
 //! ```
 //!
 //! 今は割り込みを使わず、used リングを見て待つ(ポーリング)。
+//! レジスタ、初期化の手順、virtqueue の数え方は virtio-mmio のクレート(virtio-net と共通)。
 #![no_std]
 
 #[cfg(test)]
 extern crate std;
 
-use core::sync::atomic::{Ordering, fence};
 use hal::block::{BLOCK_SIZE, BlockDevice, BlockError};
 use hal::mmio::Mmio;
 
-// レジスタ(virtio-mmio version 2)
-pub const MAGIC: usize = 0x000;
-pub const VERSION: usize = 0x004;
-pub const DEVICE_ID: usize = 0x008;
-pub const DEVICE_FEATURES: usize = 0x010;
-pub const DEVICE_FEATURES_SEL: usize = 0x014;
-pub const DRIVER_FEATURES: usize = 0x020;
-pub const DRIVER_FEATURES_SEL: usize = 0x024;
-pub const QUEUE_SEL: usize = 0x030;
-pub const QUEUE_NUM_MAX: usize = 0x034;
-pub const QUEUE_NUM: usize = 0x038;
-pub const QUEUE_READY: usize = 0x044;
-pub const QUEUE_NOTIFY: usize = 0x050;
-pub const STATUS: usize = 0x070;
-pub const QUEUE_DESC_LOW: usize = 0x080;
-pub const QUEUE_DESC_HIGH: usize = 0x084;
-pub const QUEUE_DRIVER_LOW: usize = 0x090;
-pub const QUEUE_DRIVER_HIGH: usize = 0x094;
-pub const QUEUE_DEVICE_LOW: usize = 0x0a0;
-pub const QUEUE_DEVICE_HIGH: usize = 0x0a4;
-/// デバイス固有の設定(virtio-blk では容量 = セクタ数 u64)
-pub const CONFIG: usize = 0x100;
-
-pub const STATUS_ACK: u32 = 1;
-pub const STATUS_DRIVER: u32 = 2;
-pub const STATUS_DRIVER_OK: u32 = 4;
-pub const STATUS_FEATURES_OK: u32 = 8;
-
-const DEVICE_ID_BLOCK: u32 = 2;
-const MAGIC_VALUE: u32 = 0x7472_6976; // "virt"
+// レジスタと virtqueue は virtio-mmio のクレートに(virtio-net と共通)
+pub use virtio_mmio::*;
 
 pub const QUEUE_SIZE: usize = 8;
-pub const AVAIL_OFFSET: usize = 128;
-pub const USED_OFFSET: usize = 256;
+/// DMA 領域の中の位置(先頭はキュー:記述子、avail、used)
+pub const AVAIL_OFFSET: usize = AVAIL;
+pub const USED_OFFSET: usize = USED;
 pub const HEADER_OFFSET: usize = 512;
 pub const STATUS_OFFSET: usize = 528;
 pub const DATA_OFFSET: usize = 1024;
-
-pub const DESC_NEXT: u16 = 1;
-pub const DESC_WRITE: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestKind {
@@ -75,8 +45,7 @@ pub struct VirtioBlk<M: Mmio> {
     dma: *mut u8,
     dma_pa: u64,
     capacity: u64,
-    avail_idx: u16,
-    last_used: u16,
+    queue: Virtqueue,
 }
 
 // SAFETY: DMA 領域はこのドライバだけが使う。共有するときはロックで守る
@@ -88,54 +57,22 @@ impl<M: Mmio> VirtioBlk<M> {
     /// # Safety
     /// `dma` は 4KiB の書ける領域で、物理アドレスが `dma_pa`。このドライバだけが使うこと。
     pub unsafe fn new(mut regs: M, dma: *mut u8, dma_pa: u64) -> Option<Self> {
-        if regs.read(MAGIC) != MAGIC_VALUE || regs.read(VERSION) != 2 {
-            return None;
-        }
-        if regs.read(DEVICE_ID) != DEVICE_ID_BLOCK {
-            return None;
-        }
-        // SAFETY: 呼び出し元が領域の有効性を保証する
+        // 機能は VIRTIO_F_VERSION_1 だけ(下位 32 ビットは何も求めない)
+        let (status, _) = negotiate(&mut regs, DEVICE_BLOCK, 0)?;
+        // SAFETY: 呼び出し元が領域の有効性を保証する。先頭の 512 バイトがキュー
         unsafe { core::ptr::write_bytes(dma, 0, 4096) };
-        regs.write(STATUS, 0); // リセット
-        let mut status = STATUS_ACK | STATUS_DRIVER;
-        regs.write(STATUS, STATUS_ACK);
-        regs.write(STATUS, status);
-        // 機能の取り決め:VIRTIO_F_VERSION_1(ビット 32)だけを受け入れる
-        regs.write(DEVICE_FEATURES_SEL, 1);
-        let _ = regs.read(DEVICE_FEATURES);
-        regs.write(DRIVER_FEATURES_SEL, 0);
-        regs.write(DRIVER_FEATURES, 0);
-        regs.write(DRIVER_FEATURES_SEL, 1);
-        regs.write(DRIVER_FEATURES, 1);
-        status |= STATUS_FEATURES_OK;
-        regs.write(STATUS, status);
-        if regs.read(STATUS) & STATUS_FEATURES_OK == 0 {
-            return None;
-        }
-        // virtqueue 0 を用意する
-        regs.write(QUEUE_SEL, 0);
-        if (regs.read(QUEUE_NUM_MAX) as usize) < QUEUE_SIZE {
-            return None;
-        }
-        regs.write(QUEUE_NUM, QUEUE_SIZE as u32);
-        let addr = |off: usize| dma_pa + off as u64;
-        regs.write(QUEUE_DESC_LOW, addr(0) as u32);
-        regs.write(QUEUE_DESC_HIGH, (addr(0) >> 32) as u32);
-        regs.write(QUEUE_DRIVER_LOW, addr(AVAIL_OFFSET) as u32);
-        regs.write(QUEUE_DRIVER_HIGH, (addr(AVAIL_OFFSET) >> 32) as u32);
-        regs.write(QUEUE_DEVICE_LOW, addr(USED_OFFSET) as u32);
-        regs.write(QUEUE_DEVICE_HIGH, (addr(USED_OFFSET) >> 32) as u32);
-        regs.write(QUEUE_READY, 1);
+        let queue = unsafe { Virtqueue::new(dma, dma_pa, QUEUE_SIZE) };
+        setup_queue(&mut regs, 0, QUEUE_SIZE, dma_pa)?;
+        // 設定の先頭は容量(セクタ数、u64)
         let low = regs.read(CONFIG) as u64;
         let high = regs.read(CONFIG + 4) as u64;
-        regs.write(STATUS, status | STATUS_DRIVER_OK);
+        driver_ok(&mut regs, status);
         Some(Self {
             regs,
             dma,
             dma_pa,
             capacity: (high << 32) | low,
-            avail_idx: 0,
-            last_used: 0,
+            queue,
         })
     }
 
@@ -157,20 +94,6 @@ impl<M: Mmio> VirtioBlk<M> {
         unsafe { core::ptr::read_volatile(self.dma.add(off)) }
     }
 
-    fn get_u16(&self, off: usize) -> u16 {
-        // SAFETY: DMA 領域の中で 2 バイト境界
-        unsafe { core::ptr::read_volatile(self.dma.add(off) as *const u16) }
-    }
-
-    /// 記述子 `i` を書く
-    fn desc(&mut self, i: usize, off: usize, len: u32, flags: u16, next: u16) {
-        let base = i * 16;
-        self.put(base, (self.dma_pa + off as u64).to_le_bytes());
-        self.put(base + 8, len.to_le_bytes());
-        self.put(base + 12, flags.to_le_bytes());
-        self.put(base + 14, next.to_le_bytes());
-    }
-
     /// 要求を組み立てて、デバイスに知らせる(完了は `poll` で確かめる)。
     pub fn start(&mut self, kind: RequestKind, lba: u64, data: Option<&[u8; BLOCK_SIZE]>) {
         let ty: u32 = match kind {
@@ -189,27 +112,19 @@ impl<M: Mmio> VirtioBlk<M> {
         } else {
             DESC_NEXT
         };
-        self.desc(0, HEADER_OFFSET, 16, DESC_NEXT, 1);
-        self.desc(1, DATA_OFFSET, BLOCK_SIZE as u32, data_flags, 2);
-        self.desc(2, STATUS_OFFSET, 1, DESC_WRITE, 0);
-        // avail リングに記述子 0(鎖の先頭)を載せてから idx を進める
-        let slot = self.avail_idx as usize % QUEUE_SIZE;
-        self.put(AVAIL_OFFSET + 4 + slot * 2, 0u16.to_le_bytes());
-        fence(Ordering::SeqCst);
-        self.avail_idx = self.avail_idx.wrapping_add(1);
-        self.put(AVAIL_OFFSET + 2, self.avail_idx.to_le_bytes());
-        fence(Ordering::SeqCst);
+        let pa = |off: usize| self.dma_pa + off as u64;
+        let (header, data, status) = (pa(HEADER_OFFSET), pa(DATA_OFFSET), pa(STATUS_OFFSET));
+        // 記述子の鎖:ヘッダ → データ → 状態
+        self.queue.desc(0, header, 16, DESC_NEXT, 1);
+        self.queue.desc(1, data, BLOCK_SIZE as u32, data_flags, 2);
+        self.queue.desc(2, status, 1, DESC_WRITE, 0);
+        self.queue.offer(0);
         self.regs.write(QUEUE_NOTIFY, 0);
     }
 
     /// 要求が終わっていれば結果を返す。まだなら `None`。
     pub fn poll(&mut self) -> Option<Result<(), BlockError>> {
-        fence(Ordering::SeqCst);
-        if self.get_u16(USED_OFFSET + 2) == self.last_used {
-            return None;
-        }
-        self.last_used = self.last_used.wrapping_add(1);
-        fence(Ordering::SeqCst);
+        self.queue.take_used()?;
         Some(if self.get_u8(STATUS_OFFSET) == 0 {
             Ok(())
         } else {
