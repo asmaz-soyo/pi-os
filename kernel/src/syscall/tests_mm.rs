@@ -134,12 +134,13 @@ fn mremap_is_refused_so_libc_falls_back_to_copying() {
 #[test]
 fn identity_syscalls_describe_a_single_root_process() {
     let (mut p, _) = process();
+    let pid = p.pid as u64;
     assert_eq!(
         call(&mut p, nr::SET_TID_ADDRESS, [SCRATCH, 0, 0, 0, 0, 0]),
-        1
+        pid
     );
-    assert_eq!(call(&mut p, nr::GETPID, [0; 6]), 1);
-    assert_eq!(call(&mut p, nr::GETTID, [0; 6]), 1);
+    assert_eq!(call(&mut p, nr::GETPID, [0; 6]), pid);
+    assert_eq!(call(&mut p, nr::GETTID, [0; 6]), pid);
     assert_eq!(call(&mut p, nr::GETUID, [0; 6]), 0);
     assert_eq!(call(&mut p, nr::GETEUID, [0; 6]), 0);
     assert_eq!(call(&mut p, nr::GETGID, [0; 6]), 0);

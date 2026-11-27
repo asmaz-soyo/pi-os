@@ -269,7 +269,7 @@ table! {
     nr::EXIT, "exit", 1 => |p, a| Action::Exit(proc::exit_status(a[0]));
     nr::EXIT_GROUP, "exit_group", 1 => |p, a| Action::Exit(proc::exit_status(a[0]));
     // フェーズ1はプロセスもスレッドも1つ
-    nr::SET_TID_ADDRESS, "set_tid_address", 1 => |p, a| Action::Return(1);
+    nr::SET_TID_ADDRESS, "set_tid_address", 1 => |p, a| Action::Return(p.pid as u64);
     nr::NANOSLEEP, "nanosleep", 2 => |p, a| result(time::nanosleep(p, a[0]));
     nr::CLOCK_GETTIME, "clock_gettime", 2 => |p, a| result(misc::clock_gettime(p, a[0], a[1]));
     nr::CLOCK_NANOSLEEP, "clock_nanosleep", 4
@@ -295,14 +295,14 @@ table! {
         Action::Return(old as u64)
     };
     nr::PRCTL, "prctl", 5 => |p, a| result(misc::prctl(p, a[0], a[1]));
-    nr::GETPID, "getpid", 0 => |p, a| Action::Return(1);
+    nr::GETPID, "getpid", 0 => |p, a| Action::Return(p.pid as u64);
     // 資格情報(ADR-0005)
     nr::GETPPID, "getppid", 0 => |p, a| Action::Return(p.ppid as u64);
     nr::GETUID, "getuid", 0 => |p, a| Action::Return(p.cred.uid as u64);
     nr::GETEUID, "geteuid", 0 => |p, a| Action::Return(p.cred.euid as u64);
     nr::GETGID, "getgid", 0 => |p, a| Action::Return(p.cred.gid as u64);
     nr::GETEGID, "getegid", 0 => |p, a| Action::Return(p.cred.egid as u64);
-    nr::GETTID, "gettid", 0 => |p, a| Action::Return(1);
+    nr::GETTID, "gettid", 0 => |p, a| Action::Return(p.pid as u64); // スレッドはまだないので、プロセスの番号
     nr::SYSINFO, "sysinfo", 1 => |p, a| result(misc::sysinfo(p, a[0]));
     nr::SOCKET, "socket", 3 => |p, a| result(net::socket(p, a[0], a[1], a[2]));
     nr::SOCKETPAIR, "socketpair", 4 => |p, a| result(net::socketpair(p, a[0], a[1], a[2], a[3]));

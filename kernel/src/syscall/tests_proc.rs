@@ -43,6 +43,19 @@ fn fork_shares_open_files() {
 }
 
 #[test]
+fn getpid_and_gettid_return_the_process_number() {
+    // 以前は決め打ちで 1 を返していた(シェルの $$ がいつも 1 になった)
+    let (mut p, _) = process();
+    p.pid = 42;
+    assert_eq!(call(&mut p, nr::GETPID, [0; 6]), 42);
+    assert_eq!(call(&mut p, nr::GETTID, [0; 6]), 42);
+    assert_eq!(
+        call(&mut p, nr::SET_TID_ADDRESS, [SCRATCH, 0, 0, 0, 0, 0]),
+        42
+    );
+}
+
+#[test]
 fn getppid_returns_the_parent() {
     let (mut p, _) = process();
     p.ppid = 7;
