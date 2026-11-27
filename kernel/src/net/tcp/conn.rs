@@ -37,6 +37,17 @@ pub struct Endpoint {
 pub const OUR_MSS: u16 = 1460;
 /// 相手が MSS を言わなかったときの大きさ(RFC 9293 の 3.7.1)
 pub const DEFAULT_MSS: u16 = 536;
+/// 再送の待ち時間:最初・下限・上限(ナノ秒。RFC 6298 は下限 1 秒だが、Linux と同じく 200ms)
+pub const INITIAL_RTO: u64 = 1_000_000_000;
+pub const MIN_RTO: u64 = 200_000_000;
+pub const MAX_RTO: u64 = 60_000_000_000;
+/// TIME-WAIT で待つ時間(2MSL。Linux と同じ 60 秒)
+pub const TIME_WAIT: u64 = 60_000_000_000;
+/// 時計の細かさ(RFC 6298 の G)
+const GRANULARITY: u64 = 1_000_000;
+/// 時間切れで送り直す回数の上限(SYN は 5 回、つながったあとは 8 回。Linux は 6 回と 15 回)
+const SYN_RETRIES: u32 = 5;
+const DATA_RETRIES: u32 = 8;
 
 pub struct Conn {
     pub state: State,
@@ -70,6 +81,21 @@ pub struct Conn {
     /// ACK を送る必要がある(データや FIN を受け取った、おかしなものが届いた)
     ack_pending: bool,
     error: Option<Errno>,
+    /// 送ったことのある、いちばん先の番号(これより手前を送るのは再送)
+    snd_max: Seq,
+    /// 往復時間の推定(RFC 6298 の SRTT と RTTVAR)と、再送の待ち時間
+    srtt: Option<u64>,
+    rttvar: u64,
+    rto: u64,
+    /// 測っている最中のセグメント:(その終わりの番号, 送った時刻)。1 度に 1 つだけ測る
+    timing: Option<(Seq, u64)>,
+    /// 再送タイマー(ウィンドウ 0 の問い合わせにも使う)の時刻と、続けて時間切れになった回数
+    rto_at: Option<u64>,
+    retries: u32,
+    /// 次の dispatch で、ウィンドウが 0 でも 1 バイトだけ送る(問い合わせ)
+    probe: bool,
+    /// TIME-WAIT が終わる時刻
+    time_wait_until: Option<u64>,
 }
 
 impl Conn {
@@ -94,6 +120,15 @@ impl Conn {
             adv_wnd: 0,
             ack_pending: false,
             error: None,
+            snd_max: iss,
+            srtt: None,
+            rttvar: 0,
+            rto: INITIAL_RTO,
+            timing: None,
+            rto_at: None,
+            retries: 0,
+            probe: false,
+            time_wait_until: None,
         }
     }
 
@@ -117,12 +152,18 @@ impl Conn {
     }
 
     /// 届いたセグメントを処理する(RFC 9293 の 3.10.7 を短くしたもの)
-    pub fn on_segment(&mut self, seg: &Segment) {
+    pub fn on_segment(&mut self, seg: &Segment, now: u64) {
         match self.state {
-            State::Closed => return,
-            State::SynSent => return self.on_segment_syn_sent(seg),
-            _ => {}
+            State::Closed => {}
+            State::SynSent => self.on_segment_syn_sent(seg, now),
+            _ => self.on_segment_synchronized(seg, now),
         }
+        if self.state == State::TimeWait && self.time_wait_until.is_none() {
+            self.time_wait_until = Some(now + TIME_WAIT);
+        }
+    }
+
+    fn on_segment_synchronized(&mut self, seg: &Segment, now: u64) {
         let seq = Seq(seg.seq);
         // 1. RST:番号が窓の中のものだけ信じる(なりすましの RST で切られないように)
         if seg.has(RST) {
@@ -132,8 +173,12 @@ impl Conn {
             }
             return;
         }
-        // 2. 同期したあとの SYN(相手の再送):ACK を送り直す
+        // 2. 同期したあとの SYN(相手の再送):こちらの答えが届いていない。
+        //    SYN-RECEIVED なら SYN-ACK を、つながったあとなら ACK を送り直す
         if seg.has(SYN) {
+            if self.state == State::SynReceived {
+                self.snd_nxt = self.iss;
+            }
             self.ack_pending = true;
             return;
         }
@@ -157,7 +202,7 @@ impl Conn {
             payload = &payload[skip.min(payload.len())..];
         }
         // 4. ACK を見る
-        if !self.on_ack(Seq(seg.ack), seg.window) {
+        if !self.on_ack(Seq(seg.ack), seg.window, now) {
             return;
         }
         // 5. データ
@@ -191,7 +236,7 @@ impl Conn {
     }
 
     /// SYN-SENT のとき:相手の SYN(と、こちらの SYN への ACK)を待っている
-    fn on_segment_syn_sent(&mut self, seg: &Segment) {
+    fn on_segment_syn_sent(&mut self, seg: &Segment, now: u64) {
         let ack = Seq(seg.ack);
         let ack_ok = seg.has(ACK) && self.iss < ack && ack <= self.snd_nxt;
         if seg.has(ACK) && !ack_ok {
@@ -211,7 +256,7 @@ impl Conn {
         self.synchronize(seg);
         self.ack_pending = true;
         if ack_ok {
-            self.snd_una = ack;
+            self.acked(ack, now);
             self.state = State::Established;
         } else {
             // 同時オープン:SYN どうしがすれ違った。SYN を SYN-ACK にして送り直す
@@ -221,7 +266,7 @@ impl Conn {
     }
 
     /// ACK の番号を見て、確認された分を送るバッファから捨てる。続きを処理してよければ true
-    fn on_ack(&mut self, ack: Seq, window: u16) -> bool {
+    fn on_ack(&mut self, ack: Seq, window: u16, now: u64) -> bool {
         if self.state == State::SynReceived {
             if !(self.snd_una < ack && ack <= self.snd_nxt) {
                 return false;
@@ -239,7 +284,7 @@ impl Conn {
                 self.send_buf.drain(..n);
                 self.buf_seq = self.buf_seq + n as u32;
             }
-            self.snd_una = ack;
+            self.acked(ack, now);
         }
         if self.snd_una == ack {
             self.snd_wnd = window as u32;
@@ -255,13 +300,114 @@ impl Conn {
         true
     }
 
+    /// 新しい ACK が来た:往復時間を測り、再送タイマーを掛け直す
+    fn acked(&mut self, ack: Seq, now: u64) {
+        self.snd_una = ack;
+        self.retries = 0;
+        if let Some((end, sent)) = self.timing
+            && end <= ack
+        {
+            self.timing = None;
+            self.sample_rtt(now - sent);
+        }
+        // まだ確認されていないものが残っていれば、そこから測り直す
+        self.rto_at = (self.snd_una < self.snd_nxt).then_some(now + self.rto);
+    }
+
+    /// 往復時間を 1 つ測った(RFC 6298 の 2)
+    fn sample_rtt(&mut self, r: u64) {
+        match self.srtt {
+            None => {
+                self.srtt = Some(r);
+                self.rttvar = r / 2;
+            }
+            Some(srtt) => {
+                // RTTVAR = 3/4 RTTVAR + 1/4 |SRTT - R|、SRTT = 7/8 SRTT + 1/8 R
+                self.rttvar = (3 * self.rttvar + srtt.abs_diff(r)) / 4;
+                self.srtt = Some((7 * srtt + r) / 8);
+            }
+        }
+        let rto = self.srtt.unwrap() + GRANULARITY.max(4 * self.rttvar);
+        self.rto = rto.clamp(MIN_RTO, MAX_RTO);
+    }
+
+    /// 再送タイマーが切れた
+    fn on_timeout(&mut self) {
+        self.rto_at = None;
+        self.retries += 1;
+        let limit = match self.state {
+            State::SynSent | State::SynReceived => SYN_RETRIES,
+            _ => DATA_RETRIES,
+        };
+        if self.retries > limit {
+            self.state = State::Closed;
+            self.error = Some(Errno::ETIMEDOUT);
+            return;
+        }
+        // 待ち時間を倍にする(ネットワークが混んでいるかもしれないので、間をあける)
+        self.rto = (self.rto * 2).min(MAX_RTO);
+        // Karn:再送したものへの ACK は、最初のものへの答えか再送への答えかわからないので、測らない
+        self.timing = None;
+        if self.snd_una < self.snd_nxt {
+            // 確認されていない最初から送り直す(go-back-N)
+            self.snd_nxt = self.snd_una;
+        } else {
+            // 送ったものは全部確認されているのに、窓が 0 で止まっている:1 バイトで問い合わせる
+            self.probe = true;
+        }
+    }
+
     /// こちらの FIN が確認された(FIN の番号は、データの最後の次)
     fn fin_acked(&self) -> bool {
         self.fin_queued && self.send_buf.is_empty() && self.snd_una == self.buf_seq + 1
     }
 
     /// いま送るべきセグメント(TCP のバイト列)を全部取り出す
-    pub fn dispatch(&mut self) -> Vec<Vec<u8>> {
+    pub fn dispatch(&mut self, now: u64) -> Vec<Vec<u8>> {
+        if self.time_wait_until.is_some_and(|t| now >= t) {
+            self.state = State::Closed;
+        }
+        if self.rto_at.is_some_and(|t| now >= t) && self.state != State::Closed {
+            self.on_timeout();
+        }
+        let out = self.output();
+        self.after_output(now);
+        out
+    }
+
+    /// 送ったあと:測るセグメントを選び、再送タイマー(か、窓が 0 のときの問い合わせのタイマー)を掛ける
+    fn after_output(&mut self, now: u64) {
+        if self.state == State::Closed {
+            self.rto_at = None;
+            self.time_wait_until = None;
+            return;
+        }
+        if self.snd_nxt > self.snd_max {
+            // 新しい番号まで送った(再送ではない)。1 度に 1 つだけ往復時間を測る
+            self.snd_max = self.snd_nxt;
+            if self.timing.is_none() {
+                self.timing = Some((self.snd_nxt, now));
+            }
+        }
+        let in_flight = self.snd_una < self.snd_nxt;
+        let blocked = self.snd_wnd == 0 && self.unsent() > 0;
+        if self.rto_at.is_none() && (in_flight || blocked) {
+            self.rto_at = Some(now + self.rto);
+        }
+    }
+
+    /// まだ一度も送っていない(snd_nxt より先の)データの量
+    fn unsent(&self) -> usize {
+        let data_end = self.buf_seq + self.send_buf.len() as u32;
+        if self.snd_nxt < data_end {
+            (data_end - self.snd_nxt) as usize
+        } else {
+            0
+        }
+    }
+
+    /// いまの変数から、送るものを組み立てる
+    fn output(&mut self) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
         if matches!(self.state, State::SynSent | State::SynReceived) && self.snd_nxt == self.iss {
             let flags = if self.state == State::SynReceived {
@@ -278,7 +424,13 @@ impl Conn {
         ) {
             loop {
                 let data_end = self.buf_seq + self.send_buf.len() as u32;
-                let wnd_end = self.snd_una + self.snd_wnd;
+                // 問い合わせのときだけ、窓が 0 でも 1 バイト送る
+                let wnd = if core::mem::take(&mut self.probe) {
+                    self.snd_wnd.max(1)
+                } else {
+                    self.snd_wnd
+                };
+                let wnd_end = self.snd_una + wnd;
                 if self.snd_nxt < data_end && self.snd_nxt < wnd_end {
                     // データ:相手のウィンドウと MSS の小さいほうまで
                     let off = (self.snd_nxt - self.buf_seq) as usize;
@@ -372,9 +524,22 @@ impl Conn {
         self.fin_queued = true;
     }
 
-    /// RST で終わったときの理由(ECONNREFUSED / ECONNRESET)
+    /// RST で終わったときの理由(ECONNREFUSED / ECONNRESET)、再送をあきらめたとき(ETIMEDOUT)
     pub fn error(&self) -> Option<Errno> {
         self.error
+    }
+
+    /// 次にタイマーで `dispatch` を呼んでほしい時刻(ナノ秒)。タイマーがなければ None
+    pub fn poll_at(&self) -> Option<u64> {
+        match (self.rto_at, self.time_wait_until) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// いまの再送の待ち時間(ナノ秒)
+    pub fn rto(&self) -> u64 {
+        self.rto
     }
 }
 
@@ -393,9 +558,9 @@ mod tests {
     };
     const CAP: usize = 4096;
 
-    /// from が送ったものを to のほうで読む(線の上で見えるもの)
+    /// from が送ったもの(線の上で見えるもの)。時刻は 0
     fn sent(from: &mut Conn) -> Vec<Vec<u8>> {
-        from.dispatch()
+        from.dispatch(0)
     }
 
     fn parse<'a>(from: &Conn, bytes: &'a [u8]) -> Segment<'a> {
@@ -403,17 +568,21 @@ mod tests {
     }
 
     /// from が送るものを全部 to に渡す。渡した数を返す
-    fn deliver(from: &mut Conn, to: &mut Conn) -> usize {
-        let out = sent(from);
+    fn deliver_at(from: &mut Conn, to: &mut Conn, now: u64) -> usize {
+        let out = from.dispatch(now);
         for bytes in &out {
-            to.on_segment(&parse(from, bytes));
+            to.on_segment(&parse(from, bytes), now);
         }
         out.len()
     }
 
     /// 送るものがなくなるまで、2 つのあいだでセグメントを渡し合う
     fn exchange(a: &mut Conn, b: &mut Conn) {
-        while deliver(a, b) + deliver(b, a) > 0 {}
+        exchange_at(a, b, 0)
+    }
+
+    fn exchange_at(a: &mut Conn, b: &mut Conn, now: u64) {
+        while deliver_at(a, b, now) + deliver_at(b, a, now) > 0 {}
     }
 
     /// 3 ウェイハンドシェイクを済ませた 2 つ
@@ -445,12 +614,12 @@ mod tests {
         );
         assert_eq!(syn_ack.mss, Some(OUR_MSS));
 
-        client.on_segment(&syn_ack);
+        client.on_segment(&syn_ack, 0);
         assert_eq!(client.state, State::Established);
         let out = sent(&mut client);
         let ack = parse(&client, &out[0]);
         assert_eq!((ack.flags, ack.seq, ack.ack), (ACK, 1001, 5001));
-        server.on_segment(&ack);
+        server.on_segment(&ack, 0);
         assert_eq!(server.state, State::Established);
         // 送るものがなければ、何も出ない
         assert!(sent(&mut client).is_empty() && sent(&mut server).is_empty());
@@ -485,7 +654,7 @@ mod tests {
             .collect();
         assert_eq!(lens, [1460, 1460, 80]);
         for b in &out {
-            server.on_segment(&parse(&client, b));
+            server.on_segment(&parse(&client, b), 0);
         }
         assert_eq!(server.readable(), 3000);
     }
@@ -532,7 +701,7 @@ mod tests {
         let last = parse(&client, out.last().unwrap());
         assert!(last.has(FIN));
         assert_eq!(last.payload, b"bye");
-        server.on_segment(&last);
+        server.on_segment(&last, 0);
         assert_eq!(server.state, State::CloseWait);
         assert!(!server.is_eof(), "まだ読んでいないデータがある");
         let mut buf = [0; 8];
@@ -540,7 +709,7 @@ mod tests {
         assert!(server.is_eof());
 
         for b in sent(&mut server) {
-            client.on_segment(&parse(&server, &b));
+            client.on_segment(&parse(&server, &b), 0);
         }
         assert_eq!(client.state, State::FinWait2);
         server.close();
@@ -558,8 +727,8 @@ mod tests {
         server.close();
         let from_client = sent(&mut client);
         let from_server = sent(&mut server);
-        client.on_segment(&parse(&server, &from_server[0]));
-        server.on_segment(&parse(&client, &from_client[0]));
+        client.on_segment(&parse(&server, &from_server[0]), 0);
+        server.on_segment(&parse(&client, &from_client[0]), 0);
         assert_eq!(client.state, State::Closing);
         assert_eq!(server.state, State::Closing);
         exchange(&mut client, &mut server);
@@ -581,7 +750,7 @@ mod tests {
             mss: None,
             payload: &[],
         };
-        client.on_segment(&rst);
+        client.on_segment(&rst, 0);
         assert_eq!(client.state, State::Closed);
         assert_eq!(client.error(), Some(Errno::ECONNREFUSED));
     }
@@ -599,10 +768,10 @@ mod tests {
             mss: None,
             payload: &[],
         };
-        client.on_segment(&rst);
+        client.on_segment(&rst, 0);
         assert_eq!(client.state, State::Established);
         rst.seq = 5001;
-        client.on_segment(&rst);
+        client.on_segment(&rst, 0);
         assert_eq!(client.state, State::Closed);
         assert_eq!(client.error(), Some(Errno::ECONNRESET));
     }
@@ -619,7 +788,7 @@ mod tests {
             payload: &seg.payload[5..],
             ..seg.clone()
         };
-        server.on_segment(&later);
+        server.on_segment(&later, 0);
         assert_eq!(server.readable(), 0);
         let dup = sent(&mut server);
         let ack = parse(&server, &dup[0]);
@@ -629,14 +798,14 @@ mod tests {
             payload: &seg.payload[..5],
             ..seg.clone()
         };
-        server.on_segment(&first);
+        server.on_segment(&first, 0);
         // 全体が再送されて届く:重なっている前半は捨て、後半だけ足す
-        server.on_segment(&seg);
+        server.on_segment(&seg, 0);
         let mut buf = [0; 32];
         let n = server.recv(&mut buf);
         assert_eq!(&buf[..n], b"hello world");
         // 同じものがもう一度届いても、増えない
-        server.on_segment(&seg);
+        server.on_segment(&seg, 0);
         assert_eq!(server.readable(), 0);
     }
 
@@ -654,10 +823,173 @@ mod tests {
             mss: None,
             payload: &[],
         };
-        server.on_segment(&bogus);
+        server.on_segment(&bogus, 0);
         // まだ確認されていないので、送る
         exchange(&mut client, &mut server);
         let mut buf = [0; 8];
         assert_eq!(client.recv(&mut buf), 3);
+    }
+
+    const MS: u64 = 1_000_000;
+    const SEC: u64 = 1_000 * MS;
+
+    #[test]
+    fn a_lost_segment_is_sent_again_after_the_rto() {
+        let (mut client, mut server) = established();
+        // ハンドシェイクで往復時間を測っている(時刻 0 で往復したので、下限の 200ms)
+        let rto = client.rto();
+        assert_eq!(rto, MIN_RTO);
+        client.send(b"lost");
+        let first = client.dispatch(0); // 線の上で失われる
+        assert_eq!(client.poll_at(), Some(rto));
+        assert!(client.dispatch(rto - 1).is_empty(), "まだ時間前");
+        let again = client.dispatch(rto);
+        assert_eq!(again, first, "同じものを送り直す");
+        server.on_segment(&parse(&client, &again[0]), rto);
+        deliver_at(&mut server, &mut client, rto);
+        assert_eq!(server.readable(), 4);
+        // 全部確認されたら、タイマーは止まる
+        assert_eq!(client.poll_at(), None);
+    }
+
+    #[test]
+    fn the_rto_doubles_each_time_and_gives_up_with_etimedout() {
+        let mut client = Conn::connect(CLIENT, SERVER, 1000, CAP);
+        let mut at = 0;
+        let mut sent_at = Vec::new();
+        while client.state != State::Closed {
+            let out = client.dispatch(at);
+            if !out.is_empty() {
+                assert!(parse(&client, &out[0]).has(SYN));
+                sent_at.push(at / SEC);
+            }
+            match client.poll_at() {
+                Some(t) => at = t,
+                None => break,
+            }
+        }
+        // 1, 2, 4, 8, 16 秒と間を倍にして、SYN を 6 回送る。最後の待ちが切れたらあきらめる
+        assert_eq!(sent_at, [0, 1, 3, 7, 15, 31]);
+        assert_eq!(client.state, State::Closed);
+        assert_eq!(client.error(), Some(Errno::ETIMEDOUT));
+        assert_eq!(at / SEC, 63);
+    }
+
+    #[test]
+    fn round_trip_times_set_the_rto() {
+        let (mut client, mut server) = established();
+        // 往復 300ms の線で何度もやりとりすると、RTO は 300ms 近くに落ち着く(ばらつきがないので)
+        let mut now = 0;
+        for _ in 0..60 {
+            client.send(b"ping");
+            let out = client.dispatch(now);
+            server.on_segment(&parse(&client, &out[0]), now + 150 * MS);
+            let ack = server.dispatch(now + 150 * MS);
+            client.on_segment(&parse(&server, &ack[0]), now + 300 * MS);
+            now += SEC;
+        }
+        let rto = client.rto();
+        assert!((300 * MS..400 * MS).contains(&rto), "rto = {rto}");
+        // とても速い線でも、下限より短くはしない
+        for _ in 0..50 {
+            client.send(b"ping");
+            let out = client.dispatch(now);
+            server.on_segment(&parse(&client, &out[0]), now);
+            let ack = server.dispatch(now);
+            client.on_segment(&parse(&server, &ack[0]), now + MS);
+            now += SEC;
+        }
+        assert_eq!(client.rto(), MIN_RTO);
+    }
+
+    #[test]
+    fn acks_for_retransmitted_segments_are_not_timed() {
+        // Karn のアルゴリズム:再送したものへの ACK は、どちらへの答えかわからないので測らない
+        let (mut client, mut server) = established();
+        let rto = client.rto();
+        client.send(b"x");
+        client.dispatch(0); // 失われる
+        let again = client.dispatch(rto);
+        server.on_segment(&parse(&client, &again[0]), rto);
+        let ack = server.dispatch(rto);
+        client.on_segment(&parse(&server, &ack[0]), rto + MS);
+        // 測っていれば、送り直してから 1ms で答えが来たので、待ち時間が縮む。倍にしたまま
+        assert_eq!(client.rto(), 2 * rto);
+    }
+
+    #[test]
+    fn a_lost_fin_is_sent_again() {
+        let (mut client, mut server) = established();
+        client.close();
+        let fin = client.dispatch(0);
+        assert!(parse(&client, &fin[0]).has(FIN));
+        let again = client.dispatch(INITIAL_RTO);
+        assert_eq!(again, fin);
+        server.on_segment(&parse(&client, &again[0]), INITIAL_RTO);
+        exchange_at(&mut client, &mut server, INITIAL_RTO);
+        assert_eq!(client.state, State::FinWait2);
+    }
+
+    #[test]
+    fn a_lost_syn_ack_is_sent_again() {
+        let mut client = Conn::connect(CLIENT, SERVER, 1000, CAP);
+        let syn = client.dispatch(0);
+        let mut server = Conn::accept(SERVER, CLIENT, &parse(&client, &syn[0]), 5000, CAP);
+        let syn_ack = server.dispatch(0); // 失われる
+        // クライアントも SYN を送り直す。サーバーはそれに ACK だけでなく、SYN-ACK を送り直す
+        let syn_again = client.dispatch(INITIAL_RTO);
+        assert_eq!(syn_again, syn);
+        server.on_segment(&parse(&client, &syn_again[0]), INITIAL_RTO);
+        let again = server.dispatch(INITIAL_RTO);
+        assert_eq!(again, syn_ack);
+        client.on_segment(&parse(&server, &again[0]), INITIAL_RTO);
+        exchange_at(&mut client, &mut server, INITIAL_RTO);
+        assert_eq!(
+            (client.state, server.state),
+            (State::Established, State::Established)
+        );
+    }
+
+    #[test]
+    fn a_zero_window_is_probed_when_the_window_update_is_lost() {
+        let mut client = Conn::connect(CLIENT, SERVER, 1000, CAP);
+        let syn = client.dispatch(0);
+        let mut server = Conn::accept(SERVER, CLIENT, &parse(&client, &syn[0]), 5000, 100);
+        exchange(&mut client, &mut server);
+        client.send(&[9; 300]);
+        exchange(&mut client, &mut server);
+        assert_eq!(server.readable(), 100); // 窓は 0 になった
+        let mut buf = [0; 100];
+        server.recv(&mut buf);
+        server.dispatch(0); // 「開いた」の ACK が失われる
+        // クライアントは、しばらくして 1 バイトだけ送って様子を見る
+        let at = client.poll_at().expect("persist timer");
+        let probe = client.dispatch(at);
+        assert_eq!(parse(&client, &probe[0]).payload.len(), 1);
+        server.on_segment(&parse(&client, &probe[0]), at);
+        exchange_at(&mut client, &mut server, at);
+        assert_eq!(server.readable(), 100);
+    }
+
+    #[test]
+    fn time_wait_ends_after_two_msl() {
+        let (mut client, mut server) = established();
+        client.close();
+        exchange_at(&mut client, &mut server, 0);
+        server.close();
+        exchange_at(&mut client, &mut server, 0);
+        assert_eq!(client.state, State::TimeWait);
+        assert_eq!(client.poll_at(), Some(TIME_WAIT));
+        client.dispatch(TIME_WAIT - 1);
+        assert_eq!(client.state, State::TimeWait);
+        client.dispatch(TIME_WAIT);
+        assert_eq!(client.state, State::Closed);
+        assert_eq!(client.poll_at(), None);
+    }
+
+    #[test]
+    fn an_idle_connection_has_no_timer() {
+        let (client, server) = established();
+        assert_eq!((client.poll_at(), server.poll_at()), (None, None));
     }
 }

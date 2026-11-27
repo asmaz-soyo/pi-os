@@ -49,6 +49,7 @@ pub enum Errno {
     ECONNRESET = 104,
     EISCONN = 106,
     ENOTCONN = 107,
+    ETIMEDOUT = 110,
     ECONNREFUSED = 111,
 }
 
@@ -107,6 +108,7 @@ pub fn name(errno: i32) -> Option<&'static str> {
         104 => "ECONNRESET",
         106 => "EISCONN",
         107 => "ENOTCONN",
+        110 => "ETIMEDOUT",
         111 => "ECONNREFUSED",
         _ => return None,
     })
