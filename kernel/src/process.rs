@@ -69,6 +69,10 @@ pub struct Process {
     pub vfs: Arc<Vfs>,
     /// 誰として動いているか(ADR-0005)
     pub cred: Credentials,
+    /// シグナルのハンドラの設定(スレッドで共有する。CLONE_SIGHAND)
+    pub sig_actions: Arc<SpinLock<crate::signal::Actions>>,
+    /// マスクしているシグナル(スレッドごと)
+    pub sig_blocked: u64,
     /// リアルタイム優先度(0 = 通常 SCHED_OTHER、1〜99 = SCHED_FIFO)
     pub rt_priority: u8,
     /// 作るときに消す権限のビット(umask)
@@ -98,6 +102,8 @@ impl Process {
             cwd: String::from("/"),
             vfs,
             cred: Credentials::root(),
+            sig_actions: Arc::new(SpinLock::new(crate::signal::Actions::default())),
+            sig_blocked: 0,
             rt_priority: 0,
             umask: 0o022,
         }
@@ -118,6 +124,8 @@ impl Process {
             fds: self.fds.share(),
             cwd: self.cwd.clone(),
             vfs: self.vfs.clone(),
+            sig_actions: self.sig_actions.clone(),
+            sig_blocked: self.sig_blocked,
             cred: self.cred.clone(),
             rt_priority: self.rt_priority,
             umask: self.umask,
@@ -140,6 +148,8 @@ impl Process {
             fds: self.fds.clone(),
             cwd: self.cwd.clone(),
             vfs: self.vfs.clone(),
+            sig_actions: Arc::new(SpinLock::new(self.sig_actions.lock().clone())),
+            sig_blocked: self.sig_blocked,
             cred: self.cred.clone(),
             rt_priority: self.rt_priority,
             umask: self.umask,
@@ -159,9 +169,9 @@ pub struct ProcessTable {
     /// 動いているスレッドの (親, 名前, スレッドのグループ)。システムコールで取り出されている間も
     /// 引ける(/proc 用、グループのスレッドを探すため)
     info: SpinLock<BTreeMap<Pid, (Pid, String, Pid)>>,
-    /// 保留中のシグナル(今は強制終了だけ。ユーザーに戻る直前に処理する)。システムコールの途中で
-    /// 表から取り出されているスレッドにも付けられるように、表とは別に持つ
-    kills: SpinLock<BTreeMap<Pid, i32>>,
+    /// 保留中のシグナル(スレッドごとのビットの集まり。ユーザーに戻る直前に配る)。
+    /// システムコールの途中で表から取り出されているスレッドにも送れるように、表とは別に持つ
+    signals: SpinLock<BTreeMap<Pid, u64>>,
     /// 終わったプロセス:番号 → (親の番号, 終わり方)
     zombies: SpinLock<BTreeMap<Pid, (Pid, ExitStatus)>>,
 }
@@ -171,7 +181,7 @@ impl ProcessTable {
         Self {
             live: SpinLock::new(BTreeMap::new()),
             info: SpinLock::new(BTreeMap::new()),
-            kills: SpinLock::new(BTreeMap::new()),
+            signals: SpinLock::new(BTreeMap::new()),
             zombies: SpinLock::new(BTreeMap::new()),
         }
     }
@@ -202,17 +212,50 @@ impl ProcessTable {
             .collect()
     }
 
-    /// 強制終了の印を付ける(次にユーザーに戻るときに終わる)
-    pub fn kill(&self, pid: Pid, sig: i32) {
-        self.kills.lock().insert(pid, sig);
+    /// スレッド `tid` にシグナルを送る(保留にして、眠っていれば起こす)
+    pub fn send(&self, tid: Pid, sig: u32) {
+        *self.signals.lock().entry(tid).or_default() |= crate::signal::bit(sig);
+        crate::sched::wake(tid);
+        crate::wait::POLL_WQ.wake_all();
     }
 
-    pub fn take_kill(&self, pid: Pid) -> Option<i32> {
-        self.kills.lock().remove(&pid)
+    /// プロセス(スレッドのグループ `tgid`)に送る。受け取るのは最初のスレッド(いなければほかの
+    /// スレッド)。`sig` が 0 なら、いるかを確かめるだけ。いなければ ESRCH
+    pub fn send_group(&self, tgid: Pid, sig: u32) -> Result<(), crate::Errno> {
+        let threads = self.threads_of(tgid);
+        let target = if threads.contains(&tgid) {
+            tgid
+        } else {
+            *threads.first().ok_or(crate::Errno::ESRCH)?
+        };
+        if sig != 0 {
+            self.send(target, sig);
+        }
+        Ok(())
     }
 
-    pub fn is_killed(&self, pid: Pid) -> bool {
-        self.kills.lock().contains_key(&pid)
+    /// スレッド `tid` のグループ
+    pub fn group_of(&self, tid: Pid) -> Option<Pid> {
+        self.info.lock().get(&tid).map(|(_, _, g)| *g)
+    }
+
+    /// 保留中のシグナル(マスクされたものも)
+    pub fn pending(&self, tid: Pid) -> u64 {
+        self.signals.lock().get(&tid).copied().unwrap_or(0)
+    }
+
+    /// マスクされていない保留中のシグナルを 1 つ取り出す(いちばん小さい番号)
+    pub fn take_signal(&self, tid: Pid, blocked: u64) -> Option<u32> {
+        let mut signals = self.signals.lock();
+        let pending = signals.get_mut(&tid)?;
+        let sig = crate::signal::next(*pending, blocked)?;
+        *pending &= !crate::signal::bit(sig);
+        Some(sig)
+    }
+
+    /// マスクされていない保留中のシグナルがあるか(待っているシステムコールを中断するか)
+    pub fn has_signal(&self, tid: Pid, blocked: u64) -> bool {
+        crate::signal::next(self.pending(tid), blocked).is_some()
     }
 
     /// 名前を変える(execve のとき)
@@ -254,7 +297,7 @@ impl ProcessTable {
     /// 最初のスレッドなら終わり方を残す(親が wait4 で受け取る)。ほかのスレッドは何も残さない
     pub fn exit(&self, pid: Pid, status: ExitStatus) {
         let info = self.info.lock().remove(&pid);
-        self.kills.lock().remove(&pid);
+        self.signals.lock().remove(&pid);
         let process = self.live.lock().remove(&pid);
         // 表から取り出されたまま終わることもあるので、親は info からも引く
         let ppid = process
@@ -284,8 +327,7 @@ impl ProcessTable {
         }
         for t in self.threads_of(tgid) {
             if t != me {
-                self.kill(t, 9);
-                crate::sched::wake(t);
+                self.send(t, crate::signal::SIGKILL);
             }
         }
     }
@@ -293,6 +335,10 @@ impl ProcessTable {
     pub fn add_zombie(&self, pid: Pid, ppid: Pid, status: ExitStatus) {
         self.zombies.lock().insert(pid, (ppid, status));
         CHILD_WQ.wake_all(); // wait4 で待っている親
+        // 親に SIGCHLD(既定は無視。シェルはハンドラで受ける)
+        if ppid != 0 {
+            let _ = self.send_group(ppid, crate::signal::SIGCHLD);
+        }
     }
 
     /// 終わっていれば終わり方を返し、ゾンビを片付ける。

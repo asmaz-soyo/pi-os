@@ -240,6 +240,21 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn kill_ends_a_sleeping_process_at_once() {
+            // 30 秒眠るプロセスに SIGTERM を送ると、眠りが中断されて(EINTR)すぐ終わる
+            let script = b"/bin/busybox sleep 30 &
+                pid=$!
+                kill -0 $pid || exit 7
+                kill $pid
+                /bin/busybox sleep 1
+                test ! -e /proc/$pid";
+            let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
+            let start = kernel::time::now_ns();
+            assert_eq!(boot::run_program("/bin/busybox", &argv), Ok(0));
+            assert!(kernel::time::now_ns() - start < 10_000_000_000);
+        }
+
+        #[test_case]
         fn rust_std_threads_work() {
             assert_eq!(boot::run_program("/bin/rthreads", &[b"rthreads"]), Ok(0));
         }

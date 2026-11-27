@@ -63,9 +63,13 @@
 | 120 | `sched_getscheduler` | 1 |
 | 123 | `sched_getaffinity` | 3 |
 | 124 | `sched_yield` | 0 |
+| 129 | `kill` | 2 |
+| 130 | `tkill` | 2 |
+| 131 | `tgkill` | 3 |
 | 132 | `sigaltstack` | 2 |
 | 134 | `rt_sigaction` | 4 |
 | 135 | `rt_sigprocmask` | 4 |
+| 136 | `rt_sigpending` | 2 |
 | 160 | `uname` | 1 |
 | 166 | `umask` | 1 |
 | 167 | `prctl` | 5 |
@@ -105,4 +109,4 @@
 | 276 | `renameat2` | 5 |
 | 278 | `getrandom` | 3 |
 
-合計 99 個
+合計 103 個

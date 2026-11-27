@@ -11,6 +11,7 @@ mod mm;
 mod net;
 mod poll;
 mod proc;
+mod signal;
 mod time;
 
 use crate::process::Process;
@@ -77,8 +78,12 @@ pub mod nr {
     pub const SCHED_GETSCHEDULER: u64 = 120;
     pub const SCHED_GETAFFINITY: u64 = 123;
     pub const SCHED_YIELD: u64 = 124;
+    pub const KILL: u64 = 129;
+    pub const TKILL: u64 = 130;
+    pub const TGKILL: u64 = 131;
     pub const RT_SIGACTION: u64 = 134;
     pub const RT_SIGPROCMASK: u64 = 135;
+    pub const RT_SIGPENDING: u64 = 136;
     pub const UNAME: u64 = 160;
     pub const UMASK: u64 = 166;
     pub const PRCTL: u64 = 167;
@@ -299,10 +304,15 @@ table! {
         crate::sched::relax();
         Action::Return(0)
     };
+    nr::KILL, "kill", 2 => |p, a| result(signal::kill(p, a[0] as i64, a[1]));
+    nr::TKILL, "tkill", 2 => |p, a| result(signal::tgkill(p, None, a[0], a[1]));
+    nr::TGKILL, "tgkill", 3 => |p, a| result(signal::tgkill(p, Some(a[0]), a[1], a[2]));
     nr::SIGALTSTACK, "sigaltstack", 2 => |p, a| result(misc::sigaltstack(p, a[1]));
     // シグナルはまだ配送しないので、設定は受け付けるだけ
-    nr::RT_SIGACTION, "rt_sigaction", 4 => |p, a| Action::Return(0);
-    nr::RT_SIGPROCMASK, "rt_sigprocmask", 4 => |p, a| Action::Return(0);
+    nr::RT_SIGACTION, "rt_sigaction", 4 => |p, a| result(signal::rt_sigaction(p, a[0], a[1], a[2], a[3]));
+    nr::RT_SIGPROCMASK, "rt_sigprocmask", 4
+        => |p, a| result(signal::rt_sigprocmask(p, a[0], a[1], a[2], a[3]));
+    nr::RT_SIGPENDING, "rt_sigpending", 2 => |p, a| result(signal::rt_sigpending(p, a[0], a[1]));
     nr::UNAME, "uname", 1 => |p, a| result(misc::uname(p, a[0]));
     nr::UMASK, "umask", 1 => |p, a| {
         let old = p.umask;
@@ -423,6 +433,8 @@ mod tests_pipe;
 mod tests_proc;
 #[cfg(test)]
 mod tests_rename;
+#[cfg(test)]
+mod tests_signal;
 #[cfg(test)]
 mod tests_socket;
 #[cfg(test)]

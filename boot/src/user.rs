@@ -18,6 +18,7 @@ use kernel::fs::initramfs::Initramfs;
 use kernel::fs::vfs::{File, FileSystem, Vfs};
 use kernel::mm::user::UserMemory;
 use kernel::process::{ExitStatus, PROCESSES, Process};
+use kernel::signal::Disposition;
 use kernel::syscall::Action;
 
 /// カーネルのフレーム割り当て器(物理メモリ)。
@@ -251,8 +252,28 @@ pub(crate) fn user_synchronous(frame: &mut TrapFrame) {
 pub(crate) fn before_return_to_user() {
     let pid = kernel::sched::current();
     // 保留中のシグナル(今は「強制終了」だけ)
-    if let Some(sig) = PROCESSES.take_kill(pid) {
-        finish(ExitStatus::Signal(sig));
+    // 保留中のシグナルを配る
+    loop {
+        let Some(blocked) = PROCESSES.with(pid, |p| p.sig_blocked) else {
+            return;
+        };
+        let Some(sig) = PROCESSES.take_signal(pid, blocked) else {
+            return;
+        };
+        let disposition = PROCESSES
+            .with(pid, |p| p.sig_actions.lock().disposition(sig))
+            .expect("checked above");
+        match disposition {
+            Disposition::Terminate => {
+                // グループごと終わる(終了ステータスは 128 + 番号)
+                let tgid = PROCESSES.with(pid, |p| p.tgid).unwrap_or(pid);
+                let status = ExitStatus::Signal(sig as i32);
+                PROCESSES.exit_group(pid, tgid, status);
+                finish(status);
+            }
+            // ハンドラを呼ぶのは次の段階。それまでは無視する(シェルは SIGCHLD などにハンドラを置く)
+            Disposition::Ignore | Disposition::Handle(_) => {}
+        }
     }
 }
 
@@ -327,7 +348,7 @@ pub fn wait(pid: kernel::process::Pid) -> i32 {
 
 /// プロセスを強制終了する(次にユーザーに戻るときに、終了ステータス 128 + sig で終わる)。
 pub fn kill(pid: kernel::process::Pid, sig: i32) {
-    PROCESSES.kill(pid, sig);
+    PROCESSES.send(pid, sig as u32);
 }
 
 /// プログラム `image` を `argv` で実行し、終了ステータスを返す。

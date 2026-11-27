@@ -178,6 +178,10 @@ fn exec_inner(p: &mut Process, path: u64, argv: u64, envp: u64) -> Result<(u64, 
     )?;
     p.mem = mem;
     p.fds.close_on_exec();
+    // ハンドラは新しいプログラムにないので既定に戻す(ほかのスレッドとは、もう共有しない)
+    let mut actions = p.sig_actions.lock().clone();
+    actions.reset_for_exec();
+    p.sig_actions = alloc::sync::Arc::new(crate::sync::SpinLock::new(actions));
     p.name = String::from(path.rsplit('/').next().unwrap_or(&path));
     PROCESSES.rename(p.pid, &p.name);
     p.entry = loaded;

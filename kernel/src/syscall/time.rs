@@ -27,17 +27,23 @@ fn timespec_bytes(ns: u64) -> [u8; 16] {
     b
 }
 
-fn sleep_until(deadline: u64) {
+/// 期限まで眠る。マスクされていないシグナルが来たら EINTR(そのあと、ユーザーに戻る直前に配られる)
+fn sleep_until(p: &Process, deadline: u64) -> Result<u64, Errno> {
     // スケジューラに眠らせてもらう(待つ間、ほかのタスクが CPU を使える)。
     // 待ち行列の「起こされた」印が残っていて早く起きても、期限まで眠り直す
-    crate::sched::sleep_through(deadline);
+    while crate::time::now_ns() < deadline {
+        if crate::process::PROCESSES.has_signal(p.pid, p.sig_blocked) {
+            return Err(Errno::EINTR);
+        }
+        crate::sched::sleep_until(deadline);
+    }
+    Ok(0)
 }
 
 /// nanosleep(req, rem)
 pub fn nanosleep(p: &mut Process, req: u64) -> Result<u64, Errno> {
     let wait = read_timespec(p, req)?;
-    sleep_until(crate::time::now_ns().saturating_add(wait));
-    Ok(0)
+    sleep_until(p, crate::time::now_ns().saturating_add(wait))
 }
 
 const TIMER_ABSTIME: u64 = 1;
@@ -55,8 +61,7 @@ pub fn clock_nanosleep(p: &mut Process, clock: u64, flags: u64, req: u64) -> Res
     } else {
         crate::time::now_ns().saturating_add(t)
     };
-    sleep_until(deadline);
-    Ok(0)
+    sleep_until(p, deadline)
 }
 
 fn timerfd(p: &Process, fd: u64) -> Result<Arc<OpenFile>, Errno> {

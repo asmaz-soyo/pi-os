@@ -21,6 +21,7 @@ pub mod net;
 pub mod panic;
 pub mod process;
 pub mod sched;
+pub mod signal;
 pub mod sync;
 pub mod syscall;
 pub mod time;

@@ -100,8 +100,8 @@ fn wait(p: &mut Process, key: Key, val: u32, deadline: Option<u64>) -> Result<u6
         if !FUTEXES.lock().is_queued(key, me) {
             return Ok(0); // 起こされた
         }
-        // exit_group でほかのスレッドが終わらせようとしている
-        if PROCESSES.is_killed(me) {
+        // シグナルが来た(exit_group の SIGKILL も)
+        if PROCESSES.has_signal(me, p.sig_blocked) {
             FUTEXES.lock().remove(key, me);
             return Err(Errno::EINTR);
         }
