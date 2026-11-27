@@ -131,6 +131,10 @@ macro_rules! common_tests {
         #[test_case]
         fn heap_supports_box_vec_and_string_and_returns_memory() {
             extern crate alloc;
+            // 測るあいだは切り替わらないようにする(ロックを持つと preempt_count が 0 でなくなる)。
+            // 切り替わると、スケジューラが終わったタスクのスタックをその場で返し、空きが増えてしまう
+            let no_preempt = kernel::sync::SpinLock::new(());
+            let _guard = no_preempt.lock();
             let before = kernel::mm::HEAP.free_bytes();
             assert!(before > 0, "heap is initialized");
             {
@@ -202,12 +206,27 @@ macro_rules! common_tests {
                 }
             }
             let before = kernel::sched::task_count();
-            kernel::sched::spawn(worker, 0).unwrap();
-            kernel::sched::spawn(worker, 1).unwrap();
+            {
+                // 2 つを同時に走り出させる(ロックを持つあいだは切り替わらない)
+                let starting = kernel::sync::SpinLock::new(());
+                let _guard = starting.lock();
+                let a = kernel::sched::spawn_paused(worker, 0).unwrap();
+                let b = kernel::sched::spawn_paused(worker, 1).unwrap();
+                kernel::sched::wake(a);
+                kernel::sched::wake(b);
+            }
             while LEN.load(Ordering::SeqCst) < 6 || kernel::sched::task_count() > before {
                 kernel::sched::yield_now();
             }
-            assert_eq!(&LOG.lock()[..6], b"ABABAB");
+            // プリエンプションがあるので、きっちり ABABAB とは限らない(書いてから yield するまでの
+            // あいだに切り替わると、相手が 2 回続くことがある)。yield で順番を譲っていれば、
+            // どちらも相手が終わる前に動き出している
+            let log = *LOG.lock();
+            let log = &log[..6];
+            let first = |c| log.iter().position(|&x| x == c).unwrap();
+            let last = |c| log.iter().rposition(|&x| x == c).unwrap();
+            assert_eq!(log.iter().filter(|&&x| x == b'A').count(), 3, "{log:?}");
+            assert!(first(b'B') < last(b'A') && first(b'A') < last(b'B'), "{log:?}");
         }
 
         #[test_case]

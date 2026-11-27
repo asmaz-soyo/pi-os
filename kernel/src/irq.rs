@@ -158,8 +158,10 @@ mod tests {
     #[test]
     fn each_irq_counts_how_often_it_came_and_keeps_its_name() {
         let table = IrqTable::new();
-        table.register(3, "timer", handler_a).unwrap();
-        table.register(5, "virtio-net", handler_b).unwrap();
+        // A と B を数えるテストと並んで動くので、ここでは何もしないハンドラを使う
+        fn nothing() {}
+        table.register(3, "timer", nothing).unwrap();
+        table.register(5, "virtio-net", nothing).unwrap();
         let mut intc = FakeIntc {
             queue: std::vec![5, 3, 5],
             ..Default::default()
