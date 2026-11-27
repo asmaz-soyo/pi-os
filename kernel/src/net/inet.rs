@@ -25,6 +25,7 @@ use crate::fs::vfs::{File, FileKind, Stat};
 use crate::sync::SpinLock;
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -57,6 +58,8 @@ const LO: usize = 0;
 struct Net {
     /// 0 番がループバック
     stacks: Vec<Stack>,
+    /// インターフェースの名前(`stacks` と同じ順。0 番は `lo`)
+    names: Vec<String>,
     /// 使っているポート(TCP と UDP は別々。インターフェースをまたいで 1 つ)
     ports: BTreeSet<(Proto, u16)>,
     next_port: u16,
@@ -83,6 +86,7 @@ impl Net {
         );
         Self {
             stacks: vec![lo],
+            names: vec![String::from("lo")],
             ports: BTreeSet::new(),
             next_port: *EPHEMERAL.start(),
             closing: Vec::new(),
@@ -238,7 +242,12 @@ static NET: SpinLock<Option<Net>> = SpinLock::new(None);
 
 /// インターフェースを足す。`addr` があればそのアドレスを、`gateway` があればデフォルトルートを設定する。
 /// `addr` が None なら、アドレスなどは DHCP でもらう。返すのはインターフェースの番号
-pub fn attach(dev: Box<dyn NetDev>, addr: Option<IpCidr>, gateway: Option<Ipv4Address>) -> usize {
+pub fn attach(
+    name: &str,
+    dev: Box<dyn NetDev>,
+    addr: Option<IpCidr>,
+    gateway: Option<Ipv4Address>,
+) -> usize {
     let mut guard = NET.lock();
     let net = guard.get_or_insert_with(Net::new);
     let addrs: Vec<IpCidr> = addr.into_iter().collect();
@@ -250,6 +259,7 @@ pub fn attach(dev: Box<dyn NetDev>, addr: Option<IpCidr>, gateway: Option<Ipv4Ad
         stack.start_dhcp();
     }
     net.stacks.push(stack);
+    net.names.push(String::from(name));
     net.stacks.len() - 1
 }
 
@@ -278,6 +288,24 @@ pub fn dns_of(iface: usize) -> Vec<Ipv4Address> {
         .and_then(|n| n.stacks.get(iface))
         .map(|s| s.dns.clone())
         .unwrap_or_default()
+}
+
+/// インターフェースの名前(`lo`、`eth0`、…)
+pub fn interface_names() -> Vec<String> {
+    with_net(|n| n.names.clone())
+}
+
+/// インターフェース `name` で行き来したフレームの記録(pcap のファイルの形)
+pub fn pcap_of(name: &str) -> Option<Vec<u8>> {
+    with_net(|n| {
+        let i = n.names.iter().position(|x| x == name)?;
+        Some(n.stacks[i].capture.pcap())
+    })
+}
+
+/// poll せずに `Net` を見る(まだなければ作る)
+fn with_net<R>(f: impl FnOnce(&mut Net) -> R) -> R {
+    f(NET.lock().get_or_insert_with(Net::new))
 }
 
 /// すべてのインターフェースの DNS サーバー(重なりは1つにする)

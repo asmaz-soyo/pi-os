@@ -39,6 +39,7 @@ fn execute(step: &Step) -> Result<(), String> {
         }
         Step::GenerateDocs { path, check } => generate_docs(path, *check),
         Step::MakeDisk { path } => make_disk(path, &[]),
+        Step::DiskGet { disk, from, to } => disk_get(disk, from, to),
         Step::Compat { cases, cmd } => compat(cases, cmd),
         Step::Snapshot {
             expected,
@@ -192,13 +193,7 @@ const PERSIST_SCRIPT: &str = "seq 1 500 > /compat-persist.txt\n";
 /// Pi-OS が終わったあとのディスクの p2(ext2)を取り出し、e2fsck できれいで、
 /// `PERSIST_SCRIPT` が書いたファイルがあることを確かめる(write-back のキャッシュを、終わるときに書いたか)
 fn check_persisted() -> Result<(), String> {
-    let disk = std::fs::read(root().join(xtask::VIRT_DISK)).map_err(|e| e.to_string())?;
-    // MBR の 2 つ目のパーティション(開始位置と大きさ)
-    let entry = &disk[446 + 16..462 + 16];
-    let start = u32::from_le_bytes(entry[8..12].try_into().unwrap()) as usize * 512;
-    let len = u32::from_le_bytes(entry[12..16].try_into().unwrap()) as usize * 512;
-    let part = root().join("target/compat-p2.img");
-    std::fs::write(&part, &disk[start..start + len]).map_err(|e| e.to_string())?;
+    let part = root_partition(xtask::VIRT_DISK)?;
     let fsck = Command::new("e2fsck")
         .arg("-fn")
         .arg(&part)
@@ -219,6 +214,36 @@ fn check_persisted() -> Result<(), String> {
     if String::from_utf8_lossy(&cat.stdout) != want {
         return Err("/compat-persist.txt is missing or wrong".to_string());
     }
+    Ok(())
+}
+
+/// ディスクイメージ `disk` の 2 つ目のパーティション(ルートの ext2)を、別のファイルに取り出す
+fn root_partition(disk: &str) -> Result<std::path::PathBuf, String> {
+    let disk = std::fs::read(root().join(disk)).map_err(|e| format!("{disk}: {e}"))?;
+    // MBR の 2 つ目のパーティション(開始位置と大きさ)
+    let entry = &disk[446 + 16..462 + 16];
+    let start = u32::from_le_bytes(entry[8..12].try_into().unwrap()) as usize * 512;
+    let len = u32::from_le_bytes(entry[12..16].try_into().unwrap()) as usize * 512;
+    let part = root().join("target/virt-p2.img");
+    std::fs::write(&part, &disk[start..start + len]).map_err(|e| e.to_string())?;
+    Ok(part)
+}
+
+/// ディスクのルートの ext2 から `from` を取り出して、ホストの `to` に書く(debugfs の dump)
+fn disk_get(disk: &str, from: &str, to: &str) -> Result<(), String> {
+    let part = root_partition(disk)?;
+    let out = Command::new("debugfs")
+        .args(["-R", &format!("dump {from} {to}")])
+        .arg(&part)
+        .output()
+        .map_err(|e| format!("debugfs (e2fsprogs) is needed: {e}"))?;
+    // debugfs は見つからなくても 0 で終わるので、エラーの文字列で見分ける
+    let err = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() || err.contains("File not found") {
+        return Err(format!("{from}: {}", err.trim()));
+    }
+    let size = std::fs::metadata(to).map_err(|e| e.to_string())?.len();
+    println!("{to}: {size} bytes");
     Ok(())
 }
 

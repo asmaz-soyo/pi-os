@@ -118,6 +118,7 @@ fn link_up() {
             rx: ab,
         };
         crate::net::inet::attach(
+            "eth-test",
             std::boxed::Box::new(mine),
             Some(IpCidr::new(IpAddress::v4(10, 0, 5, 1), 24)),
             None,

@@ -58,6 +58,9 @@ cargo xtask test --bsp qemu-virt   # QEMU の中で動くカーネル内テス�
 cargo xtask test --snapshot        # UART 出力のスナップショット
 cargo xtask docs                   # 自動生成のドキュメントを更新
 cargo xtask ci                     # 上のすべて(push の前に必ず通す)
+cargo xtask disk-get /a target/a   # QEMU virt のディスクのルートからファイルを取り出す
 ```
+
+パケットを見るには、Pi-OS の中で `cp /proc/pios/net/eth0.pcap /eth0.pcap` としてから終わり、`cargo xtask disk-get /eth0.pcap target/eth0.pcap` で取り出して Wireshark か `tcpdump -nr` で開く(`docs/notes/p2-68-pcap.md`)。
 
 実機用のイメージは `cargo xtask build` で `target/hw/kernel8.img` にできる(セミホスティングを外したビルド。終わると「system halted」と出して止まる)。

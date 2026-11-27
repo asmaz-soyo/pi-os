@@ -391,3 +391,21 @@ fn compat_output_is_split_into_cases() {
         vec![(String::from("hello\n"), Some(3)), (String::new(), Some(0)),]
     );
 }
+
+#[test]
+fn disk_get_copies_a_file_out_of_the_virt_disk() {
+    let task = parse(&["disk-get", "/eth0.pcap", "target/eth0.pcap"]).unwrap();
+    assert_eq!(
+        task,
+        Task::DiskGet {
+            from: "/eth0.pcap".to_string(),
+            to: "target/eth0.pcap".to_string(),
+        }
+    );
+    // QEMU を終えたあとのディスクの ext2(ルート)から取り出す
+    assert_eq!(
+        displays(&plan(task)),
+        ["copy /eth0.pcap from target/virt-disk.img to target/eth0.pcap"]
+    );
+    assert!(parse(&["disk-get", "/eth0.pcap"]).is_err());
+}

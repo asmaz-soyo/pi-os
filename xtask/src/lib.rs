@@ -28,11 +28,12 @@ pub const TARGET_ONLY_CRATES: &[&str] =
     &["userland", "boot", "ktest", "bsp-qemu-virt", "bsp-raspi3"];
 
 pub const USAGE: &str = "usage: cargo xtask <build | run [--bsp <bsp> | --trace syscall] | \
-                         test [--bsp <bsp> | --snapshot] | docs [--check] | ci>\n  \
+                         test [--bsp <bsp> | --snapshot] | docs [--check] | ci | \
+                         disk-get <path in Pi-OS> <path on host>>\n  \
                          bsp: qemu-virt, raspi3";
 
 /// xtask のサブコマンド。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Task {
     Build,
     /// QEMU で起動する。`trace` ならシステムコールを表示する
@@ -46,6 +47,11 @@ pub enum Task {
         check: bool,
     },
     Ci,
+    /// QEMU virt のディスクのルート(ext2)から、ファイルを 1 つホストに写す
+    DiskGet {
+        from: String,
+        to: String,
+    },
 }
 
 /// どの層のテストを実行するか。
@@ -202,6 +208,10 @@ pub fn parse(args: &[&str]) -> Result<Task, String> {
         ["test", "--snapshot"] => Ok(Task::Test(TestKind::Snapshot)),
         ["test", "--compat"] => Ok(Task::Test(TestKind::Compat)),
         ["ci"] => Ok(Task::Ci),
+        ["disk-get", from, to] => Ok(Task::DiskGet {
+            from: from.to_string(),
+            to: to.to_string(),
+        }),
         _ => Err(USAGE.to_string()),
     }
 }
@@ -286,6 +296,12 @@ pub enum Step {
         cases: Vec<(String, Vec<String>)>,
         cmd: Cmd,
     },
+    /// ディスクイメージ `disk` のルートの ext2 から、`from` を `to` に写す
+    DiskGet {
+        disk: String,
+        from: String,
+        to: String,
+    },
 }
 
 impl fmt::Display for Step {
@@ -293,6 +309,7 @@ impl fmt::Display for Step {
         match self {
             Self::Run(cmd) => write!(f, "{cmd}"),
             Self::MakeDisk { path } => write!(f, "make disk {path}"),
+            Self::DiskGet { disk, from, to } => write!(f, "copy {from} from {disk} to {to}"),
             Self::GenerateDocs { path, check } => {
                 write!(f, "generate {path}{}", if *check { " (check)" } else { "" })
             }
@@ -329,6 +346,11 @@ pub fn plan(task: Task) -> Vec<Step> {
             steps
         }
         Task::Docs { check } => vec![docs_step(check)],
+        Task::DiskGet { from, to } => vec![Step::DiskGet {
+            disk: VIRT_DISK.to_string(),
+            from,
+            to,
+        }],
         Task::Test(TestKind::Host) => vec![Step::Run(host_tests())],
         Task::Test(TestKind::Qemu(bsp)) => qemu_test_steps(bsp),
         Task::Test(TestKind::Snapshot) => snapshot_tests(),

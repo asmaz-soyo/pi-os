@@ -198,7 +198,7 @@ fn bring_up_network() -> bool {
     let Some(dev) = kernel::net::dev::take("eth0") else {
         return false;
     };
-    kernel::net::inet::attach(dev, None, None);
+    kernel::net::inet::attach("eth0", dev, None, None);
     true
 }
 

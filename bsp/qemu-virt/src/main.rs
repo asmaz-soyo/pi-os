@@ -189,6 +189,19 @@ mod tests {
     }
 
     #[test_case]
+    fn eth0_frames_are_recorded_as_pcap_starting_with_dhcp_discover() {
+        assert!(wait_for_dhcp().is_some());
+        // ファイルを 16 進の文字列にして、`at 位置 長さ` でバイトを取り出す(1 バイト = 2 文字)。
+        // 頭の 24 バイトのあとが最初のフレーム(16 バイトの記録の頭 + Ethernet のフレーム)。
+        // 宛先はブロードキャスト、種類は IPv4、UDP の 68 番から 67 番(DHCP の DISCOVER)
+        let script = b"h=$(hexdump -v -e '1/1 \"%02x\"' /proc/pios/net/eth0.pcap); at() { echo ${h:$(($1 * 2)):$(($2 * 2))}; }; \
+            test $(at 0 4) = d4c3b2a1 && test $(at 20 1) = 01 && test $(at 40 6) = ffffffffffff && \
+            test $(at 52 2) = 0800 && test $(at 74 4) = 00440043";
+        let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
+        assert_eq!(boot::run_program("/bin/busybox", &argv), Ok(0));
+    }
+
+    #[test_case]
     fn virtio_disk_is_readable_and_writable_through_dev_vda() {
         assert_eq!(boot::run_program("/bin/diskread", &[b"diskread"]), Ok(0));
     }

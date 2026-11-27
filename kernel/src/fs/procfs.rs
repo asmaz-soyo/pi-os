@@ -159,13 +159,20 @@ impl FileSystem for Procfs {
     fn lookup(&self, path: &str) -> Result<Arc<dyn File>, Errno> {
         let path = resolve_self(path);
         match path.as_str() {
-            "/" | "/pios" => Ok(Arc::new(ProcDir)),
+            "/" | "/pios" | "/pios/net" => Ok(Arc::new(ProcDir)),
             "/uptime" => file(uptime()),
             "/meminfo" => file(meminfo()),
             "/mounts" => file(mounts()),
             "/version" => file(String::from("Pi-OS version 0.1.0 (aarch64)\n")),
             "/pios/unimplemented" => file(unimplemented()),
             "/pios/resolv.conf" => file(resolv_conf(&crate::net::inet::dns_servers())),
+            other if other.starts_with("/pios/net/") => {
+                let name = other["/pios/net/".len()..]
+                    .strip_suffix(".pcap")
+                    .ok_or(Errno::ENOENT)?;
+                let pcap = crate::net::inet::pcap_of(name).ok_or(Errno::ENOENT)?;
+                Ok(Arc::new(ProcFile { data: pcap }))
+            }
             other => {
                 let mut parts = other.trim_start_matches('/').splitn(2, '/');
                 let pid: crate::process::Pid = parts
@@ -197,7 +204,12 @@ impl FileSystem for Procfs {
                 }
                 Ok(entries)
             }
+            "/pios/net" => Ok(crate::net::inet::interface_names()
+                .iter()
+                .map(|n| entry(&format!("{n}.pcap"), FileKind::Regular))
+                .collect()),
             "/pios" => Ok(alloc::vec![
+                entry("net", FileKind::Directory),
                 entry("resolv.conf", FileKind::Regular),
                 entry("unimplemented", FileKind::Regular),
             ]),
@@ -303,6 +315,26 @@ mod tests {
                 .iter()
                 .any(|e| e.name == "resolv.conf")
         );
+    }
+
+    #[test]
+    fn each_interface_has_a_pcap_file() {
+        let fs = Procfs::new();
+        let names: std::vec::Vec<String> = fs
+            .readdir("/pios/net")
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(names.iter().any(|n| n == "lo.pcap"), "{names:?}");
+        assert!(fs.readdir("/pios").unwrap().iter().any(|e| e.name == "net"));
+        let f = fs.lookup("/pios/net/lo.pcap").unwrap();
+        let mut head = [0u8; 24];
+        assert_eq!(f.read(0, &mut head).unwrap(), 24);
+        // pcap の目印と、リンクの種類(ループバックは 101 = IP のパケットそのもの)
+        assert_eq!(&head[..4], &0xa1b2_c3d4u32.to_le_bytes());
+        assert_eq!(&head[20..24], &101u32.to_le_bytes());
+        assert_eq!(fs.lookup("/pios/net/nope.pcap").err(), Some(Errno::ENOENT));
     }
 
     #[test]
