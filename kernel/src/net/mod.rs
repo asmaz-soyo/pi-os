@@ -15,6 +15,7 @@ pub mod dev;
 pub mod inet;
 pub mod loopback;
 pub mod stack;
+pub mod tcp;
 pub mod unix;
 
 use crate::Errno;
