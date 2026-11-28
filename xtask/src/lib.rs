@@ -162,11 +162,12 @@ impl Bsp {
     /// cargo の runner として使う QEMU のコマンド。
     ///
     /// cargo はこの後ろにテストの ELF のパスを付け足して実行するので、`-kernel` で終える。
-    /// テストが終了しないままになったときのために `timeout` で包む。
+    /// テストが終了しないままになったときのために `timeout` で包む。全部のテストで、WSL2 の上の QEMU では
+    /// 50 秒ほどかかる(60 秒にしていたら足りないことがあった)ので、3 倍ほどの余裕をみて 180 秒にする。
     /// cargo はテストを BSP のクレートのディレクトリで動かすので、ルートは `../../`。
     pub fn qemu_runner(self) -> String {
         format!(
-            "timeout 60 qemu-system-aarch64 {} -kernel",
+            "timeout 180 qemu-system-aarch64 {} -kernel",
             self.qemu_args("../../").join(" ")
         )
     }

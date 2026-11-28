@@ -534,15 +534,21 @@ macro_rules! common_tests {
         #[test_case]
         fn programs_use_the_own_tcp_after_switching_the_default() {
             // 既定の TCP を自作に切り替えると、ふつうのプログラム(protocol 0 で作る nc)も自作の TCP を使う。
-            // 待ち受けが /proc/pios/tcp(自作の TCP の一覧)に出ることで確かめる
+            // 待ち受けが /proc/pios/tcp(自作の TCP の一覧)に出ることで確かめる。
+            // サーバーの nc は標準入力(/dev/null)の EOF ですぐに FIN を送り、クライアントの nc は FIN を
+            // 読むと標準入力が残っていても終わる。`echo … | nc` だと echo が書く前に FIN が届くことがあり、
+            // 何も送らずに 0 で終わる(Linux でも同じ)。送る中身はファイルから読ませ、最初の poll で
+            // 必ず読めるようにする。受け取りはサーバーの nc の終わりを wait で待つ
             let script = b"echo own > /proc/sys/net/pios/tcp
                 test \"$(cat /proc/sys/net/pios/tcp)\" = own || exit 7
+                echo hello over own tcp > /tmp/msg_own
                 nc -l -p 7310 < /dev/null > /tmp/got_own &
+                server=$!
                 ok=no
                 for i in $(seq 200); do grep -q '^0.0.0.0:7310 .*LISTEN' /proc/pios/tcp && ok=yes && break; done
                 test $ok = yes || exit 9
-                echo hello over own tcp | nc 127.0.0.1 7310 || exit 8
-                for i in $(seq 1000); do test -s /tmp/got_own && break; done
+                nc 127.0.0.1 7310 < /tmp/msg_own || exit 8
+                wait $server || exit 10
                 test \"$(cat /tmp/got_own)\" = \"hello over own tcp\"";
             let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
             let r = boot::run_program("/bin/busybox", &argv);
@@ -579,10 +585,11 @@ macro_rules! common_tests {
 
         #[test_case]
         fn a_realtime_task_wakes_on_time_despite_a_busy_task() {
-            // 5ms 周期で起き、遅れの最大がティックの半分(5ms)以内(低い優先度のタスクが CPU を
-            // 回していても)。目覚ましがなく、ティック(10ms)でしか起こせなければ、遅れはほぼ 10ms になる。
-            // 手元の QEMU ではふつう 0.3ms 以下だが、GitHub Actions の共有マシンでは 1.7ms になったことがある
-            let argv: [&[u8]; 3] = [b"jitter", b"rt", b"5000"];
+            // 5ms 周期で起き、遅れの平均が 3ms 以内(低い優先度のタスクが CPU を回していても)。
+            // 目覚ましがなく、ティック(10ms)でしか起こせなければ、平均は 5ms を超える(測ると 6.7ms)。
+            // 最大で判定しないのは、ホストの都合で一度だけ大きく遅れることがあるため(WSL2 の QEMU では、
+            // 目覚ましが働いていても平均 0.8〜1.6ms、最大は 1.7〜9.7ms だった)
+            let argv: [&[u8]; 3] = [b"jitter", b"rt", b"3000"];
             assert_eq!(boot::run_program("/bin/jitter", &argv), Ok(0));
         }
 

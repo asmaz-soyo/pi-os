@@ -49,7 +49,7 @@ fn host_test() -> String {
 
 fn qemu_test(krate: &str, args: &str) -> String {
     format!(
-        "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUNNER='timeout 60 qemu-system-aarch64 {args} -kernel' \
+        "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUNNER='timeout 180 qemu-system-aarch64 {args} -kernel' \
          cargo test -p {krate} --target aarch64-unknown-none"
     )
 }

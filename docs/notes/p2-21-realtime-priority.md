@@ -7,7 +7,7 @@
 - 目覚まし:`Clock::request_wake_ns`。眠っているタスクの中で一番早い起床時刻に、ティックとは別のタイマ割り込みを予約する。割り込みで `request_resched` され、ユーザーに戻るときに起きたタスクへ切り替わる
 - システムコール:`sched_setscheduler`(119)、`sched_getscheduler`(120)、`sched_yield`(124)。SCHED_OTHER(優先度 0)と SCHED_FIFO(1〜99)。リアルタイムにできるのは root だけ(EPERM)。対象は自分だけ(他は ESRCH)。fork した子は優先度を受け継ぐ
 - `/bin/jitter`(C):cyclictest の小さな版。低い優先度で CPU を回し続ける子を作り、自分は SCHED_FIFO 80 で 5ms ごとに起きて、予定の時刻からの遅れを 100 回測る
-- QEMU の結合テスト `a_realtime_task_wakes_on_time_despite_a_busy_task`:遅れの最大が 5ms(ティックの半分)以内。最初は 1ms にしたが、GitHub Actions の共有マシンでは QEMU の時間が揺れて 1.7ms になり落ちた
+- QEMU の結合テスト `a_realtime_task_wakes_on_time_despite_a_busy_task`:遅れの最大が 5ms(ティックの半分)以内。最初は 1ms にしたが、GitHub Actions の共有マシンでは QEMU の時間が揺れて 1.7ms になり落ちた。のちに平均 3ms 以内に変えた(WSL2 の QEMU では最大が 9.7ms まで揺れたため。p2-90)
 
 ```
 jitter (SCHED_FIFO): min 56 us, avg 67 us, max 257 us     ← 目覚ましあり

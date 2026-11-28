@@ -31,7 +31,7 @@ test result: ok
 ```
 cargo xtask test --bsp qemu-virt
   └─ cargo test -p bsp-qemu-virt --target aarch64-unknown-none
-       │  環境変数 CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUNNER = "timeout 60 qemu-system-aarch64 ... -kernel"
+       │  環境変数 CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUNNER = "timeout 180 qemu-system-aarch64 ... -kernel"
        ├─ #[test_case] を集めたテスト用の ELF をビルド(custom_test_frameworks)
        └─ runner の後ろに ELF のパスを付けて実行 → QEMU がカーネルとして起動
             _start → kernel_main → test_main → ktest::runner → semihosting::exit(0 or 1)
@@ -39,7 +39,7 @@ cargo xtask test --bsp qemu-virt
 
 - cargo は `--target` 向けのテストバイナリを、ホストで直接実行できない。そこで「runner」という仕組みで、実行するコマンドを差し替える。runner はターゲットごとの設定なので、BSP ごとに QEMU の引数を変えられるよう、xtask が環境変数で渡している
 - `custom_test_frameworks`(nightly 機能)で、`std` のテストハーネスの代わりに自前の `ktest::runner` を使う。`#[test_case]` を付けた関数がスライスで渡される
-- `timeout 60` は、カーネルが固まって QEMU が終わらないときの保険
+- `timeout 180` は、カーネルが固まって QEMU が終わらないときの保険(最初は 60 秒だったが、テストが増えて WSL2 の QEMU では足りなくなった。p2-90)
 
 ### `_start` がやること(`boot.rs`)
 
