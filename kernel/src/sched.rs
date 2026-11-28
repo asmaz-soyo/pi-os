@@ -26,6 +26,11 @@ impl RunQueue {
         }
     }
 
+    /// 合わせて `total` 個のタスクが並べるように、場所を取っておく
+    pub fn reserve(&mut self, total: usize) {
+        self.queue.reserve(total.saturating_sub(self.queue.len()));
+    }
+
     pub fn push(&mut self, tid: Tid) {
         if !self.queue.contains(&tid) {
             self.queue.push_back(tid);
@@ -102,9 +107,6 @@ pub struct Platform {
     /// カーネルスタックを確保する(戻り値は (一番下, 一番上))
     pub alloc_stack: fn() -> Option<(usize, usize)>,
     pub free_stack: fn(bottom: usize),
-    /// 割り込みを禁止し、前の状態を返す / 戻す
-    pub irq_save: fn() -> bool,
-    pub irq_restore: fn(bool),
     /// 次のタスクに切り替える直前に呼ばれる(ユーザー空間の切り替えなど)
     pub before_switch: fn(next: Tid),
 }
@@ -142,6 +144,7 @@ struct Scheduler {
 }
 
 static PLATFORM: spin::Once<Platform> = spin::Once::new();
+/// 割り込みの中(`wake`)からも取るので、割り込みを止めて取る(`lock_irqsave` か、`sync::irq_save` のあと)
 static SCHED: SpinLock<Option<Scheduler>> = SpinLock::new(None);
 
 fn platform() -> &'static Platform {
@@ -164,7 +167,7 @@ pub fn init(p: Platform) {
             woken: false,
         }),
     );
-    *SCHED.lock() = Some(Scheduler {
+    *SCHED.lock_irqsave() = Some(Scheduler {
         tasks,
         rq: RunQueue::new(),
         current: 0,
@@ -175,7 +178,7 @@ pub fn init(p: Platform) {
 
 /// 今動いているタスクの番号。
 pub fn current() -> Tid {
-    SCHED.lock().as_ref().map_or(0, |s| s.current)
+    SCHED.lock_irqsave().as_ref().map_or(0, |s| s.current)
 }
 
 fn thread_exit() {
@@ -198,9 +201,8 @@ fn spawn_in(entry: fn(usize), arg: usize, run: bool) -> Option<Tid> {
     let p = platform();
     let (bottom, top) = (p.alloc_stack)()?;
     let ctx = (p.new_context)(top, entry, arg, thread_exit);
-    let flags = (p.irq_save)();
     let tid = {
-        let mut guard = SCHED.lock();
+        let mut guard = SCHED.lock_irqsave();
         let s = guard.as_mut()?;
         let tid = s.next_tid;
         s.next_tid += 1;
@@ -217,12 +219,14 @@ fn spawn_in(entry: fn(usize), arg: usize, run: bool) -> Option<Tid> {
                 woken: false,
             }),
         );
+        // 割り込みの中の wake が列を伸ばす(ヒープから確保する)ことがないよう、
+        // タスクを作るとき(割り込みの外)に、全部のタスクが並べるだけの場所を取っておく
+        s.rq.reserve(s.tasks.len());
         if run {
             s.rq.push(tid);
         }
         tid
     };
-    (p.irq_restore)(flags);
     Some(tid)
 }
 
@@ -272,7 +276,8 @@ fn schedule(new_state: State, wake_at: Option<u64>, pick: Pick) {
         "switching tasks while holding a lock"
     );
     let p = platform();
-    let flags = (p.irq_save)();
+    // 切り替えをまたいで割り込みを止めておく(戻ってきたタスクが元に戻す)
+    let flags = crate::sync::irq_save();
     let switch = loop {
         let mut guard = SCHED.lock();
         let s = guard.as_mut().expect("scheduler is initialized");
@@ -351,13 +356,13 @@ fn schedule(new_state: State, wake_at: Option<u64>, pick: Pick) {
         // SAFETY: タスクは Box に入っているので、ロックを離しても文脈の場所は動かない
         unsafe { (p.switch)(from, to) };
     }
-    (p.irq_restore)(flags);
+    crate::sync::irq_restore(flags);
 }
 
 /// 時刻 `deadline`(起動からのナノ秒)まで、今のタスクを眠らせる。
 /// スケジューラが動いていなければ、その場で待つ。
 pub fn sleep_until(deadline: u64) {
-    if PLATFORM.get().is_none() || SCHED.lock().is_none() {
+    if PLATFORM.get().is_none() || SCHED.lock_irqsave().is_none() {
         while crate::time::now_ns() < deadline {
             core::hint::spin_loop();
         }
@@ -378,11 +383,10 @@ pub fn sleep_through(deadline: u64) {
 /// 眠っているタスク `tid` を、起きる時刻の前に起こす(割り込みのハンドラから呼んでよい)。
 /// まだ眠っていなければ、次の眠りをすぐ終わらせる。ないタスクなら何もしない
 pub fn wake(tid: Tid) {
-    let Some(p) = PLATFORM.get() else {
+    if PLATFORM.get().is_none() {
         return;
-    };
-    let flags = (p.irq_save)();
-    if let Some(s) = SCHED.lock().as_mut()
+    }
+    if let Some(s) = SCHED.lock_irqsave().as_mut()
         && let Some(task) = s.tasks.get_mut(&tid)
     {
         match task.state {
@@ -395,14 +399,13 @@ pub fn wake(tid: Tid) {
             _ => task.woken = true,
         }
     }
-    (p.irq_restore)(flags);
     request_resched();
 }
 
 /// タスクの優先度を変える(0 = 通常、1〜99 = リアルタイム)。タスクがなければ false。
 pub fn set_priority(tid: Tid, priority: u8) -> bool {
     SCHED
-        .lock()
+        .lock_irqsave()
         .as_mut()
         .and_then(|s| s.tasks.get_mut(&tid))
         .map(|t| t.priority = priority)
@@ -411,7 +414,7 @@ pub fn set_priority(tid: Tid, priority: u8) -> bool {
 
 pub fn priority(tid: Tid) -> u8 {
     SCHED
-        .lock()
+        .lock_irqsave()
         .as_ref()
         .and_then(|s| s.tasks.get(&tid))
         .map_or(0, |t| t.priority)
@@ -424,13 +427,13 @@ pub fn yield_now() {
 
 /// スケジューラが動いているか(動いていなければ、待つときは回って待つ)
 pub fn running() -> bool {
-    PLATFORM.get().is_some() && SCHED.lock().is_some()
+    PLATFORM.get().is_some() && SCHED.lock_irqsave().is_some()
 }
 
 /// タスクが眠っている(Blocked)か。/proc/<pid>/status の State に使う
 pub fn is_sleeping(tid: Tid) -> bool {
     SCHED
-        .lock()
+        .lock_irqsave()
         .as_ref()
         .and_then(|s| s.tasks.get(&tid))
         .is_some_and(|t| t.state == State::Blocked)
@@ -466,14 +469,14 @@ pub fn take_resched() -> bool {
 /// タスクが生きているか(終わっていないか)。
 pub fn is_alive(tid: Tid) -> bool {
     SCHED
-        .lock()
+        .lock_irqsave()
         .as_ref()
         .is_some_and(|s| s.tasks.get(&tid).is_some_and(|t| t.state != State::Dead))
 }
 
 /// 動いているタスクの数(テストとデバッグ用)。
 pub fn task_count() -> usize {
-    SCHED.lock().as_ref().map_or(0, |s| {
+    SCHED.lock_irqsave().as_ref().map_or(0, |s| {
         s.tasks.values().filter(|t| t.state != State::Dead).count()
     })
 }
@@ -481,6 +484,19 @@ pub fn task_count() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reserved_run_queue_does_not_grow_while_tasks_are_queued() {
+        // 割り込みの中の wake は push するので、そこで確保しないよう先に場所を取る
+        let mut rq = RunQueue::new();
+        rq.reserve(8);
+        let cap = rq.queue.capacity();
+        assert!(cap >= 8);
+        for tid in 0..8 {
+            rq.push(tid);
+        }
+        assert_eq!(rq.queue.capacity(), cap);
+    }
 
     #[test]
     fn run_queue_is_round_robin() {

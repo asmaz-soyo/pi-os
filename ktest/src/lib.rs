@@ -50,6 +50,41 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn waking_a_queue_from_an_interrupt_does_not_use_the_heap() {
+            // ヒープのロックは割り込みを許したまま取られる。割り込みの中でヒープを使うと、
+            // 持っているところへ来た割り込みが待ち続ける。デバッグのビルドでは、ロックの検査が
+            // 「割り込みの中と外の両方で取った」とパニックする
+            let q = kernel::wait::WaitQueue::new();
+            let queues = [&q];
+            let reg = kernel::wait::register(&queues);
+            let flags = kernel::sync::irq_save();
+            kernel::sync::irq_enter();
+            q.wake_all();
+            kernel::sync::irq_exit();
+            kernel::sync::irq_restore(flags);
+            drop(reg);
+            assert_eq!(q.waiting(), 0);
+        }
+
+        #[test_case]
+        fn waking_many_tasks_from_an_interrupt_does_not_grow_the_run_queue() {
+            // 実行待ちの列が割り込みの中で伸びると、ヒープから確保する
+            fn nothing(_: usize) {}
+            let tids: [_; 40] =
+                core::array::from_fn(|_| kernel::sched::spawn_paused(nothing, 0).unwrap());
+            let flags = kernel::sync::irq_save();
+            kernel::sync::irq_enter();
+            for &tid in &tids {
+                kernel::sched::wake(tid);
+            }
+            kernel::sync::irq_exit();
+            kernel::sync::irq_restore(flags);
+            while tids.iter().any(|&t| kernel::sched::is_alive(t)) {
+                kernel::sched::yield_now();
+            }
+        }
+
+        #[test_case]
         fn brk_traps_to_handler_which_can_edit_registers_and_resume() {
             use arch_aarch64::esr::ExceptionClass;
             use arch_aarch64::exception::{self, Handler};

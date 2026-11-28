@@ -69,6 +69,9 @@ pub fn write_report(
 
 /// パニックの報告を、登録された出力先に書く。`stack` はフレームレコードを読んでよい範囲。
 pub fn report(info: &core::panic::PanicInfo, regs: &Registers, stack: core::ops::Range<usize>) {
+    // 報告は割り込みの中でもコンソールに書く。ロックの検査がもう一度パニックすると、
+    // 最初の原因が隠れるので、ここで検査をやめる
+    crate::sync::stop_lock_checks();
     // パニックした処理が出力のロックを持ったままかもしれないので、外してから書く
     // SAFETY: パニックした処理はこの先実行されない
     unsafe { crate::console::break_lock() };

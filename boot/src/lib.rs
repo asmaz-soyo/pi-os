@@ -227,13 +227,16 @@ fn net_poller(_: usize) {
 }
 
 fn init_scheduler() {
+    kernel::sync::set_irq_ops(kernel::sync::IrqOps {
+        save: arch_aarch64::cpu::irq_save,
+        restore: arch_aarch64::cpu::irq_restore,
+        enabled: arch_aarch64::cpu::irqs_enabled,
+    });
     kernel::sched::init(kernel::sched::Platform {
         switch: switch_context,
         new_context,
         alloc_stack: alloc_kernel_stack,
         free_stack: free_kernel_stack,
-        irq_save: arch_aarch64::cpu::irq_save,
-        irq_restore: arch_aarch64::cpu::irq_restore,
         before_switch: user::switch_address_space,
     });
 }

@@ -29,8 +29,10 @@ impl IrqTable {
         }
     }
 
+    // 表のロックは dispatch(割り込みの中)も取るので、ほかの使い手は割り込みを止めて取る
+
     pub fn register(&self, irq: u32, name: &'static str, handler: Handler) -> Result<(), Errno> {
-        let mut handlers = self.handlers.lock();
+        let mut handlers = self.handlers.lock_irqsave();
         let slot = handlers.get_mut(irq as usize).ok_or(Errno::EINVAL)?;
         *slot = Some((handler, name));
         Ok(())
@@ -38,7 +40,7 @@ impl IrqTable {
 
     /// 登録した割り込みの(番号, 名前, 届いた回数)。番号の順
     pub fn counts(&self) -> Vec<(u32, &'static str, usize)> {
-        let handlers = self.handlers.lock();
+        let handlers = self.handlers.lock_irqsave();
         handlers
             .iter()
             .enumerate()
@@ -51,6 +53,12 @@ impl IrqTable {
 
     /// 保留中の割り込みがなくなるまで、ハンドラを呼んで終了を伝える。
     pub fn dispatch(&self, intc: &mut impl IrqController) {
+        crate::sync::irq_enter();
+        self.dispatch_pending(intc);
+        crate::sync::irq_exit();
+    }
+
+    fn dispatch_pending(&self, intc: &mut impl IrqController) {
         while let Some(irq) = intc.pending() {
             // ハンドラを呼ぶ前にロックを離す(ハンドラが登録を変えても固まらない)
             let handler = self.handlers.lock().get(irq as usize).copied().flatten();
@@ -169,5 +177,43 @@ mod tests {
         table.dispatch(&mut intc);
         // 登録したものだけ、番号の順に(番号, 名前, 回数)
         assert_eq!(table.counts(), [(3, "timer", 1), (5, "virtio-net", 2)]);
+    }
+
+    std::thread_local! {
+        static SAW_IN_IRQ: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    }
+
+    #[test]
+    fn handlers_run_inside_interrupt_context() {
+        fn record() {
+            SAW_IN_IRQ.with(|c| c.set(crate::sync::in_irq()));
+        }
+        let table = IrqTable::new();
+        table.register(9, "rec", record).unwrap();
+        let mut intc = FakeIntc {
+            queue: std::vec![9],
+            ..Default::default()
+        };
+        table.dispatch(&mut intc);
+        assert!(SAW_IN_IRQ.with(|c| c.get()));
+        assert!(!crate::sync::in_irq());
+    }
+
+    #[test]
+    fn the_table_can_be_read_and_changed_with_interrupts_enabled() {
+        // dispatch は割り込みの中で動く。ほかの使い手(/proc/interrupts、登録)が割り込みを
+        // 許したまま表のロックを取ると、そこへ来た割り込みの dispatch が待ち続けて固まる
+        fn nothing() {}
+        let table = IrqTable::new();
+        table.register(4, "x", nothing).unwrap();
+        let mut intc = FakeIntc {
+            queue: std::vec![4],
+            ..Default::default()
+        };
+        table.dispatch(&mut intc);
+        crate::sync::test_irq::set_enabled(true);
+        assert_eq!(table.counts(), [(4, "x", 1)]);
+        table.register(6, "y", nothing).unwrap();
+        crate::sync::test_irq::set_enabled(false);
     }
 }

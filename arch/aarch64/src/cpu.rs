@@ -130,6 +130,14 @@ pub fn irq_save() -> bool {
     daif & (1 << 7) == 0
 }
 
+/// 今、IRQ が許可されているか(PSTATE.I が 0 か)。
+pub fn irqs_enabled() -> bool {
+    let daif: u64;
+    // SAFETY: DAIF を読むだけ
+    unsafe { asm!("mrs {}, daif", out(reg) daif, options(nomem, nostack)) };
+    daif & (1 << 7) == 0
+}
+
 /// `irq_save` の前の状態に戻す。
 pub fn irq_restore(enabled: bool) {
     if enabled {

@@ -22,6 +22,7 @@ use crate::sync::SpinLock;
 use alloc::vec::Vec;
 
 pub struct WaitQueue {
+    /// 割り込みのハンドラも起こす(wake_all)ので、いつも割り込みを止めて取る
     waiters: SpinLock<Vec<Tid>>,
 }
 
@@ -41,10 +42,11 @@ impl WaitQueue {
         }
     }
 
-    /// 待っているタスクを全部起こす(割り込みのハンドラから呼んでよい)
+    /// 待っているタスクを全部起こす(割り込みのハンドラから呼んでよい)。
+    /// 割り込みの中ではヒープを使えないので、列を取り出して捨てず(解放になる)、
+    /// 中身だけ空にして入れ物は残す。ロックの順番は「待ち行列 → スケジューラ」
     pub fn wake_all(&self) {
-        let waiters = core::mem::take(&mut *self.waiters.lock());
-        for tid in waiters {
+        for tid in self.waiters.lock_irqsave().drain(..) {
             sched::wake(tid);
         }
         if !core::ptr::eq(self, &POLL_WQ) {
@@ -53,19 +55,19 @@ impl WaitQueue {
     }
 
     fn add(&self, tid: Tid) {
-        let mut w = self.waiters.lock();
+        let mut w = self.waiters.lock_irqsave();
         if !w.contains(&tid) {
             w.push(tid);
         }
     }
 
     fn remove(&self, tid: Tid) {
-        self.waiters.lock().retain(|&t| t != tid);
+        self.waiters.lock_irqsave().retain(|&t| t != tid);
     }
 
     /// 待っているタスクの数
     pub fn waiting(&self) -> usize {
-        self.waiters.lock().len()
+        self.waiters.lock_irqsave().len()
     }
 }
 
@@ -169,6 +171,20 @@ pub fn earliest(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_queue_can_be_woken_from_an_interrupt_and_from_a_thread() {
+        // 端末や GPIO の割り込みは wake_all を呼び、カーネルのスレッド(ネットワークの poll)は
+        // 割り込みを許したまま呼ぶ。どれも POLL_WQ を起こすので、待ち行列のロックは割り込みを止めて取る
+        let q = WaitQueue::new();
+        crate::sync::irq_enter();
+        q.wake_all();
+        crate::sync::irq_exit();
+        crate::sync::test_irq::set_enabled(true);
+        q.wake_all();
+        assert_eq!(q.waiting(), 0);
+        crate::sync::test_irq::set_enabled(false);
+    }
 
     #[test]
     fn a_satisfied_condition_returns_at_once_and_leaves_no_waiter() {
