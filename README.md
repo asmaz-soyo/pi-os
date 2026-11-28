@@ -39,11 +39,27 @@ init: /bin/sh exited with status 0
 
 フェーズ1のゴール(自作 OS 上で `qjs hello.js` が「Hello from JS」を出す)は、QEMU で達成した。
 
+フェーズ2で、ほかにもこんなことができるようになった(QEMU virt。くわしくは `docs/notes/p2-*.md`):
+
+| 見られるもの | 試し方 |
+| --- | --- |
+| BusyBox のシェルとコマンド、MicroPython、CPython | `busybox sh`、`micropython`、`python3` |
+| ネットワーク(DHCP、DNS) | `resolve example.com`、`cat /etc/resolv.conf` |
+| 2 つの TCP(smoltcp と自作)を比べる | `tcpbulk 7000 262144 0` と `tcpbulk 7000 262144 253`、`cat /proc/pios/tcp` |
+| 割り込みの回数 | `cat /proc/interrupts` |
+| 眠っているか(待ち行列) | `cat /proc/<番号>/status` の `State` |
+| スレッド(pthread、Rust) | `threads`、`rthreads` |
+| シグナル | `signals`、`sigwait`、`sleep 30 & kill $!`、`sleep 1 & wait $!` |
+
 ## 必要なもの
 
-- Ubuntu、`qemu-system-arm`(`qemu-system-aarch64`)、`gdb-multiarch`
+- Ubuntu、`qemu-system-arm`(`qemu-system-aarch64`)、`qemu-user`(互換テストの `qemu-aarch64`)、`gdb-multiarch`、`dosfstools`(FAT32 のイメージを作る `mkfs.fat`)
 - rustup(`rust-toolchain.toml` の nightly とターゲットが自動で入る)
 - zig 0.17(ユーザープログラムと QuickJS を aarch64-linux-musl の静的リンクでビルドする)
+
+```bash
+sudo apt-get install -y qemu-system-arm qemu-user gdb-multiarch dosfstools
+```
 
 QuickJS のソースは `user/third_party/quickjs/`(MIT ライセンス)にある。
 

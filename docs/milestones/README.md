@@ -32,3 +32,11 @@
 | ブロック層(virtio-blk、MBR)、ext2 の読み書き、procfs | 完了 | `p2-ext2` |
 | FAT32 の読み込み(`/boot`) | 完了 | `p2-fat32` |
 | ルート(`/`)を ext2 に(QEMU virt。ディスクのない実機は initramfs) | 完了 | `p2-rootfs` |
+| ネットワーク:AF_UNIX、virtio-net と smoltcp(ADR-0006)、複数のインターフェース、DHCP、DNS(musl)、pcap、受信の割り込み | 完了 | (未) |
+| カーネルのプリエンプション(ADR-0007) | 完了 | (未) |
+| 自作の TCP(smoltcp の横に置き、ソケットごとに選ぶ。ADR-0008) | 完了 | (未) |
+| virtio-mmio の共通化 | 完了 | (未) |
+| 待ち行列(眠って待つ。パイプ、ソケット、poll / epoll、wait4、端末の受信割り込み) | 完了(raspi3 の端末は 10ms ごとの確認、virtio-blk はポーリングのまま) | (未) |
+| スレッドと futex(musl の pthread、Rust の std::thread。ADR-0009) | 完了(CLONE_FS はまだ) | (未) |
+| シグナル(ハンドラ、sigaltstack、EINTR、SA_RESTART、sigsuspend、SIGPIPE) | 完了 | (未) |
+| OS 上の uv | 未(uv のバイナリのダウンロードの許可待ち) | — |
