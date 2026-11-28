@@ -156,6 +156,8 @@ fn exec_inner(p: &mut Process, path: u64, argv: u64, envp: u64) -> Result<(u64, 
         }
     }
     let image = image.ok_or(Errno::ELOOP)?;
+    // /proc/self/exe が指す先:実行するファイルの実体(リンクをたどり切ったパス)
+    let exe = p.vfs.resolve_path(&path, true)?;
     // 新しいユーザー空間に読み込む。失敗しても今のプロセスはそのまま
     let mut mem = UserMemory::new((p.new_space)()?, p.mem.phys());
     let argv_refs: Vec<&[u8]> = argv.iter().map(Vec::as_slice).collect();
@@ -184,6 +186,8 @@ fn exec_inner(p: &mut Process, path: u64, argv: u64, envp: u64) -> Result<(u64, 
     p.sig_actions = alloc::sync::Arc::new(crate::sync::SpinLock::new(actions));
     p.name = String::from(path.rsplit('/').next().unwrap_or(&path));
     PROCESSES.rename(p.pid, &p.name);
+    PROCESSES.set_exe(p.pid, &exe);
+    p.exe = exe;
     p.entry = loaded;
     p.mem.set_brk(loaded.brk);
     p.mem.set_mmap_next(MMAP_BASE);

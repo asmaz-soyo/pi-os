@@ -395,9 +395,11 @@ fn user_task_entry(arg: usize) {
 }
 
 /// プログラム `image` を `argv` で新しいプロセスとして動かし始める。
+/// `exe` は `image` のファイルの絶対パス(/proc/<pid>/exe。ファイルでなければ空)
 pub fn spawn_user(
     image: &(impl kernel::exec::Image + ?Sized),
     argv: &[&[u8]],
+    exe: &str,
 ) -> Result<kernel::process::Pid, Errno> {
     let space = Box::new(UserSpace::new()?);
     let mut mem = UserMemory::new(space, &KERNEL_PHYS);
@@ -423,6 +425,7 @@ pub fn spawn_user(
     let name = argv.first().map_or(&b""[..], |a| a);
     let name = name.rsplit(|&c| c == b'/').next().unwrap_or(name);
     process.name = alloc::string::String::from_utf8_lossy(name).into_owned();
+    process.exe = alloc::string::String::from(exe);
 
     // EL0t(SPSR.M = 0)、割り込みは許可した状態で入口から始める
     let frame = Box::new(TrapFrame {
@@ -461,7 +464,7 @@ pub fn kill(pid: kernel::process::Pid, sig: i32) {
 
 /// プログラム `image` を `argv` で実行し、終了ステータスを返す。
 pub fn run_user(image: &[u8], argv: &[&[u8]]) -> Result<i32, Errno> {
-    let pid = spawn_user(image, argv)?;
+    let pid = spawn_user(image, argv, "")?;
     Ok(wait(pid))
 }
 
@@ -563,8 +566,9 @@ pub fn spawn_program(path: &str, argv: &[&[u8]]) -> Result<kernel::process::Pid,
     let file = vfs().0.lookup(path)?;
     // init は root として動く(ADR-0005)。root でも実行ビットのないファイルは実行できない
     kernel::cred::Credentials::root().check(&file.stat(), kernel::cred::Access::EXEC)?;
+    let exe = vfs().0.resolve_path(path, true)?;
     // ファイルから少しずつ読み込む(全体をカーネルのヒープに置かない)
-    spawn_user(&*file, argv)
+    spawn_user(&*file, argv, &exe)
 }
 
 /// プログラム `path` を実行し、終了ステータスを返す。

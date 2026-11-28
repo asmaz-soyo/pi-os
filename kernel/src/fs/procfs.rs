@@ -62,6 +62,33 @@ impl File for ProcDir {
     }
 }
 
+/// 指す先をその場で決めるシンボリックリンク(`/proc/<pid>/exe`)
+struct ProcLink {
+    target: String,
+}
+
+impl File for ProcLink {
+    fn stat(&self) -> Stat {
+        Stat {
+            kind: FileKind::Symlink,
+            mode: 0o777,
+            size: self.target.len() as u64,
+            ino: 0x4_0002,
+            uid: 0,
+            gid: 0,
+            ..Default::default()
+        }
+    }
+
+    fn readlink(&self) -> Result<String, Errno> {
+        Ok(self.target.clone())
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
 fn file(text: String) -> Result<Arc<dyn File>, Errno> {
     Ok(Arc::new(ProcFile {
         data: text.into_bytes(),
@@ -277,6 +304,9 @@ impl FileSystem for Procfs {
                     Some("status") => {
                         file(status(pid, ppid, &name, crate::sched::is_sleeping(pid)))
                     }
+                    Some("exe") => Ok(Arc::new(ProcLink {
+                        target: PROCESSES.exe_of(pid).ok_or(Errno::ENOENT)?,
+                    })),
                     Some(_) => Err(Errno::ENOENT),
                 }
             }
@@ -319,7 +349,10 @@ impl FileSystem for Procfs {
                     .parse()
                     .map_err(|_| Errno::ENOTDIR)?;
                 find(pid).ok_or(Errno::ENOENT)?;
-                Ok(alloc::vec![entry("status", FileKind::Regular)])
+                Ok(alloc::vec![
+                    entry("exe", FileKind::Symlink),
+                    entry("status", FileKind::Regular),
+                ])
             }
         }
     }
@@ -380,6 +413,21 @@ mod tests {
         );
         assert_eq!(fs.lookup("/901").unwrap().stat().kind, FileKind::Directory);
         assert_eq!(fs.lookup("/99999/status").err(), Some(Errno::ENOENT));
+    }
+
+    #[test]
+    fn exe_is_a_link_to_the_running_program() {
+        // uv などは自分の場所を /proc/self/exe で知る。指す先は、リンクをたどり切った実体
+        let fs = Procfs::new();
+        PROCESSES.add_info(911, 1, "ls");
+        PROCESSES.set_exe(911, "/bin/busybox");
+        let exe = fs.lookup("/911/exe").unwrap();
+        assert_eq!(exe.stat().kind, FileKind::Symlink);
+        assert_eq!(exe.readlink().unwrap(), "/bin/busybox");
+        assert!(fs.readdir("/911").unwrap().iter().any(|e| e.name == "exe"));
+        // カーネルが直接作ったもの(実行ファイルを持たない)には、指す先がない
+        PROCESSES.add_info(912, 1, "kthread");
+        assert_eq!(fs.lookup("/912/exe").err(), Some(Errno::ENOENT));
     }
 
     #[test]

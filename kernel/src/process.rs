@@ -58,6 +58,9 @@ pub struct Process {
     pub clear_child_tid: u64,
     /// プログラムの名前(/proc/<pid>/status の Name)
     pub name: String,
+    /// 実行しているプログラムのファイル(リンクをたどり切った絶対パス。/proc/<pid>/exe)。
+    /// カーネルが直接作り、まだ execve していないものは空
+    pub exe: String,
     /// 親のプロセス(カーネルが直接動かしたものは 0)
     pub ppid: Pid,
     pub new_space: SpaceFactory,
@@ -100,6 +103,7 @@ impl Process {
             tgid: 0,
             clear_child_tid: 0,
             name: String::new(),
+            exe: String::new(),
             ppid: 0,
             new_space: no_space,
             mem,
@@ -133,6 +137,7 @@ impl Process {
             tgid: self.tgid,
             clear_child_tid: 0,
             name: self.name.clone(),
+            exe: self.exe.clone(),
             ppid: self.ppid,
             new_space: self.new_space,
             mem: self.mem.share(),
@@ -160,6 +165,7 @@ impl Process {
             tgid: 0, // 新しいグループ(番号が決まったら、それと同じにする)
             clear_child_tid: 0,
             name: self.name.clone(),
+            exe: self.exe.clone(),
             ppid: self.pid,
             new_space: self.new_space,
             mem,
@@ -186,11 +192,21 @@ pub type Pid = crate::sched::Tid;
 /// 子が終わるのを待つ(wait4)タスクの待ち行列
 pub static CHILD_WQ: crate::wait::WaitQueue = crate::wait::WaitQueue::new();
 
+/// 表から取り出されている間も引ける、スレッドの情報
+struct ThreadInfo {
+    ppid: Pid,
+    name: String,
+    /// スレッドのグループ(= プロセス)
+    tgid: Pid,
+    /// 実行しているプログラムのファイル(空ならなし)
+    exe: String,
+}
+
 pub struct ProcessTable {
     live: SpinLock<BTreeMap<Pid, Process>>,
-    /// 動いているスレッドの (親, 名前, スレッドのグループ)。システムコールで取り出されている間も
+    /// 動いているスレッドの情報。システムコールで取り出されている間も
     /// 引ける(/proc 用、グループのスレッドを探すため)
-    info: SpinLock<BTreeMap<Pid, (Pid, String, Pid)>>,
+    info: SpinLock<BTreeMap<Pid, ThreadInfo>>,
     /// 保留中のシグナル(スレッドごとのビットの集まり。ユーザーに戻る直前に配る)。
     /// システムコールの途中で表から取り出されているスレッドにも送れるように、表とは別に持つ
     signals: SpinLock<BTreeMap<Pid, u64>>,
@@ -215,17 +231,45 @@ impl ProcessTable {
         if p.tgid == 0 {
             p.tgid = pid; // グループがまだない:スレッドが 1 つのプロセス
         }
-        self.info
-            .lock()
-            .insert(pid, (p.ppid, p.name.clone(), p.tgid));
+        self.info.lock().insert(
+            pid,
+            ThreadInfo {
+                ppid: p.ppid,
+                name: p.name.clone(),
+                tgid: p.tgid,
+                exe: p.exe.clone(),
+            },
+        );
         self.masks.lock().insert(pid, p.sig_blocked);
         self.live.lock().insert(pid, p);
     }
 
     pub fn add_info(&self, pid: Pid, ppid: Pid, name: &str) {
+        self.info.lock().insert(
+            pid,
+            ThreadInfo {
+                ppid,
+                name: String::from(name),
+                tgid: pid,
+                exe: String::new(),
+            },
+        );
+    }
+
+    /// 実行しているプログラムのファイルを変える(execve のとき)
+    pub fn set_exe(&self, pid: Pid, exe: &str) {
+        if let Some(info) = self.info.lock().get_mut(&pid) {
+            info.exe = String::from(exe);
+        }
+    }
+
+    /// 実行しているプログラムのファイル(/proc/<pid>/exe)。なければ None
+    pub fn exe_of(&self, pid: Pid) -> Option<String> {
         self.info
             .lock()
-            .insert(pid, (ppid, String::from(name), pid));
+            .get(&pid)
+            .map(|i| i.exe.clone())
+            .filter(|e| !e.is_empty())
     }
 
     /// グループ `tgid` のスレッドの番号
@@ -233,7 +277,7 @@ impl ProcessTable {
         self.info
             .lock()
             .iter()
-            .filter(|(_, (_, _, g))| *g == tgid)
+            .filter(|(_, i)| i.tgid == tgid)
             .map(|(pid, _)| *pid)
             .collect()
     }
@@ -262,7 +306,7 @@ impl ProcessTable {
 
     /// スレッド `tid` のグループ
     pub fn group_of(&self, tid: Pid) -> Option<Pid> {
-        self.info.lock().get(&tid).map(|(_, _, g)| *g)
+        self.info.lock().get(&tid).map(|i| i.tgid)
     }
 
     /// 保留中のシグナル(マスクされたものも)
@@ -297,8 +341,8 @@ impl ProcessTable {
 
     /// 名前を変える(execve のとき)
     pub fn rename(&self, pid: Pid, name: &str) {
-        if let Some(entry) = self.info.lock().get_mut(&pid) {
-            entry.1 = String::from(name);
+        if let Some(info) = self.info.lock().get_mut(&pid) {
+            info.name = String::from(name);
         }
     }
 
@@ -307,7 +351,7 @@ impl ProcessTable {
         self.info
             .lock()
             .iter()
-            .map(|(pid, (ppid, name, _))| (*pid, *ppid, name.clone()))
+            .map(|(pid, i)| (*pid, i.ppid, i.name.clone()))
             .collect()
     }
 
@@ -341,12 +385,12 @@ impl ProcessTable {
         let ppid = process
             .as_ref()
             .map(|p| p.ppid)
-            .or(info.as_ref().map(|(ppid, _, _)| *ppid))
+            .or(info.as_ref().map(|i| i.ppid))
             .unwrap_or(0);
         let tgid = process
             .as_ref()
             .map(|p| p.tgid)
-            .or(info.as_ref().map(|(_, _, g)| *g))
+            .or(info.as_ref().map(|i| i.tgid))
             .unwrap_or(pid);
         drop(process);
         // exit_group で、終わり方はもう残してある
@@ -359,7 +403,7 @@ impl ProcessTable {
     /// 強制終了の印を付けて起こす(眠っていれば、目を覚まして印に気づく)。呼んだスレッドは
     /// このあと自分で `exit` する
     pub fn exit_group(&self, me: Pid, tgid: Pid, status: ExitStatus) {
-        let ppid = self.info.lock().get(&tgid).map_or(0, |(ppid, _, _)| *ppid);
+        let ppid = self.info.lock().get(&tgid).map_or(0, |i| i.ppid);
         if !self.zombies.lock().contains_key(&tgid) {
             self.add_zombie(tgid, ppid, status);
         }
@@ -410,7 +454,7 @@ impl ProcessTable {
             .lock()
             .iter()
             // 子のプロセスのスレッドも親は同じなので、グループの最初のスレッドだけを数える
-            .any(|(child, (parent, _, tgid))| *parent == ppid && tgid == child && matches(*child));
+            .any(|(child, i)| i.ppid == ppid && i.tgid == *child && matches(*child));
         // 番号を指定されたときは、スケジューラのタスクとして生きているかでも確かめる
         let alive = alive || pid.is_some_and(crate::sched::is_alive);
         if alive {

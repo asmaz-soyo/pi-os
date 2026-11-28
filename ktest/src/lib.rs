@@ -300,6 +300,18 @@ macro_rules! common_tests {
         }
 
         #[test_case]
+        fn proc_self_exe_is_the_running_program() {
+            // ls は BusyBox のアプレット(/bin/ls → /bin/busybox)なので、ls が見る自分の
+            // /proc/self/exe は /bin/busybox を指す(readlink のアプレットは入れていない)。
+            // 開くと、リンクをたどった先(BusyBox の ELF)が読める
+            let script = b"ls -l /proc/self/exe | grep -q -- '-> /bin/busybox$' || exit 3
+                grep -q ELF /proc/self/exe || exit 4
+                ls -l /proc/$$/exe | grep -q -- '-> /bin/busybox$'";
+            let argv: [&[u8]; 4] = [b"busybox", b"sh", b"-c", script];
+            assert_eq!(boot::run_program("/bin/busybox", &argv), Ok(0));
+        }
+
+        #[test_case]
         fn the_shell_can_wait_for_a_background_job() {
             // ash の wait は、SIGCHLD を待つのに sigsuspend を使う
             let script = b"/bin/busybox sleep 1 &

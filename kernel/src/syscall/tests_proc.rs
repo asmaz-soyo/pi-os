@@ -144,6 +144,29 @@ fn shebang_scripts_run_their_interpreter() {
 }
 
 #[test]
+fn execve_records_the_program_file_for_proc_self_exe() {
+    // /proc/self/exe は、実行したファイルの実体(リンクをたどり切ったパス)を指す。
+    // シバンのスクリプトなら、実行されるのはインタプリタ
+    // execve のあとはメモリが新しくなり、作業領域がなくなるので、ケースごとにプロセスを作る
+    let exe_after = |path: &[u8], setup: fn(&mut crate::process::Process)| {
+        let (mut p, _) = process();
+        setup(&mut p);
+        assert!(matches!(exec(&mut p, path, &[path]), Action::Exec { .. }));
+        p
+    };
+    assert_eq!(exe_after(b"/bin/tiny", |_| {}).exe, "/bin/tiny");
+    assert_eq!(exe_after(b"/bin/script", |_| {}).exe, "/bin/tiny");
+    let mut p = exe_after(b"link", |p| {
+        p.vfs.symlink("/bin/tiny", "/tmp/link").unwrap();
+        p.cwd = std::string::String::from("/tmp");
+    });
+    assert_eq!(p.exe, "/bin/tiny");
+    // fork とスレッドは受け継ぐ
+    assert_eq!(fork(&mut p).exe, "/bin/tiny");
+    assert_eq!(p.thread().exe, "/bin/tiny");
+}
+
+#[test]
 fn wait4_collects_a_zombie_child_with_linux_status_encoding() {
     let (mut p, _) = process();
     p.pid = 200;
