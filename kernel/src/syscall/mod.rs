@@ -362,7 +362,7 @@ table! {
     nr::MMAP, "mmap", 6 => |p, a| result(mm::mmap(p, a[0], a[1], a[2], a[3], a[4], a[5]));
     nr::MPROTECT, "mprotect", 3 => |p, a| result(mm::mprotect(p, a[0], a[1], a[2]));
     // 助言は無視してよい
-    nr::MADVISE, "madvise", 3 => |p, a| Action::Return(0);
+    nr::MADVISE, "madvise", 3 => |p, a| result(mm::madvise(p, a[0], a[1], a[2]));
     nr::ACCEPT4, "accept4", 4 => |p, a| result(net::accept4(p, a[0], a[1], a[2], a[3]));
     nr::WAIT4, "wait4", 4 => |p, a| result(proc::wait4(p, a[0] as i64, a[1], a[2]));
     nr::RENAMEAT2, "renameat2", 5

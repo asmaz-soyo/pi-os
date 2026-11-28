@@ -122,6 +122,86 @@ fn munmap_removes_pages_and_mprotect_changes_permissions() {
     assert_eq!(call(&mut p, nr::MADVISE, [a, 0x1000, 4, 0, 0, 0]), 0);
 }
 
+const MADV_DONTNEED: u64 = 4;
+const MADV_FREE: u64 = 8;
+const PROT_NONE: u64 = 0;
+
+#[test]
+fn madvise_dontneed_gives_back_zeroed_pages() {
+    // jemalloc(uv が使う)は、DONTNEED のあとのページが 0 に戻ることを当てにして使い回す
+    let (mut p, _) = process();
+    let flags = MAP_PRIVATE | MAP_ANONYMOUS;
+    let a = call(
+        &mut p,
+        nr::MMAP,
+        [0, 0x3000, PROT_READ | PROT_WRITE, flags, NO_FD, 0],
+    );
+    put(&mut p, a + 0x0ff0, b"first page");
+    put(&mut p, a + 0x1ff0, b"second page");
+    put(&mut p, a + 0x2000, b"third page");
+    // 長さはページの単位に切り上げる(0x1001 → 2 ページ)
+    assert_eq!(
+        call(&mut p, nr::MADVISE, [a, 0x1001, MADV_DONTNEED, 0, 0, 0]),
+        0
+    );
+    assert_eq!(get(&mut p, a + 0x0ff0, 10), [0; 10]);
+    assert_eq!(get(&mut p, a + 0x1ff0, 11), [0; 11]);
+    assert_eq!(get(&mut p, a + 0x2000, 10), b"third page");
+    // 捨てたあとも、同じ権限で使える
+    put(&mut p, a, b"reused");
+    assert_eq!(get(&mut p, a, 6), b"reused");
+}
+
+#[test]
+fn madvise_dontneed_checks_the_range_like_linux() {
+    let (mut p, _) = process();
+    let flags = MAP_PRIVATE | MAP_ANONYMOUS;
+    let a = call(
+        &mut p,
+        nr::MMAP,
+        [0, 0x1000, PROT_READ | PROT_WRITE, flags, NO_FD, 0],
+    );
+    put(&mut p, a, b"data");
+    // 境界にないアドレスは EINVAL
+    assert_eq!(
+        call(&mut p, nr::MADVISE, [a + 1, 0x1000, MADV_DONTNEED, 0, 0, 0]),
+        err(Errno::EINVAL)
+    );
+    // マップされていないページを含めば ENOMEM(mmap は隣を 1 ページ空けている)。
+    // Linux はマップされている部分には助言を当ててから ENOMEM を返す(madvise_walk_vmas)。
+    // qemu-user は ENOMEM にしないので、ここは互換テストでなくこのテストで確かめる
+    assert_eq!(
+        call(&mut p, nr::MADVISE, [a, 0x2000, MADV_DONTNEED, 0, 0, 0]),
+        err(Errno::ENOMEM)
+    );
+    assert_eq!(get(&mut p, a, 4), [0; 4], "the mapped part is discarded");
+    // 長さ 0 は何もせずに 0
+    assert_eq!(call(&mut p, nr::MADVISE, [a, 0, MADV_DONTNEED, 0, 0, 0]), 0);
+    // PROT_NONE で取っておいただけの場所は、捨てるものがないだけ
+    let r = call(&mut p, nr::MMAP, [0, 0x1000, PROT_NONE, flags, NO_FD, 0]);
+    assert_eq!(
+        call(&mut p, nr::MADVISE, [r, 0x1000, MADV_DONTNEED, 0, 0, 0]),
+        0
+    );
+}
+
+#[test]
+fn madvise_free_and_other_hints_keep_the_contents() {
+    // MADV_FREE は「捨ててもよい」。すぐに捨てなくてもよいので、中身を残す
+    let (mut p, _) = process();
+    let flags = MAP_PRIVATE | MAP_ANONYMOUS;
+    let a = call(
+        &mut p,
+        nr::MMAP,
+        [0, 0x1000, PROT_READ | PROT_WRITE, flags, NO_FD, 0],
+    );
+    put(&mut p, a, b"kept");
+    for advice in [0, 1, 2, 3, MADV_FREE] {
+        assert_eq!(call(&mut p, nr::MADVISE, [a, 0x1000, advice, 0, 0, 0]), 0);
+    }
+    assert_eq!(get(&mut p, a, 4), b"kept");
+}
+
 #[test]
 fn mremap_is_refused_so_libc_falls_back_to_copying() {
     let (mut p, _) = process();

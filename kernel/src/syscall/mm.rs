@@ -10,6 +10,7 @@ const PROT_WRITE: u64 = 2;
 const PROT_EXEC: u64 = 4;
 const PROT_READ: u64 = 1;
 const MAP_FIXED: u64 = 0x10;
+const MADV_DONTNEED: u64 = 4;
 const MAP_ANONYMOUS: u64 = 0x20;
 
 fn page_up(x: u64) -> u64 {
@@ -125,6 +126,18 @@ pub fn mprotect(p: &mut Process, addr: u64, len: u64, prot: u64) -> Result<u64, 
             p.mem.unmap(VirtAddr(addr), len);
             p.mem.reserve(VirtAddr(addr), len);
         }
+    }
+    Ok(0)
+}
+
+/// madvise(addr, len, advice)。MADV_DONTNEED だけが中身を変える(0 のページに戻す)。
+/// ほかの助言(MADV_FREE、WILLNEED など)は、従わなくても見え方が変わらないので何もしない
+pub fn madvise(p: &mut Process, addr: u64, len: u64, advice: u64) -> Result<u64, Errno> {
+    if !addr.is_multiple_of(PAGE_SIZE) {
+        return Err(Errno::EINVAL);
+    }
+    if advice == MADV_DONTNEED && len != 0 {
+        p.mem.discard(VirtAddr(addr), page_up(len))?;
     }
     Ok(0)
 }

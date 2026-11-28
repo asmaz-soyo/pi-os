@@ -10,7 +10,7 @@ uv 0.13.10(`user/third_party/uv/`)を、ホストの `qemu-aarch64 -strace` で 
 
 | 呼び出し | Linux での意味 | Pi-OS | すること |
 | --- | --- | --- | --- |
-| `madvise(…, MADV_DONTNEED)` | 無名のページを捨て、次に触ると 0 のページになる | 何もせず 0 を返す | **直す**。jemalloc は「0 に戻った」と当てにして、calloc などに使い回す。そのままだと、0 でないメモリが返ってまれに壊れる |
+| `madvise(…, MADV_DONTNEED)` | 無名のページを捨て、次に触ると 0 のページになる | 何もせず 0 を返す | **直した**(p2-92)。jemalloc は「0 に戻った」と当てにして、calloc などに使い回す。そのままだと、0 でないメモリが返ってまれに壊れる |
 | `madvise(…, MADV_FREE)` | 捨ててよい(すぐでなくてよい) | 何もしない | このままでよい(中身が残っても、jemalloc は 0 を当てにしない) |
 | `readlinkat("/proc/self/exe")` | 自分のプログラムの場所 | ない(ENOENT) | **足す**(uv は自分の場所を使う) |
 | `openat("/proc/sys/vm/overcommit_memory")`、`/sys/kernel/mm/transparent_hugepage/enabled` | jemalloc の設定を決める | ない | なくてよい(読めなければ既定の値) |

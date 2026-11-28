@@ -96,6 +96,11 @@ impl UserMemory {
         self.inner.lock().reserve(va, len)
     }
 
+    /// 中身を捨て、0 のページにする(madvise の MADV_DONTNEED)
+    pub fn discard(&mut self, va: VirtAddr, len: u64) -> Result<(), Errno> {
+        self.inner.lock().discard(va, len)
+    }
+
     pub fn phys(&self) -> &'static dyn PhysMemory {
         self.inner.lock().phys
     }
@@ -228,6 +233,31 @@ impl Space {
             page = page + PAGE_SIZE;
         }
         Ok(())
+    }
+
+    /// `va` から `len` バイトの中身を捨て、0 のページにする(MADV_DONTNEED)。
+    /// Linux はフレームを返して、次に触ったときに 0 のページを用意する。ここにはまだ
+    /// 「触ったときにページを用意する」仕組みがないので、フレームはそのままで中身を 0 にする
+    /// (見え方は同じ。使うメモリは減らない)。マップも予約もされていないページがあれば、
+    /// Linux と同じく、ほかのページは捨ててから ENOMEM を返す
+    pub fn discard(&mut self, va: VirtAddr, len: u64) -> Result<(), Errno> {
+        let mut hole = false;
+        let mut page = va.align_down();
+        let end = (va + len).align_up();
+        while page < end {
+            if self.pages.contains(&page.0) {
+                let (frame, _) = self.space.translate(page).ok_or(Errno::EFAULT)?;
+                // SAFETY: このアドレス空間にマップされた 4KiB のフレーム
+                unsafe {
+                    core::ptr::write_bytes(self.phys.frame_ptr(frame), 0, PAGE_SIZE as usize)
+                };
+            } else if !self.reserved.contains(&page.0) {
+                hole = true;
+            }
+            // 予約しただけのページ(PROT_NONE)には、捨てる中身がない
+            page = page + PAGE_SIZE;
+        }
+        if hole { Err(Errno::ENOMEM) } else { Ok(()) }
     }
 
     /// 同じ中身・同じ権限のユーザー空間を `space` に作る(fork 用。今はすべてのページをすぐに写す。
